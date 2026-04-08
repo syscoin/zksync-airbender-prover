@@ -255,8 +255,8 @@ impl ProofClient for SequencerProofClient {
         Ok(payloads
             .into_iter()
             .map(|payload| QueueJobStatus {
-                batch_number: payload.fri_job.batch_number,
-                vk_hash: payload.fri_job.vk_hash,
+                batch_number: payload.job.batch_number,
+                vk_hash: payload.job.vk_hash,
                 added_seconds_ago: payload.added_seconds_ago,
                 assigned_seconds_ago: payload.assigned_seconds_ago,
                 assigned_to_prover_id: payload.assigned_to_prover_id,
