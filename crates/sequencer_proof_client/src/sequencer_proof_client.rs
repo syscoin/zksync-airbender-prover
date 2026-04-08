@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use crate::metrics::Method;
 use crate::sequencer_endpoint::SequencerEndpoint;
 use crate::{
-    FailedFriProofPayload, FriJobInputs, GetSnarkProofPayload, NextFriProverJobPayload,
+    FailedFriProofPayload, FriJobInputs, GetSnarkProofPayload, JobQueueStage, QueueJobStatus,
+    JobStatusPayload, NextFriProverJobPayload,
     PeekableProofClient, ProofClient, SnarkProofInputs, SubmitFriProofPayload,
     SubmitSnarkProofPayload,
 };
@@ -220,6 +221,48 @@ impl ProofClient for SequencerProofClient {
                 url
             ))
         }
+    }
+
+    // SYSCOIN
+    async fn fri_status(&self) -> anyhow::Result<Vec<QueueJobStatus>> {
+        self.status(JobQueueStage::Fri).await
+    }
+
+    async fn status(&self, stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>> {
+        let stage_str = match stage {
+            JobQueueStage::Fri => "fri",
+            JobQueueStage::Snark => "snark",
+        };
+        let url = self.build_url(&format!("status/{stage_str}"))?;
+
+        let started_at = Instant::now();
+        let resp = self
+            .client
+            .get(url.clone())
+            .send()
+            .await
+            .context("FRI status request failed")?;
+
+        SEQUENCER_CLIENT_METRICS.time_taken[&Method::StatusQueue]
+            .observe(started_at.elapsed().as_secs_f64());
+
+        let status_code = resp.status();
+        if !status_code.is_success() {
+            return Err(anyhow!("Failed to get FRI status: status {status_code} from {url}"));
+        }
+
+        let payloads = resp.json::<Vec<JobStatusPayload>>().await?;
+        Ok(payloads
+            .into_iter()
+            .map(|payload| QueueJobStatus {
+                batch_number: payload.fri_job.batch_number,
+                vk_hash: payload.fri_job.vk_hash,
+                added_seconds_ago: payload.added_seconds_ago,
+                assigned_seconds_ago: payload.assigned_seconds_ago,
+                assigned_to_prover_id: payload.assigned_to_prover_id,
+                current_attempt: payload.current_attempt,
+            })
+            .collect())
     }
 
     async fn pick_snark_job(&self) -> anyhow::Result<Option<SnarkProofInputs>> {

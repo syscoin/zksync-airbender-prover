@@ -56,6 +56,21 @@ struct SubmitSnarkProofPayload {
     vk_hash: String,
     proof: String, // base64‑encoded SNARK proof
 }
+// SYSCOIN
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobStatusPayload {
+    job: JobMetaPayload,
+    added_seconds_ago: u64,
+    assigned_seconds_ago: Option<u64>,
+    assigned_to_prover_id: Option<String>,
+    current_attempt: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobMetaPayload {
+    batch_number: u32,
+    vk_hash: String,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FailedFriProofPayload {
@@ -111,6 +126,23 @@ pub struct FriJobInputs {
     pub vk_hash: String,
     pub prover_input: Vec<u8>,
 }
+// SYSCOIN
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueJobStatus {
+    pub batch_number: u32,
+    pub vk_hash: String,
+    pub added_seconds_ago: u64,
+    pub assigned_seconds_ago: Option<u64>,
+    pub assigned_to_prover_id: Option<String>,
+    pub current_attempt: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobQueueStage {
+    Fri,
+    Snark,
+}
 
 #[async_trait]
 pub trait ProofClient: Send + Sync {
@@ -128,6 +160,12 @@ pub trait ProofClient: Send + Sync {
         vk_hash: String,
         proof: String,
     ) -> anyhow::Result<()>;
+
+    /// SYSCOIN Read current queue status for selected stage.
+    async fn status(&self, stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>>;
+
+    /// Read current FRI queue status.
+    async fn fri_status(&self) -> anyhow::Result<Vec<QueueJobStatus>>;
 
     /// Fetch the next SNARK job to prove.
     /// Returns `Ok(None)` if there's no job pending (204 No Content).

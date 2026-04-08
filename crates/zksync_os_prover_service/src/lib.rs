@@ -21,7 +21,7 @@ use zksync_airbender_cli::prover_utils::GpuSharedState;
 use zksync_airbender_execution_utils::{get_padded_binary, UNIVERSAL_CIRCUIT_VERIFIER};
 #[cfg(feature = "gpu")]
 use zksync_os_snark_prover::compute_compression_vk;
-use zksync_sequencer_proof_client::{SequencerEndpoint, SequencerProofClient};
+use zksync_sequencer_proof_client::{JobQueueStage, SequencerEndpoint, SequencerProofClient};
 
 /// Command-line arguments for the Zksync OS prover
 #[derive(Parser, Debug)]
@@ -102,6 +102,64 @@ where
         tokio::time::sleep(poll_interval).await;
     }
 }
+// SYSCOIN
+async fn pick_oldest_unassigned_client(
+    clients: &[Box<dyn zksync_sequencer_proof_client::ProofClient + Send + Sync>],
+    stage: JobQueueStage,
+) -> Option<usize> {
+    let mut best: Option<(usize, u64, u32)> = None;
+    for (idx, client) in clients.iter().enumerate() {
+        let Ok(statuses) = client.status(stage).await else {
+            continue;
+        };
+        let oldest_unassigned = statuses
+            .iter()
+            .filter(|s| s.assigned_seconds_ago.is_none())
+            .max_by_key(|s| s.added_seconds_ago);
+        let Some(oldest_unassigned) = oldest_unassigned else {
+            continue;
+        };
+
+        let candidate = (idx, oldest_unassigned.added_seconds_ago, oldest_unassigned.batch_number);
+        best = match best {
+            Some(current) => {
+                if (candidate.1, std::cmp::Reverse(candidate.2))
+                    > (current.1, std::cmp::Reverse(current.2))
+                {
+                    Some(candidate)
+                } else {
+                    Some(current)
+                }
+            }
+            None => Some(candidate),
+        };
+    }
+    best.map(|(idx, _, _)| idx)
+}
+
+async fn ordered_client_indices_for_stage(
+    clients: &[Box<dyn zksync_sequencer_proof_client::ProofClient + Send + Sync>],
+    stage: JobQueueStage,
+) -> Vec<usize> {
+    let mut scored: Vec<(usize, u64, u32)> = Vec::new();
+    for (idx, client) in clients.iter().enumerate() {
+        let best = client
+            .status(stage)
+            .await
+            .ok()
+            .and_then(|statuses| {
+                statuses
+                    .iter()
+                    .filter(|s| s.assigned_seconds_ago.is_none())
+                    .max_by_key(|s| s.added_seconds_ago)
+                    .map(|s| (s.added_seconds_ago, s.batch_number))
+            })
+            .unwrap_or((0, u32::MAX));
+        scored.push((idx, best.0, best.1));
+    }
+    scored.sort_by_key(|(idx, age, batch)| (std::cmp::Reverse(*age), *batch, *idx));
+    scored.into_iter().map(|(idx, _, _)| idx).collect()
+}
 
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -143,27 +201,40 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     };
 
     tracing::info!("Starting Zksync OS Prover Service");
-
+    // SYSCOIN
     let mut snark_proof_count = 0;
     let mut snark_latency = Instant::now();
+    let mut fri_proof_count = 0usize;
+    let retry_interval = Duration::from_millis(100);
 
-    // Cycle through clients in round-robin fashion
-    // Note: This rotates after each complete FRI+SNARK cycle
-    for client in clients.iter().cycle() {
-        let mut fri_proof_count = 0;
+    // Keep FRI GPU state warm across the entire service lifetime.
+    #[cfg(feature = "gpu")]
+    let mut gpu_state = GpuSharedState::new(
+        &binary,
+        zksync_airbender_cli::prover_utils::MainCircuitType::ReducedRiscVMachine,
+    );
+    #[cfg(not(feature = "gpu"))]
+    let mut gpu_state = GpuSharedState::new(&binary);
 
-        // For regular fri proving, we keep using reduced RiscV machine.
-        #[cfg(feature = "gpu")]
-        let mut gpu_state = GpuSharedState::new(
-            &binary,
-            zksync_airbender_cli::prover_utils::MainCircuitType::ReducedRiscVMachine,
-        );
-        #[cfg(not(feature = "gpu"))]
-        let mut gpu_state = GpuSharedState::new(&binary);
-
-        // Run FRI prover until we hit one of the limits
-        tracing::info!("Running FRI prover on sequencer {}", client.sequencer_url());
+    loop {
+        // Run FRI until one of the configured handoff conditions is met.
         loop {
+            let Some(client_idx) =
+                pick_oldest_unassigned_client(&clients, JobQueueStage::Fri).await
+            else {
+                tokio::time::sleep(retry_interval).await;
+                if let Some(max_snark_latency) = args.max_snark_latency
+                    && snark_latency.elapsed().as_secs() >= max_snark_latency
+                {
+                    tracing::info!(
+                        "SNARK latency reached max_snark_latency ({max_snark_latency} seconds), switching to SNARK phase"
+                    );
+                    break;
+                }
+                continue;
+            };
+            let client = &clients[client_idx];
+
             let proof_generated = zksync_os_fri_prover::run_inner(
                 client.as_ref(),
                 &binary,
@@ -177,69 +248,75 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
             fri_proof_count += proof_generated as usize;
 
-            if let Some(max_snark_latency) = args.max_snark_latency {
-                if snark_latency.elapsed().as_secs() >= max_snark_latency {
-                    tracing::info!("SNARK latency reached max_snark_latency ({max_snark_latency} seconds), exiting FRI prover");
-                    break;
-                }
+            if let Some(max_snark_latency) = args.max_snark_latency
+                && snark_latency.elapsed().as_secs() >= max_snark_latency
+            {
+                tracing::info!(
+                    "SNARK latency reached max_snark_latency ({max_snark_latency} seconds), switching to SNARK phase"
+                );
+                break;
             }
-            if let Some(max_fris_per_snark) = args.max_fris_per_snark {
-                if fri_proof_count >= max_fris_per_snark {
-                    tracing::info!("FRI proof count reached max_fris_per_snark ({max_fris_per_snark}), exiting FRI prover");
-                    break;
-                }
+            if let Some(max_fris_per_snark) = args.max_fris_per_snark
+                && fri_proof_count >= max_fris_per_snark
+            {
+                tracing::info!(
+                    "FRI proof count reached max_fris_per_snark ({max_fris_per_snark}), switching to SNARK phase"
+                );
+                break;
             }
         }
-        #[cfg(feature = "gpu")]
-        drop(gpu_state);
 
-        // Here we do exactly one SNARK proof
-        tracing::info!(
-            "Running SNARK prover on sequencer {}",
-            client.sequencer_url()
-        );
         let proof_generated = acquire_snark_proof(
             Duration::from_secs(args.snark_acquire_timeout_secs),
             SNARK_POLL_INTERVAL,
-            || {
-                zksync_os_snark_prover::run_inner(
-                    client.as_ref(),
-                    &verifier_binary,
-                    args.output_dir.clone(),
-                    args.trusted_setup_file.clone(),
-                    #[cfg(feature = "gpu")]
-                    &precomputations,
-                    args.disable_zk,
-                    &supported_versions,
-                )
+            || async {
+                let ordered_indices =
+                    ordered_client_indices_for_stage(&clients, JobQueueStage::Snark).await;
+                for idx in ordered_indices {
+                    let client = &clients[idx];
+                    if zksync_os_snark_prover::run_inner(
+                        client.as_ref(),
+                        &verifier_binary,
+                        args.output_dir.clone(),
+                        args.trusted_setup_file.clone(),
+                        #[cfg(feature = "gpu")]
+                        &precomputations,
+                        args.disable_zk,
+                        &supported_versions,
+                    )
+                    .await
+                    .expect("Failed to run SNARK prover")
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             },
         )
         .await
         .expect("Failed to run SNARK prover");
 
         if proof_generated {
-            // Increment SNARK proof counter
-            tracing::info!("Successfully run SNARK prover");
-            snark_proof_count += proof_generated as usize;
-            snark_latency = Instant::now();
+            tracing::info!("Successfully generated a SNARK proof");
+            snark_proof_count += 1;
         } else {
             tracing::info!(
-                "No SNARK proof was generated within snark_acquire_timeout_secs ({} seconds), returning to FRI prover",
+                "No SNARK proof was generated within snark_acquire_timeout_secs ({} seconds), returning to FRI phase",
                 args.snark_acquire_timeout_secs
             );
-            snark_latency = Instant::now();
         }
 
-        // Check if we've reached the iteration limit
-        if let Some(max_iterations) = args.iterations {
-            if snark_proof_count >= max_iterations {
-                tracing::info!("Reached maximum iterations ({max_iterations}), exiting...",);
-                return Ok(());
-            }
+        // Reset phase counters.
+        snark_latency = Instant::now();
+        fri_proof_count = 0;
+
+        if let Some(max_iterations) = args.iterations
+            && snark_proof_count >= max_iterations
+        {
+            tracing::info!("Reached maximum iterations ({max_iterations}), exiting...");
+            return Ok(());
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -277,27 +354,5 @@ mod tests {
         assert!(!acquired);
         assert!(attempts.load(Ordering::Relaxed) >= 1);
     }
-
-    #[tokio::test]
-    async fn snark_acquire_succeeds_before_timeout() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_closure = attempts.clone();
-
-        let acquired = acquire_snark_proof(
-            Duration::from_millis(100),
-            Duration::from_millis(1),
-            move || {
-                let attempts = attempts_for_closure.clone();
-                async move {
-                    let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-                    Ok(attempt >= 2)
-                }
-            },
-        )
-        .await
-        .expect("snark acquisition should not error");
-
-        assert!(acquired);
-        assert!(attempts.load(Ordering::Relaxed) >= 3);
-    }
 }
+

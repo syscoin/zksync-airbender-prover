@@ -20,10 +20,43 @@ use zksync_airbender_execution_utils::{
     UNIVERSAL_CIRCUIT_VERIFIER,
 };
 use zksync_sequencer_proof_client::{ProofClient, SnarkProofInputs};
+use zksync_sequencer_proof_client::JobQueueStage;
 
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
 pub mod metrics;
+// SYSCOIN
+async fn order_clients_by_oldest_unassigned(
+    clients: &[Box<dyn ProofClient + Send + Sync>],
+    stage: JobQueueStage,
+) -> Vec<usize> {
+    let mut scored: Vec<(usize, u64, u32)> = Vec::new();
+    for (idx, client) in clients.iter().enumerate() {
+        let best = client
+            .status(stage)
+            .await
+            .ok()
+            .and_then(|statuses| {
+                statuses
+                    .iter()
+                    .filter(|s| s.assigned_seconds_ago.is_none())
+                    .max_by_key(|s| s.added_seconds_ago)
+                    .map(|s| (s.added_seconds_ago, s.batch_number))
+            })
+            .unwrap_or((0, u32::MAX));
+        scored.push((idx, best.0, best.1));
+    }
+
+    // Oldest first. Tie-break by lower batch number, then index for deterministic order.
+    scored.sort_by_key(|(idx, age, batch)| {
+        (
+            std::cmp::Reverse(*age),
+            *batch,
+            *idx, // deterministic stable tie-break
+        )
+    });
+    scored.into_iter().map(|(idx, _, _)| idx).collect()
+}
 
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -191,22 +224,32 @@ pub async fn run_linking_fri_snark(
 
     let mut proof_count = 0;
 
-    // Cycle through clients in round-robin fashion
-    for client in clients.iter().cycle() {
-        tracing::debug!("Polling sequencer: {}", client.sequencer_url());
+    // SYSCOIN
+    loop {
+        let mut proof_generated = false;
+        let client_order = order_clients_by_oldest_unassigned(&clients, JobQueueStage::Snark).await;
 
-        let proof_generated = run_inner(
-            client.as_ref(),
-            &verifier_binary,
-            output_dir.clone(),
-            trusted_setup_file.clone(),
-            #[cfg(feature = "gpu")]
-            &precomputations,
-            disable_zk,
-            &supported_versions,
-        )
-        .await
-        .expect("Failed to run SNARK prover");
+        for idx in client_order {
+            let client = &clients[idx];
+            tracing::debug!("Polling sequencer: {}", client.sequencer_url());
+
+            if run_inner(
+                client.as_ref(),
+                &verifier_binary,
+                output_dir.clone(),
+                trusted_setup_file.clone(),
+                #[cfg(feature = "gpu")]
+                &precomputations,
+                disable_zk,
+                &supported_versions,
+            )
+            .await
+            .expect("Failed to run SNARK prover")
+            {
+                proof_generated = true;
+                break;
+            }
+        }
 
         if proof_generated {
             proof_count += 1;
@@ -220,8 +263,7 @@ pub async fn run_linking_fri_snark(
                 }
             }
         } else {
-            // If no task was found, wait before trying again
-            tracing::info!("No pending SNARK jobs from sequencer, retrying in 5s...");
+            tracing::info!("No pending SNARK jobs from sequencer set, retrying in 5s...");
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }

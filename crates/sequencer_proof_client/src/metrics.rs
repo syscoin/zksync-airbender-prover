@@ -7,6 +7,8 @@ use vise::{EncodeLabelSet, EncodeLabelValue, Family, Histogram, Metrics};
 pub(crate) enum Method {
     PickFri,
     SubmitFri,
+    // SYSCOIN
+    StatusQueue,
     PickSnark,
     SubmitSnark,
 }

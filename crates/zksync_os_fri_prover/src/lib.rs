@@ -15,12 +15,49 @@ use zksync_airbender_cli::prover_utils::{
 };
 use zksync_airbender_execution_utils::{Machine, ProgramProof, RecursionStrategy};
 use zksync_sequencer_proof_client::{
-    FriJobInputs, ProofClient, SequencerEndpoint, SequencerProofClient,
+    FriJobInputs, JobQueueStage, ProofClient, SequencerEndpoint, SequencerProofClient,
 };
 
 use crate::metrics::FRI_PROVER_METRICS;
 
 pub mod metrics;
+// SYSCOIN
+async fn pick_oldest_unassigned_client(
+    clients: &[Box<dyn ProofClient + Send + Sync>],
+    stage: JobQueueStage,
+) -> Option<usize> {
+    let mut best: Option<(usize, u64, u32)> = None;
+    for (idx, client) in clients.iter().enumerate() {
+        let Ok(statuses) = client.status(stage).await else {
+            continue;
+        };
+
+        let oldest_unassigned = statuses
+            .iter()
+            .filter(|s| s.assigned_seconds_ago.is_none())
+            .max_by_key(|s| s.added_seconds_ago);
+
+        let Some(oldest_unassigned) = oldest_unassigned else {
+            continue;
+        };
+
+        let candidate = (idx, oldest_unassigned.added_seconds_ago, oldest_unassigned.batch_number);
+        best = match best {
+            Some(current) => {
+                // Deterministic order: larger added_seconds_ago (older) first, then lower batch number.
+                if (candidate.1, std::cmp::Reverse(candidate.2))
+                    > (current.1, std::cmp::Reverse(current.2))
+                {
+                    Some(candidate)
+                } else {
+                    Some(current)
+                }
+            }
+            None => Some(candidate),
+        };
+    }
+    best.map(|(idx, _, _)| idx)
+}
 
 /// Command-line arguments for the Zksync OS prover
 #[derive(Parser, Debug)]
@@ -162,9 +199,21 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let retry_interval = Duration::from_millis(100);
     // If no proof is generated for 10 seconds, log a message
     let retry_log_interval = Duration::from_secs(10);
-
-    // Cycle through clients in round-robin fashion
-    for client in clients.iter().cycle() {
+    // SYSCOIN
+    loop {
+        let Some(client_idx) = pick_oldest_unassigned_client(&clients, JobQueueStage::Fri).await
+        else {
+            if retrying_since.elapsed() >= retry_log_interval {
+                tracing::info!(
+                    "No pending unassigned FRI jobs across sequencers for {} seconds",
+                    retrying_since.elapsed().as_secs()
+                );
+                retrying_since = Instant::now();
+            }
+            tokio::time::sleep(retry_interval).await;
+            continue;
+        };
+        let client = &clients[client_idx];
         tracing::debug!("Polling sequencer: {}", client.sequencer_url());
 
         let proof_generated = run_inner(
