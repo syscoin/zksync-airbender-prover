@@ -223,13 +223,13 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 pick_oldest_unassigned_client(&clients, JobQueueStage::Fri).await
             else {
                 tokio::time::sleep(retry_interval).await;
-                if let Some(max_snark_latency) = args.max_snark_latency
-                    && snark_latency.elapsed().as_secs() >= max_snark_latency
-                {
-                    tracing::info!(
-                        "SNARK latency reached max_snark_latency ({max_snark_latency} seconds), switching to SNARK phase"
-                    );
-                    break;
+                if let Some(max_snark_latency) = args.max_snark_latency {
+                    if snark_latency.elapsed().as_secs() >= max_snark_latency {
+                        tracing::info!(
+                            "SNARK latency reached max_snark_latency ({max_snark_latency} seconds), switching to SNARK phase"
+                        );
+                        break;
+                    }
                 }
                 continue;
             };
@@ -248,21 +248,21 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
             fri_proof_count += proof_generated as usize;
 
-            if let Some(max_snark_latency) = args.max_snark_latency
-                && snark_latency.elapsed().as_secs() >= max_snark_latency
-            {
-                tracing::info!(
-                    "SNARK latency reached max_snark_latency ({max_snark_latency} seconds), switching to SNARK phase"
-                );
-                break;
+            if let Some(max_snark_latency) = args.max_snark_latency {
+                if snark_latency.elapsed().as_secs() >= max_snark_latency {
+                    tracing::info!(
+                        "SNARK latency reached max_snark_latency ({max_snark_latency} seconds), switching to SNARK phase"
+                    );
+                    break;
+                }
             }
-            if let Some(max_fris_per_snark) = args.max_fris_per_snark
-                && fri_proof_count >= max_fris_per_snark
-            {
-                tracing::info!(
-                    "FRI proof count reached max_fris_per_snark ({max_fris_per_snark}), switching to SNARK phase"
-                );
-                break;
+            if let Some(max_fris_per_snark) = args.max_fris_per_snark {
+                if fri_proof_count >= max_fris_per_snark {
+                    tracing::info!(
+                        "FRI proof count reached max_fris_per_snark ({max_fris_per_snark}), switching to SNARK phase"
+                    );
+                    break;
+                }
             }
         }
 
@@ -310,11 +310,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         snark_latency = Instant::now();
         fri_proof_count = 0;
 
-        if let Some(max_iterations) = args.iterations
-            && snark_proof_count >= max_iterations
-        {
-            tracing::info!("Reached maximum iterations ({max_iterations}), exiting...");
-            return Ok(());
+        if let Some(max_iterations) = args.iterations {
+            if snark_proof_count >= max_iterations {
+                tracing::info!("Reached maximum iterations ({max_iterations}), exiting...");
+                return Ok(());
+            }
         }
     }
 }
