@@ -59,7 +59,7 @@ struct SubmitSnarkProofPayload {
 // SYSCOIN
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JobStatusPayload {
-    job: JobMetaPayload,
+    fri_job: JobMetaPayload,
     added_seconds_ago: u64,
     assigned_seconds_ago: Option<u64>,
     assigned_to_prover_id: Option<String>,
