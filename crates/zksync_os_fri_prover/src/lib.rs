@@ -22,13 +22,10 @@ use crate::metrics::FRI_PROVER_METRICS;
 
 pub mod metrics;
 // SYSCOIN
-async fn ordered_client_indices_for_fri_stage(
-    clients: &[Box<dyn ProofClient + Send + Sync>],
-    stage: JobQueueStage,
-) -> Vec<usize> {
+async fn ordered_fri_client_indices(clients: &[Box<dyn ProofClient + Send + Sync>]) -> Vec<usize> {
     let mut scored: Vec<(usize, bool, u64, u32)> = Vec::new();
     for (idx, client) in clients.iter().enumerate() {
-        let Ok(statuses) = client.status(stage).await else {
+        let Ok(statuses) = client.status(JobQueueStage::Fri).await else {
             continue;
         };
 
@@ -199,7 +196,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let retry_log_interval = Duration::from_secs(10);
     // SYSCOIN
     loop {
-        let ordered_indices = ordered_client_indices_for_fri_stage(&clients, JobQueueStage::Fri).await;
+        let ordered_indices = ordered_fri_client_indices(&clients).await;
         if ordered_indices.is_empty() {
             if retrying_since.elapsed() >= retry_log_interval {
                 tracing::info!(

@@ -103,13 +103,12 @@ where
     }
 }
 // SYSCOIN
-async fn ordered_client_indices_for_fri_stage(
+async fn ordered_fri_client_indices(
     clients: &[Box<dyn zksync_sequencer_proof_client::ProofClient + Send + Sync>],
-    stage: JobQueueStage,
 ) -> Vec<usize> {
     let mut scored: Vec<(usize, bool, u64, u32)> = Vec::new();
     for (idx, client) in clients.iter().enumerate() {
-        let Ok(statuses) = client.status(stage).await else {
+        let Ok(statuses) = client.status(JobQueueStage::Fri).await else {
             continue;
         };
         let best_unassigned = statuses
@@ -225,7 +224,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     loop {
         // Run FRI until one of the configured handoff conditions is met.
         loop {
-            let ordered_indices = ordered_client_indices_for_fri_stage(&clients, JobQueueStage::Fri).await;
+            let ordered_indices = ordered_fri_client_indices(&clients).await;
             if ordered_indices.is_empty() {
                 tokio::time::sleep(retry_interval).await;
                 if let Some(max_snark_latency) = args.max_snark_latency {
