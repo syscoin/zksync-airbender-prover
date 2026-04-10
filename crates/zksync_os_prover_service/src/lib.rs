@@ -35,8 +35,8 @@ pub struct Args {
     /// Max amount of FRI proofs per SNARK (default value - 100)
     #[arg(long, default_value = "100", conflicts_with = "max_snark_latency")]
     pub max_fris_per_snark: Option<usize>,
-    /// Max time to wait for a SNARK job after switching away from FRI proving
-    #[arg(long, default_value = "60")]
+    /// SYSCOIN Max time to wait for a SNARK job after switching away from FRI proving
+    #[arg(long, default_value = "120")]
     pub snark_acquire_timeout_secs: u64,
     /// Sequencer URL(s) for polling tasks. Comma-separated for round-robin.
     ///
@@ -120,7 +120,11 @@ async fn pick_oldest_unassigned_client(
             continue;
         };
 
-        let candidate = (idx, oldest_unassigned.added_seconds_ago, oldest_unassigned.batch_number);
+        let candidate = (
+            idx,
+            oldest_unassigned.added_seconds_ago,
+            oldest_unassigned.batch_number,
+        );
         best = match best {
             Some(current) => {
                 if (candidate.1, std::cmp::Reverse(candidate.2))
@@ -143,18 +147,15 @@ async fn ordered_client_indices_for_stage(
 ) -> Vec<usize> {
     let mut scored: Vec<(usize, u64, u32)> = Vec::new();
     for (idx, client) in clients.iter().enumerate() {
-        let best = client
-            .status(stage)
-            .await
-            .ok()
-            .and_then(|statuses| {
-                statuses
-                    .iter()
-                    .filter(|s| s.assigned_seconds_ago.is_none())
-                    .max_by_key(|s| s.added_seconds_ago)
-                    .map(|s| (s.added_seconds_ago, s.batch_number))
-            })
-            .unwrap_or((0, u32::MAX));
+        let Some(best) = client.status(stage).await.ok().and_then(|statuses| {
+            statuses
+                .iter()
+                .filter(|s| s.assigned_seconds_ago.is_none())
+                .max_by_key(|s| s.added_seconds_ago)
+                .map(|s| (s.added_seconds_ago, s.batch_number))
+        }) else {
+            continue;
+        };
         scored.push((idx, best.0, best.1));
     }
     scored.sort_by_key(|(idx, age, batch)| (std::cmp::Reverse(*age), *batch, *idx));
@@ -341,12 +342,90 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
+    use async_trait::async_trait;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+    use url::Url;
+    use zkos_wrapper::SnarkWrapperProof;
+    use zksync_sequencer_proof_client::{
+        FriJobInputs, L2BatchNumber, ProofClient, QueueJobStatus, SnarkProofInputs,
+    };
 
     use super::*;
+
+    enum MockStatusResponse {
+        Error(anyhow::Error),
+        Statuses(Vec<QueueJobStatus>),
+    }
+
+    struct MockProofClient {
+        url: Url,
+        status_response: MockStatusResponse,
+    }
+
+    impl MockProofClient {
+        fn error(url: &str) -> Self {
+            Self {
+                url: Url::parse(url).expect("valid url"),
+                status_response: MockStatusResponse::Error(anyhow!("status unavailable")),
+            }
+        }
+
+        fn statuses(url: &str, statuses: Vec<QueueJobStatus>) -> Self {
+            Self {
+                url: Url::parse(url).expect("valid url"),
+                status_response: MockStatusResponse::Statuses(statuses),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProofClient for MockProofClient {
+        fn sequencer_url(&self) -> &Url {
+            &self.url
+        }
+
+        async fn pick_fri_job(&self) -> anyhow::Result<Option<FriJobInputs>> {
+            Ok(None)
+        }
+
+        async fn submit_fri_proof(
+            &self,
+            _batch_number: u32,
+            _vk_hash: String,
+            _proof: String,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn status(&self, _stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>> {
+            match &self.status_response {
+                MockStatusResponse::Error(err) => Err(anyhow!("{err}")),
+                MockStatusResponse::Statuses(statuses) => Ok(statuses.clone()),
+            }
+        }
+
+        async fn fri_status(&self) -> anyhow::Result<Vec<QueueJobStatus>> {
+            self.status(JobQueueStage::Fri).await
+        }
+
+        async fn pick_snark_job(&self) -> anyhow::Result<Option<SnarkProofInputs>> {
+            Ok(None)
+        }
+
+        async fn submit_snark_proof(
+            &self,
+            _from_batch_number: L2BatchNumber,
+            _to_batch_number: L2BatchNumber,
+            _vk_hash: String,
+            _proof: SnarkWrapperProof,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn snark_acquire_times_out_instead_of_looping_forever() {
@@ -374,5 +453,38 @@ mod tests {
         assert!(!acquired);
         assert!(attempts.load(Ordering::Relaxed) >= 1);
     }
-}
 
+    #[tokio::test]
+    async fn ordered_snark_clients_skip_unreachable_and_empty_statuses() {
+        let clients: Vec<Box<dyn ProofClient + Send + Sync>> = vec![
+            Box::new(MockProofClient::error("http://down.local")),
+            Box::new(MockProofClient::statuses("http://empty.local", vec![])),
+            Box::new(MockProofClient::statuses(
+                "http://healthy-a.local",
+                vec![QueueJobStatus {
+                    batch_number: 12,
+                    vk_hash: "vk-a".to_owned(),
+                    added_seconds_ago: 10,
+                    assigned_seconds_ago: None,
+                    assigned_to_prover_id: None,
+                    current_attempt: 0,
+                }],
+            )),
+            Box::new(MockProofClient::statuses(
+                "http://healthy-b.local",
+                vec![QueueJobStatus {
+                    batch_number: 3,
+                    vk_hash: "vk-b".to_owned(),
+                    added_seconds_ago: 20,
+                    assigned_seconds_ago: None,
+                    assigned_to_prover_id: None,
+                    current_attempt: 0,
+                }],
+            )),
+        ];
+
+        let ordered = ordered_client_indices_for_stage(&clients, JobQueueStage::Snark).await;
+
+        assert_eq!(ordered, vec![3, 2]);
+    }
+}
