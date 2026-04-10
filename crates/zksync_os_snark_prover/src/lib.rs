@@ -25,13 +25,6 @@ use zksync_sequencer_proof_client::JobQueueStage;
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
 pub mod metrics;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnarkAttemptOutcome {
-    NoJob,
-    AcquiredButNotSubmitted,
-    Submitted,
-}
 // SYSCOIN
 async fn order_clients_by_oldest_unassigned(
     clients: &[Box<dyn ProofClient + Send + Sync>],
@@ -253,11 +246,8 @@ pub async fn run_linking_fri_snark(
             .await
             .expect("Failed to run SNARK prover")
             {
-                SnarkAttemptOutcome::Submitted => {
-                    proof_generated = true;
-                    break;
-                }
-                SnarkAttemptOutcome::NoJob | SnarkAttemptOutcome::AcquiredButNotSubmitted => {}
+                proof_generated = true;
+                break;
             }
         }
 
@@ -290,7 +280,7 @@ pub async fn run_inner(
     ),
     disable_zk: bool,
     supported_protocol_versions: &SupportedProtocolVersions,
-) -> anyhow::Result<SnarkAttemptOutcome> {
+) -> anyhow::Result<bool> {
     tracing::debug!("Picking job from sequencer {}", client.sequencer_url());
     let snark_proof_input = match client.pick_snark_job().await {
         Ok(Some(snark_proof_input)) => {
@@ -308,7 +298,7 @@ pub async fn run_inner(
                     snark_proof_input.to_batch_number.0,
                     client.sequencer_url()
                 );
-                return Ok(SnarkAttemptOutcome::AcquiredButNotSubmitted);
+                return Ok(false);
             }
             snark_proof_input
         }
@@ -317,7 +307,7 @@ pub async fn run_inner(
                 "No SNARK jobs found from sequencer {}",
                 client.sequencer_url()
             );
-            return Ok(SnarkAttemptOutcome::NoJob);
+            return Ok(false);
         }
         Err(e) => {
             // Check if the error is a timeout error
@@ -331,13 +321,13 @@ pub async fn run_inner(
                 );
                 tracing::error!("Exiting prover due to timeout");
                 SNARK_PROVER_METRICS.timeout_errors.inc();
-                return Ok(SnarkAttemptOutcome::NoJob);
+                return Ok(false);
             }
             tracing::error!(
                 "Failed to pick SNARK job from sequencer {}: {e:?}",
                 client.sequencer_url()
             );
-            return Ok(SnarkAttemptOutcome::NoJob);
+            return Ok(false);
         }
     };
     let start_batch = snark_proof_input.from_batch_number;
@@ -439,7 +429,7 @@ pub async fn run_inner(
                 .latest_proven_batch
                 .set(end_batch.0 as i64);
 
-            Ok(SnarkAttemptOutcome::Submitted)
+            Ok(true)
         }
         Err(e) => {
             // Check if the error is a timeout error
@@ -465,8 +455,8 @@ pub async fn run_inner(
                     client.sequencer_url(),
                 );
             }
-            // Job was acquired, but not successfully submitted.
-            Ok(SnarkAttemptOutcome::AcquiredButNotSubmitted)
+            // Return false so caller doesn't increment proof counter
+            Ok(false)
         }
     }
 }

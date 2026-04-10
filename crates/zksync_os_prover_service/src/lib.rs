@@ -21,7 +21,6 @@ use zksync_airbender_cli::prover_utils::GpuSharedState;
 use zksync_airbender_execution_utils::{get_padded_binary, UNIVERSAL_CIRCUIT_VERIFIER};
 #[cfg(feature = "gpu")]
 use zksync_os_snark_prover::compute_compression_vk;
-use zksync_os_snark_prover::SnarkAttemptOutcome;
 use zksync_sequencer_proof_client::{JobQueueStage, SequencerEndpoint, SequencerProofClient};
 
 /// Command-line arguments for the Zksync OS prover
@@ -88,22 +87,15 @@ async fn acquire_snark_proof<F, Fut>(
 ) -> anyhow::Result<bool>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = anyhow::Result<SnarkAttemptOutcome>>,
+    Fut: Future<Output = anyhow::Result<bool>>,
 {
     let started_at = Instant::now();
-    let mut acquired_job_in_phase = false;
     loop {
-        match run_snark_attempt().await? {
-            SnarkAttemptOutcome::Submitted => return Ok(true),
-            SnarkAttemptOutcome::AcquiredButNotSubmitted => {
-                // Once any job has been acquired, keep retrying beyond acquire timeout.
-                // Timeout should apply only while waiting for the first acquisition.
-                acquired_job_in_phase = true;
-            }
-            SnarkAttemptOutcome::NoJob => {}
+        if run_snark_attempt().await? {
+            return Ok(true);
         }
 
-        if !acquired_job_in_phase && started_at.elapsed() >= snark_acquire_timeout {
+        if started_at.elapsed() >= snark_acquire_timeout {
             return Ok(false);
         }
 
@@ -291,10 +283,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             || async {
                 let ordered_indices =
                     ordered_client_indices_for_stage(&clients, JobQueueStage::Snark).await;
-                let mut acquired_without_submit = false;
                 for idx in ordered_indices {
                     let client = &clients[idx];
-                    match zksync_os_snark_prover::run_inner(
+                    if zksync_os_snark_prover::run_inner(
                         client.as_ref(),
                         &verifier_binary,
                         args.output_dir.clone(),
@@ -307,18 +298,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     .await
                     .expect("Failed to run SNARK prover")
                     {
-                        SnarkAttemptOutcome::Submitted => return Ok(SnarkAttemptOutcome::Submitted),
-                        SnarkAttemptOutcome::AcquiredButNotSubmitted => {
-                            acquired_without_submit = true;
-                        }
-                        SnarkAttemptOutcome::NoJob => {}
+                        return Ok(true);
                     }
                 }
-                if acquired_without_submit {
-                    Ok(SnarkAttemptOutcome::AcquiredButNotSubmitted)
-                } else {
-                    Ok(SnarkAttemptOutcome::NoJob)
-                }
+                Ok(false)
             },
         )
         .await
@@ -379,7 +362,7 @@ mod tests {
                     let attempts = attempts_for_closure.clone();
                     async move {
                         attempts.fetch_add(1, Ordering::Relaxed);
-                        Ok(SnarkAttemptOutcome::NoJob)
+                        Ok(false)
                     }
                 },
             ),
@@ -390,39 +373,6 @@ mod tests {
 
         assert!(!acquired);
         assert!(attempts.load(Ordering::Relaxed) >= 1);
-    }
-
-    #[tokio::test]
-    async fn snark_acquire_does_not_timeout_after_job_acquired() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_closure = attempts.clone();
-
-        let acquired = tokio::time::timeout(
-            Duration::from_millis(200),
-            acquire_snark_proof(
-                Duration::from_millis(20),
-                Duration::from_millis(5),
-                move || {
-                    let attempts = attempts_for_closure.clone();
-                    async move {
-                        let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-                        let result = match attempt {
-                            0 => SnarkAttemptOutcome::NoJob,
-                            1 => SnarkAttemptOutcome::AcquiredButNotSubmitted,
-                            2 => SnarkAttemptOutcome::AcquiredButNotSubmitted,
-                            _ => SnarkAttemptOutcome::Submitted,
-                        };
-                        Ok(result)
-                    }
-                },
-            ),
-        )
-        .await
-        .expect("snark acquisition should continue after acquisition")
-        .expect("snark acquisition should not error");
-
-        assert!(acquired);
-        assert!(attempts.load(Ordering::Relaxed) >= 4);
     }
 }
 
