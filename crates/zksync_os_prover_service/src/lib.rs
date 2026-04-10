@@ -103,63 +103,69 @@ where
     }
 }
 // SYSCOIN
-async fn pick_oldest_unassigned_client(
+async fn ordered_client_indices_for_fri_stage(
     clients: &[Box<dyn zksync_sequencer_proof_client::ProofClient + Send + Sync>],
     stage: JobQueueStage,
-) -> Option<usize> {
-    let mut best: Option<(usize, u64, u32)> = None;
+) -> Vec<usize> {
+    let mut scored: Vec<(usize, bool, u64, u32)> = Vec::new();
     for (idx, client) in clients.iter().enumerate() {
         let Ok(statuses) = client.status(stage).await else {
             continue;
         };
-        let oldest_unassigned = statuses
+        let best_unassigned = statuses
             .iter()
             .filter(|s| s.assigned_seconds_ago.is_none())
-            .max_by_key(|s| s.added_seconds_ago);
-        let Some(oldest_unassigned) = oldest_unassigned else {
+            .max_by_key(|s| s.added_seconds_ago)
+            .map(|s| (true, s.added_seconds_ago, s.batch_number));
+        let best_any = statuses
+            .iter()
+            .max_by_key(|s| s.added_seconds_ago)
+            .map(|s| (false, s.added_seconds_ago, s.batch_number));
+
+        let Some(best) = best_unassigned.or(best_any) else {
             continue;
         };
-
-        let candidate = (
-            idx,
-            oldest_unassigned.added_seconds_ago,
-            oldest_unassigned.batch_number,
-        );
-        best = match best {
-            Some(current) => {
-                if (candidate.1, std::cmp::Reverse(candidate.2))
-                    > (current.1, std::cmp::Reverse(current.2))
-                {
-                    Some(candidate)
-                } else {
-                    Some(current)
-                }
-            }
-            None => Some(candidate),
-        };
+        scored.push((idx, best.0, best.1, best.2));
     }
-    best.map(|(idx, _, _)| idx)
+    scored.sort_by_key(|(idx, is_unassigned, age, batch)| {
+        (!*is_unassigned, std::cmp::Reverse(*age), *batch, *idx)
+    });
+    scored
+        .into_iter()
+        .map(|(idx, _, _, _)| idx)
+        .collect()
 }
 
 async fn ordered_client_indices_for_stage(
     clients: &[Box<dyn zksync_sequencer_proof_client::ProofClient + Send + Sync>],
     stage: JobQueueStage,
 ) -> Vec<usize> {
-    let mut scored: Vec<(usize, u64, u32)> = Vec::new();
+    let mut scored: Vec<(usize, bool, u64, u32)> = Vec::new();
     for (idx, client) in clients.iter().enumerate() {
         let Some(best) = client.status(stage).await.ok().and_then(|statuses| {
-            statuses
+            let best_unassigned = statuses
                 .iter()
                 .filter(|s| s.assigned_seconds_ago.is_none())
                 .max_by_key(|s| s.added_seconds_ago)
-                .map(|s| (s.added_seconds_ago, s.batch_number))
+                .map(|s| (true, s.added_seconds_ago, s.batch_number));
+            let best_any = statuses
+                .iter()
+                .max_by_key(|s| s.added_seconds_ago)
+                .map(|s| (false, s.added_seconds_ago, s.batch_number));
+
+            best_unassigned.or(best_any)
         }) else {
             continue;
         };
-        scored.push((idx, best.0, best.1));
+        scored.push((idx, best.0, best.1, best.2));
     }
-    scored.sort_by_key(|(idx, age, batch)| (std::cmp::Reverse(*age), *batch, *idx));
-    scored.into_iter().map(|(idx, _, _)| idx).collect()
+    scored.sort_by_key(|(idx, is_unassigned, age, batch)| {
+        (!*is_unassigned, std::cmp::Reverse(*age), *batch, *idx)
+    });
+    scored
+        .into_iter()
+        .map(|(idx, _, _, _)| idx)
+        .collect()
 }
 
 pub fn init_tracing() {
@@ -219,9 +225,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     loop {
         // Run FRI until one of the configured handoff conditions is met.
         loop {
-            let Some(client_idx) =
-                pick_oldest_unassigned_client(&clients, JobQueueStage::Fri).await
-            else {
+            let ordered_indices = ordered_client_indices_for_fri_stage(&clients, JobQueueStage::Fri).await;
+            if ordered_indices.is_empty() {
                 tokio::time::sleep(retry_interval).await;
                 if let Some(max_snark_latency) = args.max_snark_latency {
                     if snark_latency.elapsed().as_secs() >= max_snark_latency {
@@ -232,26 +237,37 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     }
                 }
                 continue;
-            };
-            let client = &clients[client_idx];
+            }
 
-            let proof_generated = zksync_os_fri_prover::run_inner(
-                client.as_ref(),
-                &binary,
-                args.circuit_limit,
-                #[cfg(feature = "gpu")]
-                gpu_state
-                    .as_mut()
-                    .expect("FRI GPU state should be initialized"),
-                #[cfg(not(feature = "gpu"))]
-                &mut gpu_state,
-                args.fri_path.clone(),
-                &supported_versions,
-            )
-            .await
-            .expect("Failed to run FRI prover");
+            let mut proof_generated = false;
+            for client_idx in ordered_indices {
+                let client = &clients[client_idx];
+
+                if zksync_os_fri_prover::run_inner(
+                    client.as_ref(),
+                    &binary,
+                    args.circuit_limit,
+                    #[cfg(feature = "gpu")]
+                    gpu_state
+                        .as_mut()
+                        .expect("FRI GPU state should be initialized"),
+                    #[cfg(not(feature = "gpu"))]
+                    &mut gpu_state,
+                    args.fri_path.clone(),
+                    &supported_versions,
+                )
+                .await
+                .expect("Failed to run FRI prover")
+                {
+                    proof_generated = true;
+                    break;
+                }
+            }
 
             fri_proof_count += proof_generated as usize;
+            if !proof_generated {
+                tokio::time::sleep(retry_interval).await;
+            }
 
             if let Some(max_snark_latency) = args.max_snark_latency {
                 if snark_latency.elapsed().as_secs() >= max_snark_latency {
@@ -455,10 +471,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordered_snark_clients_skip_unreachable_and_empty_statuses() {
+    async fn ordered_snark_clients_skip_unreachable_and_empty_queues_but_keep_assigned() {
         let clients: Vec<Box<dyn ProofClient + Send + Sync>> = vec![
             Box::new(MockProofClient::error("http://down.local")),
             Box::new(MockProofClient::statuses("http://empty.local", vec![])),
+            Box::new(MockProofClient::statuses(
+                "http://assigned-only.local",
+                vec![QueueJobStatus {
+                    batch_number: 20,
+                    vk_hash: "vk-assigned".to_owned(),
+                    added_seconds_ago: 30,
+                    assigned_seconds_ago: Some(1_000),
+                    assigned_to_prover_id: Some("other-prover".to_owned()),
+                    current_attempt: 2,
+                }],
+            )),
             Box::new(MockProofClient::statuses(
                 "http://healthy-a.local",
                 vec![QueueJobStatus {
@@ -485,6 +512,6 @@ mod tests {
 
         let ordered = ordered_client_indices_for_stage(&clients, JobQueueStage::Snark).await;
 
-        assert_eq!(ordered, vec![3, 2]);
+        assert_eq!(ordered, vec![4, 3, 2]);
     }
 }

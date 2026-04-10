@@ -22,41 +22,39 @@ use crate::metrics::FRI_PROVER_METRICS;
 
 pub mod metrics;
 // SYSCOIN
-async fn pick_oldest_unassigned_client(
+async fn ordered_client_indices_for_fri_stage(
     clients: &[Box<dyn ProofClient + Send + Sync>],
     stage: JobQueueStage,
-) -> Option<usize> {
-    let mut best: Option<(usize, u64, u32)> = None;
+) -> Vec<usize> {
+    let mut scored: Vec<(usize, bool, u64, u32)> = Vec::new();
     for (idx, client) in clients.iter().enumerate() {
         let Ok(statuses) = client.status(stage).await else {
             continue;
         };
 
-        let oldest_unassigned = statuses
+        let best_unassigned = statuses
             .iter()
             .filter(|s| s.assigned_seconds_ago.is_none())
-            .max_by_key(|s| s.added_seconds_ago);
+            .max_by_key(|s| s.added_seconds_ago)
+            .map(|s| (true, s.added_seconds_ago, s.batch_number));
+        let best_any = statuses
+            .iter()
+            .max_by_key(|s| s.added_seconds_ago)
+            .map(|s| (false, s.added_seconds_ago, s.batch_number));
 
-        let Some(oldest_unassigned) = oldest_unassigned else {
+        let Some(best) = best_unassigned.or(best_any) else {
             continue;
         };
-
-        let candidate = (idx, oldest_unassigned.added_seconds_ago, oldest_unassigned.batch_number);
-        best = match best {
-            Some(current) => {
-                // Deterministic order: larger added_seconds_ago (older) first, then lower batch number.
-                if (candidate.1, std::cmp::Reverse(candidate.2))
-                    > (current.1, std::cmp::Reverse(current.2))
-                {
-                    Some(candidate)
-                } else {
-                    Some(current)
-                }
-            }
-            None => Some(candidate),
-        };
+        scored.push((idx, best.0, best.1, best.2));
     }
-    best.map(|(idx, _, _)| idx)
+
+    scored.sort_by_key(|(idx, is_unassigned, age, batch)| {
+        (!*is_unassigned, std::cmp::Reverse(*age), *batch, *idx)
+    });
+    scored
+        .into_iter()
+        .map(|(idx, _, _, _)| idx)
+        .collect()
 }
 
 /// Command-line arguments for the Zksync OS prover
@@ -201,31 +199,38 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let retry_log_interval = Duration::from_secs(10);
     // SYSCOIN
     loop {
-        let Some(client_idx) = pick_oldest_unassigned_client(&clients, JobQueueStage::Fri).await
-        else {
+        let ordered_indices = ordered_client_indices_for_fri_stage(&clients, JobQueueStage::Fri).await;
+        if ordered_indices.is_empty() {
             if retrying_since.elapsed() >= retry_log_interval {
                 tracing::info!(
-                    "No pending unassigned FRI jobs across sequencers for {} seconds",
+                    "No visible FRI jobs across sequencers for {} seconds",
                     retrying_since.elapsed().as_secs()
                 );
                 retrying_since = Instant::now();
             }
             tokio::time::sleep(retry_interval).await;
             continue;
-        };
-        let client = &clients[client_idx];
-        tracing::debug!("Polling sequencer: {}", client.sequencer_url());
+        }
+        let mut proof_generated = false;
+        for client_idx in ordered_indices {
+            let client = &clients[client_idx];
+            tracing::debug!("Polling sequencer: {}", client.sequencer_url());
 
-        let proof_generated = run_inner(
-            client.as_ref(),
-            &binary,
-            args.circuit_limit,
-            &mut gpu_state,
-            args.path.clone(),
-            &supported_versions,
-        )
-        .await
-        .expect("Failed to run FRI prover");
+            if run_inner(
+                client.as_ref(),
+                &binary,
+                args.circuit_limit,
+                &mut gpu_state,
+                args.path.clone(),
+                &supported_versions,
+            )
+            .await
+            .expect("Failed to run FRI prover")
+            {
+                proof_generated = true;
+                break;
+            }
+        }
 
         if proof_generated {
             proof_count += 1;
@@ -242,10 +247,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             retrying_since = Instant::now();
         } else {
             // If no task was found, wait before trying again
-
             if retrying_since.elapsed() >= retry_log_interval {
                 tracing::info!(
-                    "No pending batches to prove from sequencer for {} seconds",
+                    "No FRI jobs available for pick from sequencer set for {} seconds",
                     retrying_since.elapsed().as_secs()
                 );
                 retrying_since = Instant::now();
