@@ -257,8 +257,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             tokio::time::sleep(retry_interval).await;
         }
     }
-
-    Ok(())
 }
 
 pub async fn run_inner(

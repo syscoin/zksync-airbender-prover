@@ -267,8 +267,6 @@ pub async fn run_linking_fri_snark(
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
-
-    Ok(())
 }
 
 pub async fn run_inner(
