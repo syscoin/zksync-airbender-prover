@@ -45,3 +45,6 @@ gpu = [
     "zksync_os_fri_prover/gpu",
     "zksync_os_snark_prover/gpu",
 ]
+
+[dev-dependencies]
+async-trait.workspace = true
