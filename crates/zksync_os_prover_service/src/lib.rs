@@ -207,12 +207,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let mut fri_proof_count = 0usize;
     let retry_interval = Duration::from_millis(100);
 
-    // Keep FRI GPU state warm across the entire service lifetime.
     #[cfg(feature = "gpu")]
-    let mut gpu_state = GpuSharedState::new(
+    let mut gpu_state = Some(GpuSharedState::new(
         &binary,
         zksync_airbender_cli::prover_utils::MainCircuitType::ReducedRiscVMachine,
-    );
+    ));
     #[cfg(not(feature = "gpu"))]
     let mut gpu_state = GpuSharedState::new(&binary);
 
@@ -239,6 +238,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 client.as_ref(),
                 &binary,
                 args.circuit_limit,
+                #[cfg(feature = "gpu")]
+                gpu_state
+                    .as_mut()
+                    .expect("FRI GPU state should be initialized"),
+                #[cfg(not(feature = "gpu"))]
                 &mut gpu_state,
                 args.fri_path.clone(),
                 &supported_versions,
@@ -264,6 +268,13 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     break;
                 }
             }
+        }
+
+        #[cfg(feature = "gpu")]
+        {
+            tracing::info!("Dropping FRI GPU state before SNARK phase");
+            // Release FRI GPU allocations before SNARK merge/final proof to reduce peak VRAM usage.
+            gpu_state = None;
         }
 
         let proof_generated = acquire_snark_proof(
@@ -304,6 +315,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 "No SNARK proof was generated within snark_acquire_timeout_secs ({} seconds), returning to FRI phase",
                 args.snark_acquire_timeout_secs
             );
+        }
+
+        #[cfg(feature = "gpu")]
+        {
+            tracing::info!("Reinitializing FRI GPU state after SNARK phase");
+            gpu_state = Some(GpuSharedState::new(
+                &binary,
+                zksync_airbender_cli::prover_utils::MainCircuitType::ReducedRiscVMachine,
+            ));
         }
 
         // Reset phase counters.
