@@ -240,7 +240,7 @@ pub async fn run_linking_fri_snark(
             let client = &clients[idx];
             tracing::debug!("Polling sequencer: {}", client.sequencer_url());
 
-            match run_inner(
+            if run_inner(
                 client.as_ref(),
                 &verifier_binary,
                 output_dir.clone(),
