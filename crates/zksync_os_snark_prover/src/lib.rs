@@ -26,6 +26,35 @@ use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
 pub mod metrics;
 // SYSCOIN
+fn configured_snark_thread_stack_size() -> Option<usize> {
+    let raw = std::env::var("RUST_MIN_STACK").ok()?;
+    match raw.parse::<usize>() {
+        Ok(0) => {
+            tracing::warn!("RUST_MIN_STACK is set to 0, ignoring dedicated SNARK thread stack");
+            None
+        }
+        Ok(size) => Some(size),
+        Err(error) => {
+            tracing::warn!(
+                "failed to parse RUST_MIN_STACK='{}' for dedicated SNARK thread stack: {}",
+                raw,
+                error
+            );
+            None
+        }
+    }
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "unknown panic payload".to_owned(),
+        },
+    }
+}
+// SYSCOIN
 async fn order_clients_by_oldest_unassigned(
     clients: &[Box<dyn ProofClient + Send + Sync>],
     stage: JobQueueStage,
@@ -383,16 +412,66 @@ pub async fn run_inner(
 
     tracing::info!("SNARKifying proof");
     let start = Instant::now();
-    match prove(
-        one_fri_path.into_os_string().into_string().unwrap(),
-        output_dir.clone(),
-        Some(trusted_setup_file.clone()),
-        false,
-        #[cfg(feature = "gpu")]
-        Some(precomputations),
-        // note that the API is use_zk, so we invert the disable_zk flag
-        !disable_zk,
-    ) {
+    // SYSCOIN
+    let snark_proof_path = Path::new(&output_dir).join("snark_proof.json");
+    // Avoid accidentally reusing an old proof artifact when SNARKification fails.
+    if snark_proof_path.exists() {
+        std::fs::remove_file(&snark_proof_path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to remove stale snark proof artifact at {}: {e}",
+                snark_proof_path.display()
+            )
+        })?;
+    }
+    let prove_result = {
+        let snark_input = one_fri_path.into_os_string().into_string().unwrap();
+        let snark_output_dir = output_dir.clone();
+        let snark_trusted_setup_file = trusted_setup_file.clone();
+        let use_zk = !disable_zk;
+
+        if let Some(stack_size) = configured_snark_thread_stack_size() {
+            tracing::info!(
+                "Running SNARKification on a dedicated thread with {} bytes of stack",
+                stack_size
+            );
+            std::thread::scope(|scope| {
+                let handle = std::thread::Builder::new()
+                    .name("snarkify-proof".to_owned())
+                    .stack_size(stack_size)
+                    .spawn_scoped(scope, || {
+                        prove(
+                            snark_input,
+                            snark_output_dir,
+                            Some(snark_trusted_setup_file),
+                            false,
+                            #[cfg(feature = "gpu")]
+                            Some(precomputations),
+                            use_zk,
+                        )
+                        .map_err(|error| error.to_string())
+                    })
+                    .map_err(|error| {
+                        format!("failed to spawn dedicated SNARKification thread: {error}")
+                    })?;
+                handle
+                    .join()
+                    .map_err(panic_payload_to_string)?
+            })
+        } else {
+            prove(
+                snark_input,
+                snark_output_dir,
+                Some(snark_trusted_setup_file),
+                false,
+                #[cfg(feature = "gpu")]
+                Some(precomputations),
+                use_zk,
+            )
+            .map_err(|error| error.to_string())
+        }
+    };
+
+    match prove_result {
         Ok(()) => {
             stats.observe_step(SnarkStage::Snark, start.elapsed());
 
@@ -400,17 +479,27 @@ pub async fn run_inner(
 
             tracing::info!("Finished generating proof, time stats: {}", stats);
         }
-        Err(e) => {
-            tracing::error!("failed to SNARKify proof: {e:?}, time stats: {}", stats);
+        Err(error) => {
+            tracing::error!(
+                "failed to SNARKify proof: {}, time stats: {}",
+                error,
+                stats
+            );
+            // Do not submit proof when SNARKification failed.
+            return Ok(false);
         }
     }
-
-    let snark_proof: SnarkWrapperProof = deserialize_from_file(
-        Path::new(&output_dir)
-            .join("snark_proof.json")
-            .to_str()
-            .unwrap(),
-    );
+    // SYSCOIN
+    if !snark_proof_path.exists() {
+        tracing::error!(
+            "SNARKification finished but output proof file is missing at {}",
+            snark_proof_path.display()
+        );
+        return Ok(false);
+    }
+    // SYSCOIN
+    let snark_proof: SnarkWrapperProof =
+        deserialize_from_file(snark_proof_path.to_str().unwrap());
 
     match client
         .submit_snark_proof(start_batch, end_batch, vk_hash.clone(), snark_proof)
