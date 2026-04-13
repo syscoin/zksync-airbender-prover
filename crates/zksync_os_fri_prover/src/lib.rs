@@ -48,10 +48,7 @@ async fn ordered_fri_client_indices(clients: &[Box<dyn ProofClient + Send + Sync
     scored.sort_by_key(|(idx, is_unassigned, age, batch)| {
         (!*is_unassigned, std::cmp::Reverse(*age), *batch, *idx)
     });
-    scored
-        .into_iter()
-        .map(|(idx, _, _, _)| idx)
-        .collect()
+    scored.into_iter().map(|(idx, _, _, _)| idx).collect()
 }
 
 /// Command-line arguments for the Zksync OS prover
@@ -99,7 +96,7 @@ pub struct Args {
     pub prometheus_port: u16,
 
     /// Timeout for HTTP requests to sequencer in seconds. If no response is received within this time, the prover will exit.
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value = "30")]
     pub request_timeout_secs: u64,
 
     /// Name of the prover for identification in the sequencer's prover api

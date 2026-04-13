@@ -19,8 +19,8 @@ use zksync_airbender_execution_utils::{
     get_padded_binary, Machine, ProgramProof, RecursionStrategy, VerifierCircuitsIdentifiers,
     UNIVERSAL_CIRCUIT_VERIFIER,
 };
-use zksync_sequencer_proof_client::{ProofClient, SnarkProofInputs};
 use zksync_sequencer_proof_client::JobQueueStage;
+use zksync_sequencer_proof_client::{ProofClient, SnarkProofInputs};
 
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
@@ -453,9 +453,7 @@ pub async fn run_inner(
                     .map_err(|error| {
                         format!("failed to spawn dedicated SNARKification thread: {error}")
                     })?;
-                handle
-                    .join()
-                    .map_err(panic_payload_to_string)?
+                handle.join().map_err(panic_payload_to_string)?
             })
         } else {
             prove(
@@ -480,11 +478,7 @@ pub async fn run_inner(
             tracing::info!("Finished generating proof, time stats: {}", stats);
         }
         Err(error) => {
-            tracing::error!(
-                "failed to SNARKify proof: {}, time stats: {}",
-                error,
-                stats
-            );
+            tracing::error!("failed to SNARKify proof: {}, time stats: {}", error, stats);
             // Do not submit proof when SNARKification failed.
             return Ok(false);
         }
@@ -498,8 +492,7 @@ pub async fn run_inner(
         return Ok(false);
     }
     // SYSCOIN
-    let snark_proof: SnarkWrapperProof =
-        deserialize_from_file(snark_proof_path.to_str().unwrap());
+    let snark_proof: SnarkWrapperProof = deserialize_from_file(snark_proof_path.to_str().unwrap());
 
     match client
         .submit_snark_proof(start_batch, end_batch, vk_hash.clone(), snark_proof)

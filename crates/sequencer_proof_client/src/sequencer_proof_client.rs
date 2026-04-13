@@ -3,10 +3,9 @@ use std::time::{Duration, Instant};
 use crate::metrics::Method;
 use crate::sequencer_endpoint::SequencerEndpoint;
 use crate::{
-    FailedFriProofPayload, FriJobInputs, GetSnarkProofPayload, JobQueueStage, QueueJobStatus,
-    JobStatusPayload, NextFriProverJobPayload,
-    PeekableProofClient, ProofClient, SnarkProofInputs, SubmitFriProofPayload,
-    SubmitSnarkProofPayload,
+    FailedFriProofPayload, FriJobInputs, GetSnarkProofPayload, JobQueueStage, JobStatusPayload,
+    NextFriProverJobPayload, PeekableProofClient, ProofClient, QueueJobStatus, SnarkProofInputs,
+    SubmitFriProofPayload, SubmitSnarkProofPayload,
 };
 use crate::{L2BatchNumber, SEQUENCER_CLIENT_METRICS};
 use anyhow::{anyhow, Context};
@@ -33,7 +32,7 @@ impl SequencerProofClient {
     /// # Arguments
     /// * `endpoint` - The sequencer endpoint (URL + optional credentials)
     /// * `prover_name` - The name of the prover (used for identification in sequencer prover api)
-    /// * `timeout` - Optional timeout for requests (None defaults to 2 seconds)
+    /// * `timeout` - Optional timeout for requests (None defaults to 30 seconds)
     ///
     /// # Errors
     /// * if building the reqwest client fails
@@ -62,7 +61,7 @@ impl SequencerProofClient {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(timeout.unwrap_or(Duration::from_secs(2)))
+            .timeout(timeout.unwrap_or(Duration::from_secs(30)))
             .default_headers(headers)
             .build()
             .context("Failed to build reqwest client")?;
@@ -79,7 +78,7 @@ impl SequencerProofClient {
     /// # Arguments
     /// * `endpoints` - A vector of sequencer endpoints
     /// * `prover_name` - The name of the prover (used for identification in sequencer prover api)
-    /// * `timeout` - Optional timeout for requests (None defaults to 2 seconds)
+    /// * `timeout` - Optional timeout for requests (None defaults to 30 seconds)
     ///
     /// # Errors
     /// * if there are no endpoints provided (empty vector)
@@ -248,7 +247,9 @@ impl ProofClient for SequencerProofClient {
 
         let status_code = resp.status();
         if !status_code.is_success() {
-            return Err(anyhow!("Failed to get FRI status: status {status_code} from {url}"));
+            return Err(anyhow!(
+                "Failed to get FRI status: status {status_code} from {url}"
+            ));
         }
 
         let payloads = resp.json::<Vec<JobStatusPayload>>().await?;

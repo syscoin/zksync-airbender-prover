@@ -129,10 +129,7 @@ async fn ordered_fri_client_indices(
     scored.sort_by_key(|(idx, is_unassigned, age, batch)| {
         (!*is_unassigned, std::cmp::Reverse(*age), *batch, *idx)
     });
-    scored
-        .into_iter()
-        .map(|(idx, _, _, _)| idx)
-        .collect()
+    scored.into_iter().map(|(idx, _, _, _)| idx).collect()
 }
 
 async fn ordered_client_indices_for_stage(
@@ -161,10 +158,7 @@ async fn ordered_client_indices_for_stage(
     scored.sort_by_key(|(idx, is_unassigned, age, batch)| {
         (!*is_unassigned, std::cmp::Reverse(*age), *batch, *idx)
     });
-    scored
-        .into_iter()
-        .map(|(idx, _, _, _)| idx)
-        .collect()
+    scored.into_iter().map(|(idx, _, _, _)| idx).collect()
 }
 
 pub fn init_tracing() {
