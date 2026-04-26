@@ -23,7 +23,8 @@ pub async fn main() -> anyhow::Result<()> {
                 Ok(_) => tracing::info!("Zksync OS FRI prover finished successfully"),
                 Err(e) => tracing::error!("Zksync OS FRI prover finished with error: {e}"),
             }
-            stop_sender.send(true).expect("failed to send stop signal");
+            // SYSCOIN: If the metrics server failed to start, the watch receiver was dropped with the exporter.
+            let _ = stop_sender.send(true);
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Stop request received, shutting down");
