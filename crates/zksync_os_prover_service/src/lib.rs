@@ -360,7 +360,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         {
             tracing::info!("Dropping FRI GPU state before SNARK phase");
             // Release FRI GPU allocations before SNARK merge/final proof to reduce peak VRAM usage.
-            gpu_state = None;
+            drop(gpu_state.take());
         }
 
         let proof_generated = acquire_snark_proof(
