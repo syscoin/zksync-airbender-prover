@@ -14,7 +14,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use url::Url;
-use zksync_airbender_execution_utils::ProgramProof;
+use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
 
 mod metrics;
 
@@ -56,7 +56,7 @@ struct SubmitSnarkProofPayload {
     vk_hash: String,
     proof: String, // base64‑encoded SNARK proof
 }
-// SYSCOIN
+// SYSCOIN: Queue visibility is used to prioritize the head batch across sequencers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JobStatusPayload {
     fri_job: JobMetaPayload,
@@ -117,7 +117,7 @@ pub struct SnarkProofInputs {
     pub from_batch_number: L2BatchNumber,
     pub to_batch_number: L2BatchNumber,
     pub vk_hash: String,
-    pub fri_proofs: Vec<ProgramProof>,
+    pub fri_proofs: Vec<UnrolledProgramProof>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,7 +126,7 @@ pub struct FriJobInputs {
     pub vk_hash: String,
     pub prover_input: Vec<u8>,
 }
-// SYSCOIN
+// SYSCOIN: Queue visibility is used to prioritize the head batch across sequencers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueJobStatus {
     pub batch_number: u32,
@@ -161,10 +161,10 @@ pub trait ProofClient: Send + Sync {
         proof: String,
     ) -> anyhow::Result<()>;
 
-    /// SYSCOIN Read current queue status for selected stage.
+    /// SYSCOIN: Read current queue status for the selected stage.
     async fn status(&self, stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>>;
 
-    /// Read current FRI queue status.
+    /// SYSCOIN: Read current FRI queue status.
     async fn fri_status(&self) -> anyhow::Result<Vec<QueueJobStatus>>;
 
     /// Fetch the next SNARK job to prove.

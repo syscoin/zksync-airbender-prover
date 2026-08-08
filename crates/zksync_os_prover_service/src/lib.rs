@@ -2,6 +2,7 @@
 // SNARK & FRI should be libs only and expose no binaries themselves.
 // We'll need slightly more "involved" CLI args, but nothing too complex.
 use std::{
+    cell::RefCell,
     future::Future,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -11,19 +12,11 @@ use anyhow::Context;
 use clap::Parser;
 use protocol_version::SupportedProtocolVersions;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
-#[cfg(feature = "gpu")]
-use zkos_wrapper::gpu::snark::gpu_create_snark_setup_data;
-use zksync_airbender_cli::prover_utils::load_binary_from_path;
-#[cfg(not(feature = "gpu"))]
-use zksync_airbender_cli::prover_utils::GpuSharedState;
-#[cfg(feature = "gpu")]
-use zksync_airbender_cli::prover_utils::GpuSharedState;
-use zksync_airbender_execution_utils::{get_padded_binary, UNIVERSAL_CIRCUIT_VERIFIER};
-#[cfg(feature = "gpu")]
-use zksync_os_snark_prover::compute_compression_vk;
 use zksync_sequencer_proof_client::{
     JobQueueStage, QueueJobStatus, SequencerEndpoint, SequencerProofClient,
 };
+
+pub mod metrics;
 
 /// Command-line arguments for the Zksync OS prover
 #[derive(Parser, Debug)]
@@ -37,11 +30,11 @@ pub struct Args {
     /// Max amount of FRI proofs per SNARK (default value - 100)
     #[arg(long, default_value = "100", conflicts_with = "max_snark_latency")]
     pub max_fris_per_snark: Option<usize>,
-    // SYSCOIN
-    /// SYSCOIN Switch to SNARK early when any sequencer has this many queued SNARK jobs. Set to 0 to disable.
+    // SYSCOIN: Switch phases before a claimable SNARK queue grows without bound.
+    /// SYSCOIN: Switch to SNARK early when any sequencer has this many queued SNARK jobs. Set to 0 to disable.
     #[arg(long, default_value = "80")]
     pub adaptive_snark_queue_threshold: usize,
-    /// SYSCOIN Max time to wait for a SNARK job after switching away from FRI proving
+    /// SYSCOIN: Max time to wait for a SNARK job after switching away from FRI proving.
     #[arg(long, default_value = "120")]
     pub snark_acquire_timeout_secs: u64,
     /// Sequencer URL(s) for polling tasks. Comma-separated for round-robin.
@@ -64,9 +57,6 @@ pub struct Args {
     /// Path to `app.bin`
     #[arg(long)]
     pub app_bin_path: Option<PathBuf>,
-    /// Circuit limit - max number of MainVM circuits to instantiate to run the batch fully
-    #[arg(long, default_value = "10000")]
-    pub circuit_limit: usize,
     /// Directory to store the output files for SNARK prover
     #[arg(long)]
     pub output_dir: String,
@@ -79,6 +69,9 @@ pub struct Args {
     /// Path to the output file for FRI proofs
     #[arg(short, long)]
     pub fri_path: Option<PathBuf>,
+    /// Port to run the Prometheus metrics server on
+    #[arg(long, default_value = "3124")]
+    pub prometheus_port: u16,
     /// Disable ZK for SNARK proofs
     #[arg(long, default_value_t = false)]
     pub disable_zk: bool,
@@ -108,7 +101,7 @@ where
         tokio::time::sleep(poll_interval).await;
     }
 }
-// SYSCOIN
+// SYSCOIN: Prioritize the oldest claimable head batch across sequencers.
 fn head_queue_job(statuses: &[QueueJobStatus]) -> Option<(bool, u64, u32)> {
     let head_unassigned = statuses
         .iter()
@@ -164,7 +157,7 @@ async fn ordered_client_indices_for_stage(
     scored.into_iter().map(|(idx, _, _, _)| idx).collect()
 }
 
-// SYSCOIN
+// SYSCOIN: Switch phases before a claimable SNARK queue grows without bound.
 async fn snark_queue_pressure(
     clients: &[Box<dyn zksync_sequencer_proof_client::ProofClient + Send + Sync>],
     threshold: usize,
@@ -220,9 +213,16 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         args.sequencer_urls.len(),
         args.sequencer_urls
     );
-    let clients =
-        SequencerProofClient::new_clients(args.sequencer_urls, "prover_service".to_string(), None)
-            .context("failed to create sequencer proof clients")?;
+    let supported_versions = SupportedProtocolVersions::default();
+    tracing::info!("{:#?}", supported_versions);
+
+    let clients = SequencerProofClient::new_clients(
+        args.sequencer_urls,
+        "prover_service".to_string(),
+        None,
+        supported_versions.vk_hashes(),
+    )
+    .context("failed to create sequencer proof clients")?;
 
     let manifest_path = if let Ok(manifest_path) = std::env::var("CARGO_MANIFEST_DIR") {
         manifest_path
@@ -232,38 +232,39 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let binary_path = args
         .app_bin_path
         .unwrap_or_else(|| Path::new(&manifest_path).join("../../multiblock_batch.bin"));
-    let binary = load_binary_from_path(&binary_path.to_str().unwrap().to_string());
-    let verifier_binary = get_padded_binary(UNIVERSAL_CIRCUIT_VERIFIER);
 
-    let supported_versions = SupportedProtocolVersions::default();
-    tracing::info!("{:#?}", supported_versions);
+    // The FRI prover and the FRI-proof combiner each size their device pool to "all
+    // free VRAM" and need essentially the whole card (on prod-shaped L4s a resident
+    // SNARK wrapper starves the FRI prover into OOM). So the wrapper is built per
+    // SNARK job — after the job's proofs are merged — and dropped with the job,
+    // mirroring how `fri_prover` is dropped before SNARKing. Its host-side setup
+    // caches survive between jobs, so only the first job pays the full setup
+    // derivation (reported as the `wrapper_setup` stage). It is kept in a RefCell so
+    // the retry closure below can borrow it mutably.
+    let wrapper_source = RefCell::new(zksync_os_snark_prover::WrapperSource::PerJob {
+        trusted_setup_file: args.trusted_setup_file.clone(),
+        host_cache: None,
+    });
 
-    #[cfg(feature = "gpu")]
-    let precomputations = {
-        tracing::info!("Computing SNARK precomputations");
-        let compression_vk = compute_compression_vk(binary_path.to_str().unwrap().to_string());
-        let precomputations =
-            gpu_create_snark_setup_data(&compression_vk, &args.trusted_setup_file);
-        tracing::info!("Finished computing SNARK precomputations");
-        precomputations
-    };
+    // The FRI-proof combiner likewise caches its setup data (and, on `gpu` builds, the
+    // GPU prover's host state — pinned host RAM only, no VRAM) across jobs and across
+    // the FRI/SNARK phase alternation. Its caches build lazily on the first multi-proof
+    // SNARK job rather than at startup, so a service that never sees multi-proof jobs
+    // doesn't pin tens of gigabytes of host RAM for nothing.
+    let combiner = RefCell::new(zksync_os_snark_prover::create_combiner());
 
     tracing::info!("Starting Zksync OS Prover Service");
-    // SYSCOIN
+    // SYSCOIN: Preserve queue-aware scheduling on the V8 prover stack.
     let mut snark_proof_count = 0;
     let mut snark_latency = Instant::now();
     let mut fri_proof_count = 0usize;
     let retry_interval = Duration::from_millis(100);
 
-    #[cfg(feature = "gpu")]
-    let mut gpu_state = Some(GpuSharedState::new(
-        &binary,
-        zksync_airbender_cli::prover_utils::MainCircuitType::ReducedRiscVMachine,
-    ));
-    #[cfg(not(feature = "gpu"))]
-    let mut gpu_state = GpuSharedState::new(&binary);
-
     loop {
+        // Recreate the FRI prover after each SNARK phase so its GPU resources are
+        // released before the wrapper takes ownership of the device.
+        let fri_prover = zksync_os_fri_prover::create_prover(&binary_path)?;
+
         // Run FRI until one of the configured handoff conditions is met.
         loop {
             let ordered_indices = ordered_fri_client_indices(&clients).await;
@@ -277,7 +278,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                         break;
                     }
                 }
-                // SYSCOIN
+                // SYSCOIN: Switch phases before a claimable SNARK queue grows without bound.
                 if let Some((client_idx, total, unassigned, oldest_seconds)) =
                     snark_queue_pressure(&clients, args.adaptive_snark_queue_threshold).await
                 {
@@ -300,14 +301,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
                 if zksync_os_fri_prover::run_inner(
                     client.as_ref(),
-                    &binary,
-                    args.circuit_limit,
-                    #[cfg(feature = "gpu")]
-                    gpu_state
-                        .as_mut()
-                        .expect("FRI GPU state should be initialized"),
-                    #[cfg(not(feature = "gpu"))]
-                    &mut gpu_state,
+                    &fri_prover,
                     args.fri_path.clone(),
                     &supported_versions,
                 )
@@ -332,7 +326,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     break;
                 }
             }
-            // SYSCOIN
+            // SYSCOIN: Switch phases before a claimable SNARK queue grows without bound.
             if let Some((client_idx, total, unassigned, oldest_seconds)) =
                 snark_queue_pressure(&clients, args.adaptive_snark_queue_threshold).await
             {
@@ -355,14 +349,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 }
             }
         }
+        // Release the FRI prover's airbender GPU resources (as now SNARKing will be taking them).
+        drop(fri_prover);
 
-        #[cfg(feature = "gpu")]
-        {
-            tracing::info!("Dropping FRI GPU state before SNARK phase");
-            // Release FRI GPU allocations before SNARK merge/final proof to reduce peak VRAM usage.
-            drop(gpu_state.take());
-        }
-
+        // Here we do exactly one SNARK proof
+        tracing::info!("Running SNARK prover across the configured sequencer set");
+        // Holding the RefCell guard across the await is fine here: `run` executes as a
+        // single (non-Send) future and SNARK attempts run strictly sequentially, so no
+        // concurrent borrow of the wrapper can occur.
+        #[allow(clippy::await_holding_refcell_ref)]
         let proof_generated = acquire_snark_proof(
             Duration::from_secs(args.snark_acquire_timeout_secs),
             SNARK_POLL_INTERVAL,
@@ -373,11 +368,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     let client = &clients[idx];
                     if zksync_os_snark_prover::run_inner(
                         client.as_ref(),
-                        &verifier_binary,
+                        &mut wrapper_source.borrow_mut(),
+                        &mut combiner.borrow_mut(),
                         args.output_dir.clone(),
-                        args.trusted_setup_file.clone(),
-                        #[cfg(feature = "gpu")]
-                        &precomputations,
                         args.disable_zk,
                         &supported_versions,
                     )
@@ -401,15 +394,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 "No SNARK proof was generated within snark_acquire_timeout_secs ({} seconds), returning to FRI phase",
                 args.snark_acquire_timeout_secs
             );
-        }
-
-        #[cfg(feature = "gpu")]
-        {
-            tracing::info!("Reinitializing FRI GPU state after SNARK phase");
-            gpu_state = Some(GpuSharedState::new(
-                &binary,
-                zksync_airbender_cli::prover_utils::MainCircuitType::ReducedRiscVMachine,
-            ));
         }
 
         // Reset phase counters.
@@ -629,7 +613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    // SYSCOIN
+    // SYSCOIN: The adaptive trigger must count only claimable SNARK jobs.
     async fn snark_queue_pressure_uses_largest_busy_queue() {
         let clients: Vec<Box<dyn ProofClient + Send + Sync>> = vec![
             Box::new(MockProofClient::statuses(

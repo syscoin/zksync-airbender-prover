@@ -1,18 +1,14 @@
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use protocol_version::SupportedProtocolVersions;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
-use zksync_os_snark_prover::{
-    generate_verification_key, init_tracing, metrics, run_linking_fri_snark,
-};
+use zksync_os_snark_prover::{init_tracing, metrics, run_linking_fri_snark};
 use zksync_sequencer_proof_client::{SequencerEndpoint, SequencerProofClient};
 
 #[derive(Default, Debug, Serialize, Deserialize, Parser, Clone)]
 pub struct SetupOptions {
-    #[arg(long)]
-    binary_path: String,
-
     #[arg(long)]
     output_dir: String,
 
@@ -29,16 +25,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    // TODO: redo this command, naming is confusing
-    /// Generate the snark verification keys
-    GenerateKeys {
-        #[clap(flatten)]
-        setup: SetupOptions,
-        /// Path to the output verification key file
-        #[arg(long)]
-        vk_verification_key_file: Option<String>,
-    },
-
     RunProver {
         /// Sequencer URL(s) to poll for tasks. Comma-separated for round-robin.
         ///
@@ -77,30 +63,30 @@ enum Commands {
     },
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
 
+    // Circuit synthesis in the SNARK wrapper chain exhausts the default stack, and the
+    // main thread's size is fixed by the OS. Give every thread the runtime spawns
+    // (workers and blocking threads alike) an explicit stack size: it only limits
+    // how far the stack may grow, nothing is allocated up front. RUST_MIN_STACK, when set,
+    // is used as-is (so constrained environments can also lower it); otherwise 256 MiB.
+    let stack_size = std::env::var("RUST_MIN_STACK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(256 * 1024 * 1024);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(stack_size)
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+
     match cli.command {
-        Commands::GenerateKeys {
-            setup:
-                SetupOptions {
-                    binary_path,
-                    output_dir,
-                    trusted_setup_file,
-                },
-            vk_verification_key_file,
-        } => generate_verification_key(
-            binary_path,
-            output_dir,
-            trusted_setup_file,
-            vk_verification_key_file,
-        ),
         Commands::RunProver {
             sequencer_urls,
             setup:
                 SetupOptions {
-                    binary_path,
                     output_dir,
                     trusted_setup_file,
                 },
@@ -110,16 +96,6 @@ fn main() {
             disable_zk,
             prover_name,
         } => {
-            // TODO: edit this comment
-            // we need a bigger stack, due to crypto code exhausting default stack size, 40 MBs picked here
-            // note that size is not allocated, only limits the amount to which it can grow
-            let stack_size = 40 * 1024 * 1024;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .thread_stack_size(stack_size)
-                .enable_all()
-                .build()
-                .expect("failed to build tokio context");
-
             let (stop_sender, stop_receiver) = watch::channel(false);
 
             runtime.block_on(async move {
@@ -134,28 +110,42 @@ fn main() {
                     sequencer_urls.len(),
                     sequencer_urls
                 );
-                let clients =
-                    SequencerProofClient::new_clients(sequencer_urls, prover_name, Some(timeout))
-                        .expect("failed to create sequencer proof clients");
+                let supported_versions = SupportedProtocolVersions::default();
+                let clients = SequencerProofClient::new_clients(
+                    sequencer_urls,
+                    prover_name,
+                    Some(timeout),
+                    supported_versions.vk_hashes(),
+                )
+                .expect("failed to create sequencer proof clients");
 
                 tracing::info!(
                     "Starting zksync_os_snark_prover with request timeout of {}s",
                     request_timeout_secs
                 );
 
-                tokio::select! {
-                    result = run_linking_fri_snark(
-                        binary_path,
+                // The proving chain is synchronous and stack-hungry; drive it from a
+                // runtime blocking thread (which gets the explicit stack size above)
+                // rather than polling it on the OS-sized main thread via `block_on`.
+                let runtime_handle = tokio::runtime::Handle::current();
+                let prover_task = tokio::task::spawn_blocking(move || {
+                    runtime_handle.block_on(run_linking_fri_snark(
                         clients,
                         output_dir,
                         trusted_setup_file,
                         iterations,
                         disable_zk,
-                    ) => {
+                    ))
+                });
+
+                tokio::select! {
+                    result = prover_task => {
                         tracing::info!("SNARK prover finished");
-                        result.expect("SNARK prover finished with error");
-                        // SYSCOIN: If the metrics server failed to start, the watch receiver
-                        // was dropped with the exporter; ignore SendError in that case.
+                        result
+                            .expect("SNARK prover task panicked")
+                            .expect("SNARK prover finished with error");
+                        // SYSCOIN: If the metrics server failed to start, its watch receiver
+                        // was dropped with the exporter; shutdown should still succeed.
                         let _ = stop_sender.send(true);
                     }
                     _ = tokio::signal::ctrl_c() => {
@@ -176,4 +166,6 @@ fn main() {
             });
         }
     }
+
+    Ok(())
 }

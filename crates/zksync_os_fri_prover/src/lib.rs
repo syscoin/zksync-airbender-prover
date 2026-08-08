@@ -10,10 +10,9 @@ use clap::Parser;
 use protocol_version::SupportedProtocolVersions;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use zksync_airbender_cli::prover_utils::{
-    create_proofs_internal, create_recursion_proofs, load_binary_from_path, serialize_to_file,
-    GpuSharedState,
+    serialize_to_file, ProgramProver, ProgramProverConfig, ProgramSource, ProofTarget,
 };
-use zksync_airbender_execution_utils::{Machine, ProgramProof, RecursionStrategy};
+use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
 use zksync_sequencer_proof_client::{
     FriJobInputs, JobQueueStage, ProofClient, QueueJobStatus, SequencerEndpoint,
     SequencerProofClient,
@@ -22,7 +21,7 @@ use zksync_sequencer_proof_client::{
 use crate::metrics::FRI_PROVER_METRICS;
 
 pub mod metrics;
-// SYSCOIN
+// SYSCOIN: Prioritize the oldest claimable head batch across sequencers.
 fn head_queue_job(statuses: &[QueueJobStatus]) -> Option<(bool, u64, u32)> {
     let head_unassigned = statuses
         .iter()
@@ -79,16 +78,9 @@ pub struct Args {
         default_value = "http://localhost:3124"
     )]
     pub sequencer_urls: Vec<SequencerEndpoint>,
-    /// Enable logging and use the logging-enabled binary
-    /// This is not used in the FRI prover, but is kept for backward compatibility.
-    #[arg(long)]
-    pub enabled_logging: bool,
     /// Path to `app.bin`
     #[arg(long)]
     pub app_bin_path: Option<PathBuf>,
-    /// Circuit limit - max number of MainVM circuits to instantiate to run the batch fully
-    #[arg(long, default_value = "10000")]
-    pub circuit_limit: usize,
     /// Number of iterations before exiting. Only successfully generated proofs count. If not specified, runs indefinitely
     #[arg(long)]
     pub iterations: Option<usize>,
@@ -114,39 +106,40 @@ pub fn init_tracing() {
     FmtSubscriber::builder().with_env_filter(filter).init();
 }
 
-pub fn create_proof(
-    prover_input: Vec<u32>,
-    binary: &Vec<u32>,
-    circuit_limit: usize,
-    _gpu_state: &mut GpuSharedState,
-) -> ProgramProof {
-    let mut timing = Some(0f64);
-    let (proof_list, proof_metadata) = create_proofs_internal(
-        binary,
-        prover_input,
-        &Machine::Standard,
-        circuit_limit,
+/// Create a new prover for the given program binary.
+///
+/// The prover holds all precomputed setup data (and, with the `gpu` feature, the GPU
+/// context), so it should be constructed once and reused across batches.
+pub fn create_prover(binary_path: &Path) -> anyhow::Result<ProgramProver> {
+    let source = ProgramSource::from_paths(
+        binary_path
+            .to_str()
+            .with_context(|| format!("non-UTF8 binary path {binary_path:?}"))?
+            .to_string(),
+        // The matching `.text` section path is derived from the `.bin` path.
         None,
-        #[cfg(feature = "gpu")]
-        &mut Some(_gpu_state),
-        #[cfg(not(feature = "gpu"))]
-        &mut None,
-        &mut timing, // timing info
     );
-    let (recursion_proof_list, recursion_proof_metadata) = create_recursion_proofs(
-        proof_list,
-        proof_metadata,
-        // This is the default strategy (where recursion is done on reduced machine, and final step on 23 machine).
-        RecursionStrategy::UseReducedLog23Machine,
-        &None,
-        #[cfg(feature = "gpu")]
-        &mut Some(_gpu_state),
-        #[cfg(not(feature = "gpu"))]
-        &mut None,
-        &mut timing, // timing info
-    );
+    // Fail fast on a bad path instead of erroring only when the first job is picked.
+    for path in [&source.bin_path, &source.text_path] {
+        anyhow::ensure!(Path::new(path).is_file(), "program file not found: {path}");
+    }
+    let config = ProgramProverConfig {
+        // Recursion up to the unified layer: the compact form expected by the SNARK wrapper.
+        target: ProofTarget::RecursionUnified,
+        ..Default::default()
+    };
+    ProgramProver::new(source, config).map_err(|e| anyhow::anyhow!("failed to create prover: {e}"))
+}
 
-    ProgramProof::from_proof_list_and_metadata(&recursion_proof_list, &recursion_proof_metadata)
+pub fn create_proof(
+    prover: &ProgramProver,
+    batch_id: u64,
+    prover_input: Vec<u32>,
+) -> anyhow::Result<UnrolledProgramProof> {
+    let artifact = prover
+        .prove_words(batch_id, prover_input)
+        .map_err(|e| anyhow::anyhow!("failed to prove batch {batch_id}: {e}"))?;
+    Ok(artifact.proof)
 }
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
@@ -158,9 +151,16 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         args.sequencer_urls
     );
 
-    let clients =
-        SequencerProofClient::new_clients(args.sequencer_urls, args.prover_name, Some(timeout))
-            .context("failed to create sequencer proof clients")?;
+    let supported_versions = SupportedProtocolVersions::default();
+    tracing::info!("{:#?}", supported_versions);
+
+    let clients = SequencerProofClient::new_clients(
+        args.sequencer_urls,
+        args.prover_name,
+        Some(timeout),
+        supported_versions.vk_hashes(),
+    )
+    .context("failed to create sequencer proof clients")?;
 
     let manifest_path = if let Ok(manifest_path) = std::env::var("CARGO_MANIFEST_DIR") {
         manifest_path
@@ -168,21 +168,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         ".".to_string()
     };
 
-    let supported_versions = SupportedProtocolVersions::default();
-    tracing::info!("{:#?}", supported_versions);
-
     let binary_path = args
         .app_bin_path
         .unwrap_or_else(|| Path::new(&manifest_path).join("../../multiblock_batch.bin"));
-    let binary = load_binary_from_path(&binary_path.to_str().unwrap().to_string());
-    // For regular fri proving, we keep using reduced RiscV machine.
-    #[cfg(feature = "gpu")]
-    let mut gpu_state = GpuSharedState::new(
-        &binary,
-        zksync_airbender_cli::prover_utils::MainCircuitType::ReducedRiscVMachine,
-    );
-    #[cfg(not(feature = "gpu"))]
-    let mut gpu_state = GpuSharedState::new(&binary);
+    let prover = create_prover(&binary_path)?;
 
     tracing::info!(
         "Starting Zksync OS FRI prover with request timeout of {}s",
@@ -196,7 +185,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let retry_interval = Duration::from_millis(100);
     // If no proof is generated for 10 seconds, log a message
     let retry_log_interval = Duration::from_secs(10);
-    // SYSCOIN
+    // SYSCOIN: Prioritize the oldest claimable head batch across sequencers.
     loop {
         let ordered_indices = ordered_fri_client_indices(&clients).await;
         if ordered_indices.is_empty() {
@@ -217,9 +206,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
             if run_inner(
                 client.as_ref(),
-                &binary,
-                args.circuit_limit,
-                &mut gpu_state,
+                &prover,
                 args.path.clone(),
                 &supported_versions,
             )
@@ -373,10 +360,7 @@ mod tests {
 
 pub async fn run_inner(
     client: &dyn ProofClient,
-    binary: &Vec<u32>,
-    circuit_limit: usize,
-    #[cfg(feature = "gpu")] gpu_state: &mut GpuSharedState,
-    #[cfg(not(feature = "gpu"))] gpu_state: &mut GpuSharedState<'_>,
+    prover: &ProgramProver,
     path: Option<PathBuf>,
     supported_versions: &SupportedProtocolVersions,
 ) -> anyhow::Result<bool> {
@@ -430,7 +414,13 @@ pub async fn run_inner(
 
     let started_at = Instant::now();
 
-    // make prover_input (Vec<u8>) into Vec<u32>:
+    // make prover_input (Vec<u8>) into Vec<u32>, rejecting malformed input instead of
+    // silently truncating trailing bytes:
+    anyhow::ensure!(
+        prover_input.len() % 4 == 0,
+        "prover input for batch {batch_number} has {} bytes, expected a multiple of 4",
+        prover_input.len()
+    );
     let prover_input: Vec<u32> = prover_input
         .chunks_exact(4)
         .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
@@ -443,7 +433,7 @@ pub async fn run_inner(
         client.sequencer_url()
     );
 
-    let proof = create_proof(prover_input, binary, circuit_limit, gpu_state);
+    let proof = create_proof(prover, batch_number as u64, prover_input)?;
 
     tracing::info!(
         "Finished proving batch number {} with vk hash {}",
