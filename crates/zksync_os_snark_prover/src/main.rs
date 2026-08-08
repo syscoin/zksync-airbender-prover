@@ -51,7 +51,7 @@ enum Commands {
         /// Port to run the Prometheus metrics server on
         #[arg(long, default_value = "3124")]
         prometheus_port: u16,
-        /// Timeout for HTTP requests to sequencer in seconds. If no response is received within this time, the prover will exit.
+        /// SYSCOIN: Timeout for remote sequencer requests; 30 seconds avoids false failures on proof traffic.
         #[arg(long, default_value = "30")]
         request_timeout_secs: u64,
         /// Disable ZK for SNARK proofs

@@ -54,7 +54,7 @@ cargo run --release --features gpu --bin zksync_os_fri_prover -- --sequencer-url
 
 Specify optional `--iterations` argument to run FRI prover N times and then exit.
 Specify optional `--path` argument if you want to serialize FRI proof to file.
-Specify `--request_timeout_secs` argument to set a timeout for HTTP requests (default value is 30s).
+SYSCOIN: Specify `--request_timeout_secs` to override the 30s remote-request default.
 Specify `--sequencer-urls` to provide a comma-separated list of sequencer URLs to poll in round-robin fashion.
 
 Note: the app program consists of the `.bin` file passed via `--app-bin-path` **and** its
@@ -75,7 +75,7 @@ RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_snar
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
-Specify `--request_timeout_secs` argument to set a timeout for HTTP requests (default value is 30s).
+SYSCOIN: Specify `--request_timeout_secs` to override the 30s remote-request default.
 Specify `--sequencer-urls` to provide a comma-separated list of sequencer URLs to poll in round-robin fashion.
 
 **This one is only needed if you want to manually upload.**
@@ -105,7 +105,7 @@ RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_prov
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
 Specify `--max-snark-latency` OR `--max-fris-per-snark` to define latency (in seconds) OR max amount FRI proofs per SNARK for exiting FRI prover and starting SNARK prover. You can not specify them both in the same time.
-Specify `--adaptive-snark-queue-threshold` to switch to SNARK early when any sequencer has enough queued SNARK jobs.
+SYSCOIN: Specify `--adaptive-snark-queue-threshold` to switch to SNARK early when any sequencer has enough queued SNARK jobs.
 Specify `--snark-acquire-timeout-secs` to return to FRI proving if no SNARK job becomes available after switching modes.
 
 ## Development / WIP

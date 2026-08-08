@@ -39,3 +39,5 @@ gpu = ["zksync_airbender_cli/gpu"]
 
 [dev-dependencies]
 async-trait.workspace = true
+# SYSCOIN: Queue-ordering mocks submit the same wrapper proof type as the real client.
+zkos_wrapper.workspace = true

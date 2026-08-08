@@ -6,7 +6,6 @@ pub mod sequencer_proof_client;
 
 pub use sequencer_endpoint::SequencerEndpoint;
 pub use sequencer_proof_client::SequencerProofClient;
-pub use zkos_wrapper::SnarkWrapperProof;
 
 use crate::metrics::SEQUENCER_CLIENT_METRICS;
 use async_trait::async_trait;
@@ -14,6 +13,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use url::Url;
+use zkos_wrapper::SnarkWrapperProof;
 use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
 
 mod metrics;

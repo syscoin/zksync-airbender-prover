@@ -85,7 +85,7 @@ const V6: ProtocolVersion = ProtocolVersion {
     bin_md5sum: BinMd5Sum("e77ced130723f3e52099658d589a8454"),
 };
 
-/// Corresponds to server's execution_version 7
+/// SYSCOIN: Corresponds to the patched v31 server execution version 7 lane.
 #[allow(dead_code)]
 const V7: ProtocolVersion = ProtocolVersion {
     vk_hash: VerificationKeyHash(

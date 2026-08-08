@@ -14,9 +14,7 @@ use zksync_airbender_cli::prover_utils::{
     ProofTimingsMs, ProverBackend,
 };
 use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
-use zksync_sequencer_proof_client::{
-    JobQueueStage, ProofClient, QueueJobStatus, SnarkProofInputs,
-};
+use zksync_sequencer_proof_client::{JobQueueStage, ProofClient, QueueJobStatus, SnarkProofInputs};
 
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 

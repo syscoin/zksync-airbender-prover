@@ -30,7 +30,7 @@ impl SequencerProofClient {
     /// # Arguments
     /// * `endpoint` - The sequencer endpoint (URL + optional credentials)
     /// * `prover_name` - The name of the prover (used for identification in sequencer prover api)
-    /// * `timeout` - Optional timeout for requests (None defaults to 30 seconds)
+    /// * `timeout` - SYSCOIN: Optional timeout for requests (None defaults to 30 seconds)
     /// * `supported_vk_hashes` - VK hashes this prover supports; sent on pick requests so the
     ///   sequencer only assigns jobs of these versions. Empty means no declaration - the
     ///   sequencer will offer jobs of any version.
@@ -62,6 +62,7 @@ impl SequencerProofClient {
             );
         }
 
+        // SYSCOIN: Remote sequencers need more tolerance than upstream's local 2-second default.
         let client = reqwest::Client::builder()
             .timeout(timeout.unwrap_or(Duration::from_secs(30)))
             .default_headers(headers)
@@ -81,7 +82,7 @@ impl SequencerProofClient {
     /// # Arguments
     /// * `endpoints` - A vector of sequencer endpoints
     /// * `prover_name` - The name of the prover (used for identification in sequencer prover api)
-    /// * `timeout` - Optional timeout for requests (None defaults to 30 seconds)
+    /// * `timeout` - SYSCOIN: Optional timeout for requests (None defaults to 30 seconds)
     /// * `supported_vk_hashes` - VK hashes this prover supports; sent on pick requests so the
     ///   sequencer only assigns jobs of these versions. Empty means no declaration - the
     ///   sequencer will offer jobs of any version.

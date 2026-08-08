@@ -92,7 +92,7 @@ pub struct Args {
     #[arg(long, default_value = "3124")]
     pub prometheus_port: u16,
 
-    /// Timeout for HTTP requests to sequencer in seconds. If no response is received within this time, the prover will exit.
+    /// SYSCOIN: Timeout for remote sequencer requests; 30 seconds avoids false failures on compressed proof traffic.
     #[arg(long, default_value = "30")]
     pub request_timeout_secs: u64,
 
@@ -253,9 +253,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 mod tests {
     use async_trait::async_trait;
     use url::Url;
-    use zksync_sequencer_proof_client::{
-        L2BatchNumber, QueueJobStatus, SnarkProofInputs, SnarkWrapperProof,
-    };
+    use zkos_wrapper::SnarkWrapperProof;
+    use zksync_sequencer_proof_client::{L2BatchNumber, QueueJobStatus, SnarkProofInputs};
 
     use super::*;
 

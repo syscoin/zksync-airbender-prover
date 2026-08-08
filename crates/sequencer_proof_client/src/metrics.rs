@@ -7,7 +7,7 @@ use vise::{EncodeLabelSet, EncodeLabelValue, Family, Histogram, Metrics};
 pub(crate) enum Method {
     PickFri,
     SubmitFri,
-    // SYSCOIN
+    // SYSCOIN: Queue-status requests support cross-sequencer scheduling.
     StatusQueue,
     PickSnark,
     SubmitSnark,
