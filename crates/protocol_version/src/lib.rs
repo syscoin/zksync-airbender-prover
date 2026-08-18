@@ -85,16 +85,16 @@ const V6: ProtocolVersion = ProtocolVersion {
     bin_md5sum: BinMd5Sum("e77ced130723f3e52099658d589a8454"),
 };
 
-/// SYSCOIN: Corresponds to the patched v31 server execution version 7 lane.
+/// SYSCOIN: Corresponds to the portable-precompile v31 server execution version 7 lane.
 #[allow(dead_code)]
 const V7: ProtocolVersion = ProtocolVersion {
     vk_hash: VerificationKeyHash(
-        "0x6f837bbef255ebde36677f3accb456e16253fe43f4091b0e820bff0cf95a32a0",
+        "0x54bcb6abdcb4c8d8e088cc9f2ea9cc3505a8187a45b69e19e830590df6c9b0df",
     ),
     airbender_version: AirbenderVersion("v0.5.2"),
-    zksync_os_version: ZkSyncOSVersion("v0.3.1-interface-v0.1.3"),
+    zksync_os_version: ZkSyncOSVersion("v0.3.2-interface-v0.1.3"),
     zkos_wrapper: ZkOsWrapperVersion("v0.5.5"),
-    bin_md5sum: BinMd5Sum("12510b4aa39437592db334fa571b5f25"),
+    bin_md5sum: BinMd5Sum("605216284af853e6acb6be89fec486e3"),
 };
 
 /// Corresponds to server's execution_version 8 (protocol v32.0, zksync-os 0.4.0 native batch prover)
@@ -132,5 +132,37 @@ impl SupportedProtocolVersions {
             .iter()
             .map(|version| version.vk_hash.0.to_string())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v7_portable_binding_is_exact() {
+        assert_eq!(
+            V7.vk_hash.0,
+            "0x54bcb6abdcb4c8d8e088cc9f2ea9cc3505a8187a45b69e19e830590df6c9b0df"
+        );
+        assert_eq!(V7.airbender_version.0, "v0.5.2");
+        assert_eq!(V7.zksync_os_version.0, "v0.3.2-interface-v0.1.3");
+        assert_eq!(V7.zkos_wrapper.0, "v0.5.5");
+        assert_eq!(V7.bin_md5sum.0, "605216284af853e6acb6be89fec486e3");
+    }
+
+    #[test]
+    fn default_lane_remains_v8() {
+        let supported = SupportedProtocolVersions::default();
+
+        assert_eq!(
+            supported.vk_hashes(),
+            vec!["0x3e7784b0fdb09035a677ae80568d34fdb1f1ec6ac65bba5192cd977a4f0e7609"]
+        );
+        assert!(!supported.contains(V7.vk_hash.0));
+        assert_eq!(V8.airbender_version.0, "v0.6.0-rc.1");
+        assert_eq!(V8.zksync_os_version.0, "v0.4.0");
+        assert_eq!(V8.zkos_wrapper.0, "v0.6.0-rc.1");
+        assert_eq!(V8.bin_md5sum.0, "3e19df8c36564939950e0a079061ad1b");
     }
 }
