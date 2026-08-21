@@ -16,6 +16,7 @@ use reqwest::StatusCode;
 use url::Url;
 use zkos_wrapper::SnarkWrapperProof;
 
+// SYSCOIN: Large compressed prover payloads need separate connect, inactivity, and total limits.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -72,7 +73,7 @@ impl SequencerProofClient {
             .read_timeout(DEFAULT_READ_TIMEOUT)
             .timeout(timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT))
             .default_headers(headers);
-        // macOS CI may not have a SystemConfiguration dynamic store. Tests do
+        // SYSCOIN: macOS CI may not have a SystemConfiguration dynamic store. Tests do
         // not make network requests, so avoid querying system proxy settings.
         #[cfg(test)]
         let client_builder = client_builder.no_proxy();
@@ -257,6 +258,7 @@ impl ProofClient for SequencerProofClient {
         }
     }
 
+    // SYSCOIN: Read the queue without acquiring a lease; callers use it only as a hint.
     async fn status(&self, stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>> {
         let stage = match stage {
             JobQueueStage::Fri => "fri",

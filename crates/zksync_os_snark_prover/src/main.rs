@@ -27,7 +27,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     RunProver {
-        /// Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
+        /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
         ///
         /// Format: http[s]://[username:password@]host:port
         ///
@@ -54,10 +54,10 @@ enum Commands {
         /// Number of iterations before exiting. Only successfully generated proofs count. If not specified, runs indefinitely
         #[arg(long)]
         iterations: Option<usize>,
-        /// Port to run the Prometheus metrics server on
+        /// SYSCOIN: Dedicated default metrics port for parallel GPU workers.
         #[arg(long, default_value = "3126")]
         prometheus_port: u16,
-        /// Total HTTP request backstop in seconds. Connect timeout is 5s and
+        /// SYSCOIN: Total HTTP request backstop in seconds. Connect timeout is 5s and
         /// read-inactivity timeout is 10s.
         #[arg(long, default_value = "600")]
         request_timeout_secs: u64,
@@ -125,6 +125,7 @@ fn main() -> anyhow::Result<()> {
                     sequencer_urls
                 );
                 let supported_versions = SupportedProtocolVersions::default();
+                // SYSCOIN: Refuse to start before the app-bound release VK is generated.
                 supported_versions
                     .ensure_syscoin_release_constants()
                     .expect("Syscoin app/VK release constants are not configured");
@@ -141,7 +142,7 @@ fn main() -> anyhow::Result<()> {
                     request_timeout_secs
                 );
 
-                // The proving chain is synchronous and stack-hungry; drive it from a
+                // SYSCOIN: The proving chain is synchronous and stack-hungry; drive it from a
                 // runtime blocking thread (which gets the explicit stack size above)
                 // rather than polling it on the OS-sized main thread via `block_on`.
                 let runtime_handle = tokio::runtime::Handle::current();
@@ -163,11 +164,12 @@ fn main() -> anyhow::Result<()> {
                         result
                             .expect("SNARK prover task panicked")
                             .expect("SNARK prover finished with error");
-                        // The metrics task may already have stopped and dropped its receiver.
+                        // SYSCOIN: The metrics task may already have stopped and dropped its receiver.
                         stop_sender.send_replace(true);
                     }
                     _ = tokio::signal::ctrl_c() => {
                         tracing::info!("Stop request received; waiting for any in-flight proof to finish");
+                        // SYSCOIN: Do not abandon an acquired proof during operator shutdown.
                         stop_sender.send_replace(true);
                         prover_task
                             .await

@@ -23,11 +23,12 @@ pub async fn main() -> anyhow::Result<()> {
                 Ok(_) => tracing::info!("Zksync OS FRI prover finished successfully"),
                 Err(e) => tracing::error!("Zksync OS FRI prover finished with error: {e}"),
             }
-            // The metrics task may already have stopped and dropped its receiver.
+            // SYSCOIN: The metrics task may already have stopped and dropped its receiver.
             stop_sender.send_replace(true);
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Stop request received, shutting down");
+            // SYSCOIN: Wake the metrics task on operator shutdown too.
             stop_sender.send_replace(true);
         },
     }

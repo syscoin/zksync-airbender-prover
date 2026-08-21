@@ -23,6 +23,7 @@ use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
 pub mod metrics;
 
+// SYSCOIN: Stock Airbender's canonical combine/wrap path requires a real multi-proof range.
 const MIN_FRIS_PER_REAL_SNARK: usize = 2;
 
 fn ensure_real_snark_proof_count(proof_count: usize) -> anyhow::Result<()> {
@@ -38,7 +39,7 @@ pub fn init_tracing() {
     FmtSubscriber::builder().with_env_filter(filter).init();
 }
 
-/// Lazily materialized SNARK wrapper state shared by standalone and combined services.
+/// SYSCOIN: Lazily materialized SNARK wrapper state shared by standalone and combined services.
 ///
 /// The FRI-proof combiner sizes its GPU pool from essentially all free VRAM. The wrapper
 /// therefore must not be resident while a range is merged, even in the standalone SNARK
@@ -63,7 +64,7 @@ impl WrapperSource {
     }
 }
 
-/// Build the SNARK wrapper session used for proving and VK generation.
+/// SYSCOIN: Build the app-bound SNARK wrapper session used for proving and VK generation.
 ///
 /// The wrapper runs with `check_aux_params` enabled, which binds the app program into the
 /// verification key: the RISC-wrapper circuit constrains the FRI proof's final registers
@@ -114,7 +115,7 @@ pub fn create_snark_wrapper_with_cache(
     Ok(wrapper)
 }
 
-/// Build the wrapper config that binds the app program at `app_bin_path` into the VK via
+/// SYSCOIN: Build the wrapper config that binds the app program at `app_bin_path` into the VK via
 /// `check_aux_params`.
 ///
 /// The `.text` section path is derived from the `.bin` path exactly as the FRI prover does
@@ -143,7 +144,7 @@ fn build_wrapper_config(
     })
 }
 
-/// The app-program chain commitment a FRI proof (combined multi-batch ones included)
+/// SYSCOIN: The app-program chain commitment a FRI proof (combined multi-batch ones included)
 /// carries in its final registers 18..=25 — the value the settlement side checks the
 /// SNARK public input against. NOT the proof's `recursion_chain_hash`, which is the
 /// prover-internal layer chain and varies with the number of unified passes.
@@ -155,7 +156,7 @@ fn carried_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment
     ProgramCommitment(words)
 }
 
-/// End params of the active security level's unified-recursion verifier binary, needed
+/// SYSCOIN: End params of the active security level's unified-recursion verifier binary, needed
 /// to continue a carried chain the way the next unified pass would. Derived once per
 /// process (one unified-layer setup computation on the host).
 fn unified_verifier_end_params() -> &'static [u32; 8] {
@@ -163,7 +164,7 @@ fn unified_verifier_end_params() -> &'static [u32; 8] {
     EP.get_or_init(|| zkos_wrapper::circuits::BinaryCommitment::default().end_params)
 }
 
-/// The program commitment this proof's verification OUTPUTS: its carried chain continued
+/// SYSCOIN: The program commitment this proof's verification OUTPUTS: its carried chain continued
 /// with the unified verifier's end params unless it already ends there — the same
 /// carry-or-continue rule `CarriedChainCombiner::combine` applies. A proof that converged
 /// on its first unified pass carries only the unrolled-level chain in registers 18..=25,
@@ -189,7 +190,7 @@ fn output_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment 
     ProgramCommitment(continued)
 }
 
-/// Build the FRI-proof combiner used by [`merge_fris`] for multi-proof jobs.
+/// SYSCOIN: Build the FRI-proof combiner used by [`merge_fris`] for multi-proof jobs.
 ///
 /// The combiner caches everything that survives across jobs — the unified recursion
 /// program's setup data and, on `gpu` builds, the GPU prover's host state (pinned host
@@ -219,13 +220,14 @@ pub fn create_combiner() -> CarriedChainCombiner {
 /// mapped to airbender's type — the same mapping `zksync_os_fri_prover` applies (kept
 /// as two four-line matches rather than a crate dependency between the two provers).
 /// Errors if no supported version records a level.
+// SYSCOIN: A fresh V32 deployment supports exactly one Security100 proving lane.
 fn proving_security_level() -> SecurityLevel {
     match SupportedProtocolVersions::default().proving_security_level() {
         protocol_version::SecurityLevel::Security100 => SecurityLevel::Security100,
     }
 }
 
-/// Merge the job's FRI proofs into the single unified-layer proof the SNARK wrapper expects.
+/// SYSCOIN: Merge the job's FRI proofs into the single unified-layer proof the SNARK wrapper expects.
 ///
 /// Multi-proof jobs are combined via airbender's combined-recursion-layers flow:
 /// every input proof is verified against the recursion chain it carries (all proofs of a
@@ -330,6 +332,7 @@ pub fn merge_fris(
     Ok(combined.proof)
 }
 
+// SYSCOIN: Lock the stock-Airbender minimum-two range requirement.
 #[cfg(test)]
 mod tests {
     use super::ensure_real_snark_proof_count;
@@ -368,6 +371,7 @@ pub async fn run_linking_fri_snark(
     }
 
     let supported_versions = SupportedProtocolVersions::default();
+    // SYSCOIN: Refuse to prove before the generated app-bound VK replaces the sentinel.
     supported_versions
         .ensure_syscoin_release_constants()
         .map_err(anyhow::Error::msg)?;
@@ -386,6 +390,7 @@ pub async fn run_linking_fri_snark(
 
     let mut proof_count = 0;
 
+    // SYSCOIN: Probe all configured sequencers while allowing cooperative shutdown between jobs.
     loop {
         if *stop_receiver.borrow() {
             tracing::info!("SNARK prover stop requested between jobs");
@@ -456,6 +461,7 @@ pub async fn run_inner(
     tracing::debug!("Picking job from sequencer {}", client.sequencer_url());
     let snark_proof_input = match client.pick_snark_job().await {
         Ok(Some(snark_proof_input)) => {
+            // SYSCOIN: Fail closed before setup if the server violates the multi-FRI contract.
             if let Err(error) = ensure_real_snark_proof_count(snark_proof_input.fri_proofs.len()) {
                 let error = error.context(format!(
                     "sequencer {} returned an invalid real SNARK range for batches [{} to {}]",
@@ -476,7 +482,7 @@ pub async fn run_inner(
                 );
                 return Ok(false);
             }
-            // Reject wrong-program proofs up front with a clear error. The wrapper VK now
+            // SYSCOIN: Reject wrong-program proofs up front with a clear error. The wrapper VK now
             // binds the app program (check_aux_params constrains registers 18..=25 to the
             // version's commitment), so such a proof would otherwise fail deep in wrap
             // proving as an unsatisfiable circuit, after the GPU time is already spent.
@@ -548,7 +554,7 @@ pub async fn run_inner(
         merge_fris(snark_proof_input, combiner)
     })?;
 
-    // Materialize the wrapper only after the merge: the merge's GPU prover sizes its
+    // SYSCOIN: Materialize the wrapper only after the merge: the merge's GPU prover sizes its
     // device pool to all free VRAM, so the wrapper's device-resident state must not
     // be alive yet. With the canonical per-job lifecycle, the wrapper (and any VRAM it touches)
     // lives exactly from here until this job's proving is done; its host-side setup caches

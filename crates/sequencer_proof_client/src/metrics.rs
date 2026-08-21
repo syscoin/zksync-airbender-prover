@@ -9,6 +9,7 @@ pub(crate) enum Method {
     SubmitFri,
     PickSnark,
     SubmitSnark,
+    // SYSCOIN: Observe read-only scheduling hints separately from job claims.
     StatusQueue,
 }
 

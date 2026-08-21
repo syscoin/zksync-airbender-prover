@@ -38,4 +38,5 @@ url.workspace = true
 gpu = ["zkos_wrapper/gpu", "zksync_airbender_cli/gpu"]
 
 [dev-dependencies]
+# SYSCOIN: Deserialize a real-proof fixture for commitment validation.
 serde_json.workspace = true

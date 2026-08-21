@@ -20,7 +20,8 @@ struct ProtocolVersion {
     /// NOTE: in the future we may want to support multiple binaries (such as debug mode)
     /// NOTE2: this can be inferred from zksync_os_version, but we keep it here for easier cross-checking
     bin_md5sum: BinMd5Sum,
-    /// Chain commitment of the app program this version proves (see [`ProgramCommitment`]).
+    /// SYSCOIN: Chain commitment of the app program this version proves (see
+    /// [`ProgramCommitment`]).
     /// The SNARK wrapper bakes it into the VK (registers 18..=25 == aux_params, via
     /// `check_aux_params`), so `vk_hash` alone identifies the app program again; this field
     /// is the plaintext of that binding, used to reject wrong-program FRI proofs up front
@@ -40,11 +41,12 @@ struct ProtocolVersion {
 /// the prover crates map it to airbender's type where they configure proving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityLevel {
+    // SYSCOIN: The canonical V32 lane is generated exclusively at 100-bit security.
     /// 100-bit security.
     Security100,
 }
 
-/// Blake2s recursion-chain commitment binding a protocol version to its app program: the
+/// SYSCOIN: Blake2s recursion-chain commitment binding a protocol version to its app program: the
 /// base program's `end_params` folded first with the unrolled verifier and then with the
 /// unified verifier — the value wrapper-ready proofs expose in final registers 18..=25.
 /// The SNARK wrapper constrains those registers to this value in-circuit
@@ -79,14 +81,15 @@ struct ZkOsWrapperVersion(&'static str);
 struct BinMd5Sum(&'static str);
 
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const SYSCOIN_APP_MD5: &str = "2806a0fdb0c8ecf1a8f2e8ca552a0aea";
+// SYSCOIN: Bind the sole supported lane to the reproducible compact-Bitcoin-DA guest.
+const SYSCOIN_APP_MD5: &str = "5117d5dac6dbd34b93fef54e04d0b41c";
 const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
-    0x61f3308c, 0xa3a0a59b, 0xbe416638, 0x7bbccea7, 0xeed7900d, 0xe94cb514, 0x7c83f52e, 0x7dd02a63,
+    0x0d2bc42e, 0xeea78bfb, 0x08553eb9, 0xe18ee1ef, 0xa4a97e19, 0x9b5db62d, 0x9972e789, 0x24d28425,
 ]);
 
-/// The sole canonical Syscoin lane: protocol v31.0, Execution V7, Proving V8.
+/// SYSCOIN: The sole canonical lane is protocol V32, Execution V7, Proving V8.
 /// It uses the patched zksync-os v0.4.0 app with compact Bitcoin DA.
-const SYSCOIN_V31_EXECUTION_V7_PROVING_V8: ProtocolVersion = ProtocolVersion {
+const SYSCOIN_V32_EXECUTION_V7_PROVING_V8: ProtocolVersion = ProtocolVersion {
     // Keccak256 of the phase-3 SNARK VK (`generate-vk --check-aux-params`), so it binds the
     // app binary below. The zero sentinel deliberately blocks deployment until keygen.
     vk_hash: VerificationKeyHash(ZERO_VK_HASH),
@@ -108,14 +111,15 @@ pub struct SupportedProtocolVersions {
 
 impl Default for SupportedProtocolVersions {
     fn default() -> Self {
+        // SYSCOIN: Fresh-chain releases intentionally expose one canonical protocol lane.
         Self {
-            versions: vec![SYSCOIN_V31_EXECUTION_V7_PROVING_V8],
+            versions: vec![SYSCOIN_V32_EXECUTION_V7_PROVING_V8],
         }
     }
 }
 
 impl SupportedProtocolVersions {
-    /// Fail closed until keygen replaces the zero VK sentinel, and ensure the
+    /// SYSCOIN: Fail closed until keygen replaces the zero VK sentinel, and ensure the
     /// remaining release constants are exactly the patched Syscoin app values.
     pub fn ensure_syscoin_release_constants(&self) -> Result<(), String> {
         let [version] = self.versions.as_slice() else {
@@ -212,24 +216,24 @@ mod tests {
         let [version] = versions.versions.as_slice() else {
             panic!("expected one canonical version")
         };
-        assert_eq!(version.bin_md5sum.0, "2806a0fdb0c8ecf1a8f2e8ca552a0aea");
+        assert_eq!(version.bin_md5sum.0, "5117d5dac6dbd34b93fef54e04d0b41c");
         let app_bin = include_bytes!("../../../multiblock_batch.bin");
         let app_text = include_bytes!("../../../multiblock_batch.text");
-        assert_eq!(app_bin.len(), 1_324_616);
-        assert_eq!(app_text.len(), 1_195_064);
+        assert_eq!(app_bin.len(), 1_323_208);
+        assert_eq!(app_text.len(), 1_193_676);
         assert_eq!(
             format!("{:x}", Sha256::digest(app_bin)),
-            "20fe50c9840cc7ff872cc1f190e320b4595e006c56a385b10a0e10bbba712f19"
+            "3eab56f061f330704fc90da98c5c3de9aef824842873fc2eb240475da5945d4a"
         );
         assert_eq!(
             format!("{:x}", Sha256::digest(app_text)),
-            "462cc621c6d44b4a04b8455f0ddeebc8269234817b85dbaebefdaba88c67bf07"
+            "cd1c9b6679b97a47b24a71208d281b417a3cb714760fcf5b065896e6c6a84ce9"
         );
         assert_eq!(
             version.program_commitment.0,
             [
-                1643327628, 2745214363, 3191957048, 2075971239, 4007104525, 3914118420, 2089022766,
-                2110794339,
+                220972078, 4003957755, 139804345, 3784237551, 2762571289, 2606609965, 2574444425,
+                617776165,
             ]
         );
     }

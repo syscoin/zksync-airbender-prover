@@ -29,7 +29,7 @@ pub mod metrics;
 #[command(version = "1.0")]
 #[command(about = "Prover for Zksync OS", long_about = None)]
 pub struct Args {
-    /// Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
+    /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
     ///
     /// Format: http[s]://[username:password@]host:port
     ///
@@ -56,11 +56,11 @@ pub struct Args {
     #[arg(short, long)]
     pub path: Option<PathBuf>,
 
-    /// Port to run the Prometheus metrics server on
+    /// SYSCOIN: Dedicated default metrics port for parallel GPU workers.
     #[arg(long, default_value = "3125")]
     pub prometheus_port: u16,
 
-    /// Total HTTP request backstop in seconds. Connect timeout is 5s and
+    /// SYSCOIN: Total HTTP request backstop in seconds. Connect timeout is 5s and
     /// read-inactivity timeout is 10s.
     #[arg(long, default_value = "600")]
     pub request_timeout_secs: u64,
@@ -80,6 +80,7 @@ pub fn init_tracing() {
 /// combiner and the SNARK wrapper in `zksync_os_snark_prover` (which maps the same
 /// record) — since it selects the recursion verifier binaries. Errors if no supported
 /// version records a level.
+// SYSCOIN: A fresh V32 deployment supports exactly one Security100 proving lane.
 fn proving_security_level() -> SecurityLevel {
     match SupportedProtocolVersions::default().proving_security_level() {
         protocol_version::SecurityLevel::Security100 => SecurityLevel::Security100,
@@ -152,6 +153,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     );
 
     let supported_versions = SupportedProtocolVersions::default();
+    // SYSCOIN: Refuse to prove before the generated app-bound VK replaces the sentinel.
     supported_versions
         .ensure_syscoin_release_constants()
         .map_err(anyhow::Error::msg)?;
@@ -201,6 +203,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // If no proof is generated for 10 seconds, log a message
     let retry_log_interval = Duration::from_secs(10);
 
+    // SYSCOIN: Probe all configured sequencers in oldest-head order while retaining every
+    // endpoint as a fail-open claim fallback.
     loop {
         let mut proof_generated = false;
         let client_order =

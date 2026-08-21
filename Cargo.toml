@@ -53,13 +53,15 @@ async-trait = "0.1"
 base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }
 clap = { version = "4.5.40", features = ["derive"] }
+# SYSCOIN: Probe configured sequencers concurrently with bounded fan-out.
 futures-util = "0.3"
-# Large prover API responses (witnesses and FRI bundles) are compressed by the
+# SYSCOIN: Large prover API responses (witnesses and FRI bundles) are compressed by the
 # sequencer. Keep every decoder enabled so reqwest transparently decodes them.
 reqwest = { version = "0.12.19", features = ["json", "gzip", "brotli", "zstd", "deflate"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+# SYSCOIN: Used by the locked checked-in guest artifact test.
 sha2 = "0.10.9"
 tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros", "time"] }
 tracing = { version = "0.1", features = ["log"] }

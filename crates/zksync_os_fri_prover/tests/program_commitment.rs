@@ -11,7 +11,7 @@ fn carried(proof: &UnrolledProgramProof) -> ProgramCommitment {
     ProgramCommitment(words)
 }
 
-/// Commitment output by proof verification. `continue_recursion_chain` carries an already-final
+/// SYSCOIN: Commitment output by proof verification. `continue_recursion_chain` carries an already-final
 /// chain unchanged and advances a first-pass stored chain exactly once.
 fn verification_output(proof: &UnrolledProgramProof) -> ProgramCommitment {
     let carried = carried(proof);
@@ -31,7 +31,7 @@ fn verification_output(proof: &UnrolledProgramProof) -> ProgramCommitment {
     ProgramCommitment(output)
 }
 
-/// Pins the recorded `program_commitment` against a real proof's verification output.
+/// SYSCOIN: Pins the recorded `program_commitment` against a real proof's verification output.
 ///
 /// Checked against a proof rather than against the function that derives the commitment
 /// from the binary: the previous version compared the constant to

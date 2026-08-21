@@ -59,6 +59,7 @@ struct SubmitSnarkProofPayload {
     proof: String, // base64‑encoded SNARK proof
 }
 
+// SYSCOIN: Mirror the server's read-only queue status payload for multi-sequencer scheduling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JobStatusPayload {
     fri_job: JobMetaPayload,
@@ -129,7 +130,7 @@ pub struct FriJobInputs {
     pub prover_input: Vec<u8>,
 }
 
-/// Queue information exposed by the sequencer's read-only status endpoint.
+/// SYSCOIN: Queue information exposed by the sequencer's read-only status endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueJobStatus {
     pub batch_number: u32,
@@ -147,7 +148,7 @@ pub enum JobQueueStage {
     Snark,
 }
 
-/// Maximum simultaneous status requests from one prover process.
+/// SYSCOIN: Maximum simultaneous status requests from one prover process.
 pub const STATUS_PROBE_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 /// Status is only a scheduling hint; never let it block real pick attempts for a healthy peer.
 pub const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -169,7 +170,7 @@ pub trait ProofClient: Send + Sync {
         proof: String,
     ) -> anyhow::Result<()>;
 
-    /// Read the queue without claiming a job. Scheduling treats this as a hint:
+    /// SYSCOIN: Read the queue without claiming a job. Scheduling treats this as a hint:
     /// status failures never remove a client from the subsequent pick fallback.
     async fn status(&self, stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>>;
 
@@ -187,7 +188,7 @@ pub trait ProofClient: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
-/// Score all sequencers concurrently and return every client exactly once.
+/// SYSCOIN: Score all sequencers concurrently and return every client exactly once.
 ///
 /// Sequencers whose oldest unassigned head is older are tried first. Empty or
 /// failed status responses are appended in stable input order, so an older or
@@ -255,6 +256,7 @@ pub trait PeekableProofClient {
     ) -> anyhow::Result<Option<FailedFriProofPayload>>;
 }
 
+// SYSCOIN: Lock bounded, fail-open queue-hint scheduling behavior.
 #[cfg(test)]
 mod tests {
     use std::{

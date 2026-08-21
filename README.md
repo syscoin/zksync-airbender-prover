@@ -117,8 +117,10 @@ CUDA_VISIBLE_DEVICES=2 RUST_MIN_STACK=267108864 cargo run --release \
   --prover-name syscoin-snark-gpu2 --prometheus-port 3212
 ```
 
+<!-- SYSCOIN: This section documents the downstream deployment and batching policy. -->
 The workspace uses the exact upstream Matter Labs Airbender `v0.6.0-rc.2` graph, with no Syscoin
-core fork. Every real SNARK job must therefore contain at least two compatible FRI proofs; the
+core fork. The sole supported lane is protocol V32 / Execution V7 / Proving V8. Every real SNARK
+job must therefore contain at least two compatible FRI proofs; the
 prover fails before merge or wrapper setup if the server violates that contract. Fake FRI and
 SNARK provers must be off. For the dedicated SNARK worker, batching readiness is authoritative on
 the server: target 100 FRIs and release an older compatible range after 3600 seconds, but never
@@ -142,10 +144,12 @@ until production keygen supplies the app-bound VK and it is updated atomically w
 and Era verifier constants.
 
 The checked-in guest is built reproducibly from final `zksync-os v0.4.0` (`69bc4305...`) plus
-the reviewed Syscoin patch. `multiblock_batch.bin` is 1,324,616 bytes with SHA-256
-`20fe50c9840cc7ff872cc1f190e320b4595e006c56a385b10a0e10bbba712f19`; its paired `.text`
-is 1,195,064 bytes with SHA-256
-`462cc621c6d44b4a04b8455f0ddeebc8269234817b85dbaebefdaba88c67bf07`.
+the reviewed Syscoin patch. `multiblock_batch.bin` is 1,323,208 bytes with SHA-256
+`3eab56f061f330704fc90da98c5c3de9aef824842873fc2eb240475da5945d4a` and MD5
+`5117d5dac6dbd34b93fef54e04d0b41c`; its paired `.text` is 1,193,676 bytes with SHA-256
+`cd1c9b6679b97a47b24a71208d281b417a3cb714760fcf5b065896e6c6a84ce9`. Its Security100
+program commitment is
+`0x0d2bc42eeea78bfb08553eb9e18ee1efa4a97e199b5db62d9972e78924d28425`.
 
 **This one is only needed if you want to manually upload.**
 

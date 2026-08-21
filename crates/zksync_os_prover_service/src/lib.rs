@@ -25,16 +25,16 @@ pub mod metrics;
 #[command(version = "1.0")]
 #[command(about = "Prover for Zksync OS", long_about = None)]
 pub struct Args {
-    /// Max SNARK latency in seconds (default value - 1 hour)
+    /// SYSCOIN: Max SNARK latency in seconds (default value - 1 hour).
     #[arg(long, default_value = "3600")]
     pub max_snark_latency: Option<u64>,
-    /// Max amount of FRI proofs per SNARK (default value - 100)
+    /// SYSCOIN: Max amount of FRI proofs per SNARK (default value - 100).
     #[arg(long, default_value = "100")]
     pub max_fris_per_snark: Option<usize>,
-    /// Max time to wait for a SNARK job after switching away from FRI proving
+    /// SYSCOIN: Max time to wait for a SNARK job after switching away from FRI proving.
     #[arg(long, default_value = "60")]
     pub snark_acquire_timeout_secs: u64,
-    /// Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
+    /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
     ///
     /// Format: http[s]://[username:password@]host:port
     ///
@@ -66,10 +66,10 @@ pub struct Args {
     /// Path to the output file for FRI proofs
     #[arg(short, long)]
     pub fri_path: Option<PathBuf>,
-    /// Port to run the Prometheus metrics server on
+    /// SYSCOIN: Dedicated default metrics port for parallel GPU workers.
     #[arg(long, default_value = "3127")]
     pub prometheus_port: u16,
-    /// Total HTTP request backstop in seconds. Connect timeout is 5s and
+    /// SYSCOIN: Total HTTP request backstop in seconds. Connect timeout is 5s and
     /// read-inactivity timeout is 10s.
     #[arg(long, default_value = "600")]
     pub request_timeout_secs: u64,
@@ -78,6 +78,7 @@ pub struct Args {
     pub disable_zk: bool,
 }
 
+// SYSCOIN: Explicit phase polling and OR-based 100-proof / one-hour controls.
 const SNARK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const FRI_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -126,6 +127,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         args.sequencer_urls
     );
     let supported_versions = SupportedProtocolVersions::default();
+    // SYSCOIN: Refuse to prove before the generated app-bound VK replaces the sentinel.
     supported_versions
         .ensure_syscoin_release_constants()
         .map_err(anyhow::Error::msg)?;
@@ -156,6 +158,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // caches survive between jobs, so only the first job pays the full setup
     // derivation (reported as the `wrapper_setup` stage). It is kept in a RefCell so
     // the retry closure below can borrow it mutably.
+    // SYSCOIN: Use the same cached per-job wrapper lifecycle as the dedicated SNARK worker.
     let wrapper_source = RefCell::new(zksync_os_snark_prover::WrapperSource::new(
         args.trusted_setup_file.clone(),
         binary_path.clone(),
@@ -173,6 +176,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let mut snark_proof_count = 0;
     let mut snark_latency = Instant::now();
 
+    // SYSCOIN: Schedule each phase independently across every configured sequencer.
     loop {
         let mut fri_proof_count = 0;
 
