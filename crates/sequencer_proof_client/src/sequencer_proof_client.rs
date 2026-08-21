@@ -3,9 +3,9 @@ use std::time::{Duration, Instant};
 use crate::metrics::Method;
 use crate::sequencer_endpoint::SequencerEndpoint;
 use crate::{
-    FailedFriProofPayload, FriJobInputs, GetSnarkProofPayload, NextFriProverJobPayload,
-    PeekableProofClient, ProofClient, SnarkProofInputs, SubmitFriProofPayload,
-    SubmitSnarkProofPayload,
+    FailedFriProofPayload, FriJobInputs, GetSnarkProofPayload, JobQueueStage, JobStatusPayload,
+    NextFriProverJobPayload, PeekableProofClient, ProofClient, QueueJobStatus, SnarkProofInputs,
+    SubmitFriProofPayload, SubmitSnarkProofPayload,
 };
 use crate::{L2BatchNumber, SEQUENCER_CLIENT_METRICS};
 use anyhow::{anyhow, Context};
@@ -15,6 +15,10 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use url::Url;
 use zkos_wrapper::SnarkWrapperProof;
+
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
 pub struct SequencerProofClient {
@@ -30,7 +34,8 @@ impl SequencerProofClient {
     /// # Arguments
     /// * `endpoint` - The sequencer endpoint (URL + optional credentials)
     /// * `prover_name` - The name of the prover (used for identification in sequencer prover api)
-    /// * `timeout` - Optional timeout for requests (None defaults to 2 seconds)
+    /// * `timeout` - Optional total request backstop (None defaults to 600 seconds).
+    ///   Connect timeout is 5 seconds and read-inactivity timeout is 10 seconds.
     /// * `supported_vk_hashes` - VK hashes this prover supports; sent on pick requests so the
     ///   sequencer only assigns jobs of these versions. Empty means no declaration - the
     ///   sequencer will offer jobs of any version.
@@ -62,9 +67,16 @@ impl SequencerProofClient {
             );
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(timeout.unwrap_or(Duration::from_secs(2)))
-            .default_headers(headers)
+        let client_builder = reqwest::Client::builder()
+            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+            .read_timeout(DEFAULT_READ_TIMEOUT)
+            .timeout(timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT))
+            .default_headers(headers);
+        // macOS CI may not have a SystemConfiguration dynamic store. Tests do
+        // not make network requests, so avoid querying system proxy settings.
+        #[cfg(test)]
+        let client_builder = client_builder.no_proxy();
+        let client = client_builder
             .build()
             .context("Failed to build reqwest client")?;
 
@@ -81,7 +93,7 @@ impl SequencerProofClient {
     /// # Arguments
     /// * `endpoints` - A vector of sequencer endpoints
     /// * `prover_name` - The name of the prover (used for identification in sequencer prover api)
-    /// * `timeout` - Optional timeout for requests (None defaults to 2 seconds)
+    /// * `timeout` - Optional total request backstop (None defaults to 600 seconds).
     /// * `supported_vk_hashes` - VK hashes this prover supports; sent on pick requests so the
     ///   sequencer only assigns jobs of these versions. Empty means no declaration - the
     ///   sequencer will offer jobs of any version.
@@ -243,6 +255,41 @@ impl ProofClient for SequencerProofClient {
                 url
             ))
         }
+    }
+
+    async fn status(&self, stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>> {
+        let stage = match stage {
+            JobQueueStage::Fri => "fri",
+            JobQueueStage::Snark => "snark",
+        };
+        let url = self.build_url(&format!("status/{stage}"))?;
+        let started_at = Instant::now();
+        let resp = self
+            .client
+            .get(url.clone())
+            .send()
+            .await
+            .context("Queue status request failed")?;
+
+        SEQUENCER_CLIENT_METRICS.time_taken[&Method::StatusQueue]
+            .observe(started_at.elapsed().as_secs_f64());
+
+        let resp = resp
+            .error_for_status()
+            .with_context(|| format!("Queue status request returned an error status from {url}"))?;
+        Ok(resp
+            .json::<Vec<JobStatusPayload>>()
+            .await?
+            .into_iter()
+            .map(|payload| QueueJobStatus {
+                batch_number: payload.fri_job.batch_number,
+                vk_hash: payload.fri_job.vk_hash,
+                added_seconds_ago: payload.added_seconds_ago,
+                assigned_seconds_ago: payload.assigned_seconds_ago,
+                assigned_to_prover_id: payload.assigned_to_prover_id,
+                current_attempt: payload.current_attempt,
+            })
+            .collect())
     }
 
     async fn pick_snark_job(&self) -> anyhow::Result<Option<SnarkProofInputs>> {

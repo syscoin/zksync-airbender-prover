@@ -12,7 +12,10 @@ use anyhow::Context;
 use clap::Parser;
 use protocol_version::SupportedProtocolVersions;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
-use zksync_sequencer_proof_client::{SequencerEndpoint, SequencerProofClient};
+use zksync_sequencer_proof_client::{
+    ordered_client_indices, JobQueueStage, SequencerEndpoint, SequencerProofClient,
+    STATUS_PROBE_CONCURRENCY,
+};
 
 pub mod metrics;
 
@@ -23,15 +26,15 @@ pub mod metrics;
 #[command(about = "Prover for Zksync OS", long_about = None)]
 pub struct Args {
     /// Max SNARK latency in seconds (default value - 1 hour)
-    #[arg(long, default_value = "3600", conflicts_with = "max_fris_per_snark")]
+    #[arg(long, default_value = "3600")]
     pub max_snark_latency: Option<u64>,
     /// Max amount of FRI proofs per SNARK (default value - 100)
-    #[arg(long, default_value = "100", conflicts_with = "max_snark_latency")]
+    #[arg(long, default_value = "100")]
     pub max_fris_per_snark: Option<usize>,
     /// Max time to wait for a SNARK job after switching away from FRI proving
     #[arg(long, default_value = "60")]
     pub snark_acquire_timeout_secs: u64,
-    /// Sequencer URL(s) for polling tasks. Comma-separated for round-robin.
+    /// Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
     ///
     /// Format: http[s]://[username:password@]host:port
     ///
@@ -64,11 +67,11 @@ pub struct Args {
     #[arg(short, long)]
     pub fri_path: Option<PathBuf>,
     /// Port to run the Prometheus metrics server on
-    #[arg(long, default_value = "3124")]
+    #[arg(long, default_value = "3127")]
     pub prometheus_port: u16,
-    /// Timeout for HTTP requests to the sequencer, in seconds. Must exceed the time to
-    /// upload and verify a proof body; the client default of 2s only suits job polling.
-    #[arg(long, default_value = "300")]
+    /// Total HTTP request backstop in seconds. Connect timeout is 5s and
+    /// read-inactivity timeout is 10s.
+    #[arg(long, default_value = "600")]
     pub request_timeout_secs: u64,
     /// Disable ZK for SNARK proofs
     #[arg(long, default_value_t = false)]
@@ -76,6 +79,17 @@ pub struct Args {
 }
 
 const SNARK_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const FRI_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+fn fri_phase_limit_reached(
+    elapsed: Duration,
+    fri_proof_count: usize,
+    max_snark_latency: Option<u64>,
+    max_fris_per_snark: Option<usize>,
+) -> bool {
+    max_snark_latency.is_some_and(|max| elapsed.as_secs() >= max)
+        || max_fris_per_snark.is_some_and(|max| fri_proof_count >= max)
+}
 
 async fn acquire_snark_proof<F, Fut>(
     snark_acquire_timeout: Duration,
@@ -112,6 +126,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         args.sequencer_urls
     );
     let supported_versions = SupportedProtocolVersions::default();
+    supported_versions
+        .ensure_syscoin_release_constants()
+        .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
     let clients = SequencerProofClient::new_clients(
@@ -139,27 +156,24 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // caches survive between jobs, so only the first job pays the full setup
     // derivation (reported as the `wrapper_setup` stage). It is kept in a RefCell so
     // the retry closure below can borrow it mutably.
-    let wrapper_source = RefCell::new(zksync_os_snark_prover::WrapperSource::PerJob {
-        trusted_setup_file: args.trusted_setup_file.clone(),
-        app_bin_path: binary_path.clone(),
-        host_cache: None,
-    });
+    let wrapper_source = RefCell::new(zksync_os_snark_prover::WrapperSource::new(
+        args.trusted_setup_file.clone(),
+        binary_path.clone(),
+    ));
 
     // The FRI-proof combiner likewise caches its setup data (and, on `gpu` builds, the
     // GPU prover's host state — pinned host RAM only, no VRAM) across jobs and across
     // the FRI/SNARK phase alternation. Its caches build lazily on the first multi-proof
     // SNARK job rather than at startup, so a service that never sees multi-proof jobs
     // doesn't pin tens of gigabytes of host RAM for nothing.
-    let combiner = RefCell::new(zksync_os_snark_prover::create_combiner()?);
+    let combiner = RefCell::new(zksync_os_snark_prover::create_combiner());
 
     tracing::info!("Starting Zksync OS Prover Service");
 
     let mut snark_proof_count = 0;
     let mut snark_latency = Instant::now();
 
-    // Cycle through clients in round-robin fashion
-    // Note: This rotates after each complete FRI+SNARK cycle
-    for client in clients.iter().cycle() {
+    loop {
         let mut fri_proof_count = 0;
 
         // The FRI prover holds the program setups (and the GPU context when built with the
@@ -178,41 +192,53 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         tracing::info!("App program commitment: {program_commitment}");
 
         // Run FRI prover until we hit one of the limits
-        tracing::info!("Running FRI prover on sequencer {}", client.sequencer_url());
+        tracing::info!("Running FRI prover across {} sequencer(s)", clients.len());
         loop {
-            let proof_generated = zksync_os_fri_prover::run_inner(
-                client.as_ref(),
-                &fri_prover,
-                args.fri_path.clone(),
-                &supported_versions,
-                &program_commitment,
-            )
-            .await
-            .expect("Failed to run FRI prover");
-
-            fri_proof_count += proof_generated as usize;
-
-            if let Some(max_snark_latency) = args.max_snark_latency {
-                if snark_latency.elapsed().as_secs() >= max_snark_latency {
-                    tracing::info!("SNARK latency reached max_snark_latency ({max_snark_latency} seconds), exiting FRI prover");
+            let mut proof_generated = false;
+            let client_order =
+                ordered_client_indices(&clients, JobQueueStage::Fri, STATUS_PROBE_CONCURRENCY)
+                    .await;
+            for client_idx in client_order {
+                let client = &clients[client_idx];
+                if zksync_os_fri_prover::run_inner(
+                    client.as_ref(),
+                    &fri_prover,
+                    args.fri_path.clone(),
+                    &supported_versions,
+                    &program_commitment,
+                )
+                .await
+                .expect("Failed to run FRI prover")
+                {
+                    proof_generated = true;
                     break;
                 }
             }
-            if let Some(max_fris_per_snark) = args.max_fris_per_snark {
-                if fri_proof_count >= max_fris_per_snark {
-                    tracing::info!("FRI proof count reached max_fris_per_snark ({max_fris_per_snark}), exiting FRI prover");
-                    break;
-                }
+
+            fri_proof_count += proof_generated as usize;
+
+            if fri_phase_limit_reached(
+                snark_latency.elapsed(),
+                fri_proof_count,
+                args.max_snark_latency,
+                args.max_fris_per_snark,
+            ) {
+                tracing::info!(
+                    "FRI phase limit reached ({} proof(s), {} seconds); switching to SNARK",
+                    fri_proof_count,
+                    snark_latency.elapsed().as_secs()
+                );
+                break;
+            }
+            if !proof_generated {
+                tokio::time::sleep(FRI_POLL_INTERVAL).await;
             }
         }
         // Release the FRI prover's airbender GPU resources (as now SNARKing will be taking them).
         drop(fri_prover);
 
         // Here we do exactly one SNARK proof
-        tracing::info!(
-            "Running SNARK prover on sequencer {}",
-            client.sequencer_url()
-        );
+        tracing::info!("Running SNARK prover across {} sequencer(s)", clients.len());
         // Holding the RefCell guard across the await is fine here: `run` executes as a
         // single (non-Send) future and SNARK attempts run strictly sequentially, so no
         // concurrent borrow of the wrapper can occur.
@@ -221,15 +247,28 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             Duration::from_secs(args.snark_acquire_timeout_secs),
             SNARK_POLL_INTERVAL,
             || async {
-                zksync_os_snark_prover::run_inner(
-                    client.as_ref(),
-                    &mut wrapper_source.borrow_mut(),
-                    &mut combiner.borrow_mut(),
-                    args.output_dir.clone(),
-                    args.disable_zk,
-                    &supported_versions,
+                let client_order = ordered_client_indices(
+                    &clients,
+                    JobQueueStage::Snark,
+                    STATUS_PROBE_CONCURRENCY,
                 )
-                .await
+                .await;
+                for client_idx in client_order {
+                    let client = &clients[client_idx];
+                    if zksync_os_snark_prover::run_inner(
+                        client.as_ref(),
+                        &mut wrapper_source.borrow_mut(),
+                        &mut combiner.borrow_mut(),
+                        args.output_dir.clone(),
+                        args.disable_zk,
+                        &supported_versions,
+                    )
+                    .await?
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             },
         )
         .await
@@ -256,8 +295,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             }
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -317,5 +354,45 @@ mod tests {
 
         assert!(acquired);
         assert!(attempts.load(Ordering::Relaxed) >= 3);
+    }
+
+    #[test]
+    fn fri_phase_limits_have_or_semantics() {
+        assert!(fri_phase_limit_reached(
+            Duration::from_secs(1),
+            100,
+            Some(3600),
+            Some(100)
+        ));
+        assert!(fri_phase_limit_reached(
+            Duration::from_secs(3600),
+            1,
+            Some(3600),
+            Some(100)
+        ));
+        assert!(!fri_phase_limit_reached(
+            Duration::from_secs(3599),
+            99,
+            Some(3600),
+            Some(100)
+        ));
+    }
+
+    #[test]
+    fn cli_accepts_both_fri_phase_limits() {
+        let args = Args::try_parse_from([
+            "prover-service",
+            "--output-dir",
+            "out",
+            "--trusted-setup-file",
+            "setup.key",
+            "--max-snark-latency",
+            "3600",
+            "--max-fris-per-snark",
+            "100",
+        ])
+        .expect("both OR limits must be accepted");
+        assert_eq!(args.max_snark_latency, Some(3600));
+        assert_eq!(args.max_fris_per_snark, Some(100));
     }
 }

@@ -1,6 +1,6 @@
 use protocol_version::{ProgramCommitment, SupportedProtocolVersions};
 use std::path::Path;
-use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
+use zksync_airbender_execution_utils::unrolled::{UnrolledProgramProof, UnrolledProgramSetup};
 
 /// The commitment a proof actually carries, in its final registers `18..=25`.
 fn carried(proof: &UnrolledProgramProof) -> ProgramCommitment {
@@ -11,7 +11,27 @@ fn carried(proof: &UnrolledProgramProof) -> ProgramCommitment {
     ProgramCommitment(words)
 }
 
-/// Pins the recorded `program_commitment` against a real proof.
+/// Commitment output by proof verification. `continue_recursion_chain` carries an already-final
+/// chain unchanged and advances a first-pass singleton exactly once.
+fn verification_output(proof: &UnrolledProgramProof) -> ProgramCommitment {
+    let carried = carried(proof);
+    let hash = proof
+        .recursion_chain_hash
+        .expect("real V8 proof is missing recursion_chain_hash");
+    let preimage = proof
+        .recursion_chain_preimage
+        .expect("real V8 proof is missing recursion_chain_preimage");
+    assert_eq!(
+        hash, carried.0,
+        "proof registers disagree with its chain hash"
+    );
+    let unified_end_params = zkos_wrapper::circuits::BinaryCommitment::default().end_params;
+    let (output, _) =
+        UnrolledProgramSetup::continue_recursion_chain(&unified_end_params, &hash, &preimage);
+    ProgramCommitment(output)
+}
+
+/// Pins the recorded `program_commitment` against a real proof's verification output.
 ///
 /// Checked against a proof rather than against the function that derives the commitment
 /// from the binary: the previous version compared the constant to
@@ -33,7 +53,7 @@ fn recorded_program_commitment_matches_a_real_proof() {
     )
     .expect("cannot deserialize FRI_PROOF_FIXTURE as an UnrolledProgramProof");
 
-    let carried = carried(&proof);
+    let output = verification_output(&proof);
 
     let versions = SupportedProtocolVersions::default();
     let vk_hashes = versions.vk_hashes();
@@ -43,9 +63,9 @@ fn recorded_program_commitment_matches_a_real_proof() {
             .program_commitment_for(vk_hash)
             .unwrap_or_else(|| panic!("no program commitment recorded for vk_hash {vk_hash}"));
         assert_eq!(
-            recorded, carried,
+            recorded, output,
             "program commitment recorded for vk_hash {vk_hash} ({recorded}) does not match \
-             the commitment the proof carries in registers 18..=25 ({carried})"
+             the commitment output by verification ({output})"
         );
     }
 }

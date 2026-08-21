@@ -23,10 +23,12 @@ pub async fn main() -> anyhow::Result<()> {
                 Ok(_) => tracing::info!("Zksync OS FRI prover finished successfully"),
                 Err(e) => tracing::error!("Zksync OS FRI prover finished with error: {e}"),
             }
-            stop_sender.send(true).expect("failed to send stop signal");
+            // The metrics task may already have stopped and dropped its receiver.
+            stop_sender.send_replace(true);
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Stop request received, shutting down");
+            stop_sender.send_replace(true);
         },
     }
 

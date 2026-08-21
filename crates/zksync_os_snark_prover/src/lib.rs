@@ -15,7 +15,9 @@ use zksync_airbender_cli::prover_utils::{
     ProverBackend, SecurityLevel,
 };
 use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
-use zksync_sequencer_proof_client::{ProofClient, SnarkProofInputs};
+use zksync_sequencer_proof_client::{
+    ordered_client_indices, JobQueueStage, ProofClient, SnarkProofInputs, STATUS_PROBE_CONCURRENCY,
+};
 
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
@@ -26,33 +28,29 @@ pub fn init_tracing() {
     FmtSubscriber::builder().with_env_filter(filter).init();
 }
 
-/// Where [`run_inner`] gets its SNARK wrapper from.
+/// Lazily materialized SNARK wrapper state shared by standalone and combined services.
 ///
-/// The wrapper's setup chain includes several GiB of device-resident state (phase 1/2
-/// GPU setups and the phase-3 device setup), while the FRI prover and the FRI-proof
-/// combiner each size their device pools to "all free VRAM" and need essentially the
-/// whole card (prod FRI provers run on a dedicated L4). A resident wrapper therefore
-/// starves them when everything shares one GPU.
-pub enum WrapperSource {
-    /// Long-lived wrapper reused across jobs. For deployments where the wrapper does
-    /// not compete for the GPU (the standalone SNARK prover binary).
-    Resident(Box<SnarkWrapper>),
-    /// Create the wrapper after a job's proofs are merged and drop it when the job
-    /// finishes, so FRI proving and the merge always see a clean GPU (the combined
-    /// `zksync-os-prover-service`). The wrapper's host-side setup caches survive the
-    /// drop in `host_cache`, so only the process's first SNARK job pays the full
-    /// setup-chain derivation (reported as the `wrapper_setup` stage); later jobs
-    /// rebuild the wrapper from the cache in negligible time.
-    PerJob {
-        trusted_setup_file: String,
-        /// App binary whose commitment is bound into the wrapper VK via
-        /// `check_aux_params` (see [`create_snark_wrapper`]). Only consumed on the
-        /// cache-less first build; later builds restore it from `host_cache`.
-        app_bin_path: PathBuf,
-        /// Setup caches carried between jobs; `None` until the first job's wrapper is
-        /// retired. Holds no GPU memory (see [`SnarkWrapperHostCache`]).
-        host_cache: Option<Box<SnarkWrapperHostCache>>,
-    },
+/// The FRI-proof combiner sizes its GPU pool from essentially all free VRAM. The wrapper
+/// therefore must not be resident while a range is merged, even in the standalone SNARK
+/// process. Each job constructs the wrapper after merging, then retires it back into the
+/// host-only cache below. This is the single canonical lifecycle for every deployment.
+pub struct WrapperSource {
+    trusted_setup_file: String,
+    /// App binary whose commitment is bound into the wrapper VK via `check_aux_params`.
+    app_bin_path: PathBuf,
+    /// Setup caches carried between jobs; `None` until the first wrapper is retired.
+    /// This holds no GPU memory (see [`SnarkWrapperHostCache`]).
+    host_cache: Option<Box<SnarkWrapperHostCache>>,
+}
+
+impl WrapperSource {
+    pub fn new(trusted_setup_file: String, app_bin_path: PathBuf) -> Self {
+        Self {
+            trusted_setup_file,
+            app_bin_path,
+            host_cache: None,
+        }
+    }
 }
 
 /// Build the SNARK wrapper session used for proving and VK generation.
@@ -181,6 +179,27 @@ fn output_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment 
     ProgramCommitment(continued)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingletonDisposition {
+    AlreadyWrapperReady,
+    ContinueOneUnifiedPass,
+}
+
+fn classify_singleton_commitment(
+    carried: ProgramCommitment,
+    verification_output: ProgramCommitment,
+    expected: ProgramCommitment,
+) -> anyhow::Result<SingletonDisposition> {
+    if carried == expected {
+        return Ok(SingletonDisposition::AlreadyWrapperReady);
+    }
+    anyhow::ensure!(
+        verification_output == expected,
+        "singleton proof does not authenticate the expected app commitment {expected}"
+    );
+    Ok(SingletonDisposition::ContinueOneUnifiedPass)
+}
+
 /// Build the FRI-proof combiner used by [`merge_fris`] for multi-proof jobs.
 ///
 /// The combiner caches everything that survives across jobs — the unified recursion
@@ -192,24 +211,18 @@ fn output_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment 
 /// The caches build lazily on the first multi-proof job; call
 /// [`CarriedChainCombiner::warm_up`] to pay that cost at startup instead. Note the GPU
 /// host state pins tens of gigabytes of host RAM for the lifetime of the combiner.
-pub fn create_combiner() -> anyhow::Result<CarriedChainCombiner> {
+pub fn create_combiner() -> CarriedChainCombiner {
     // Must match the level the FRI prover proves at - the level selects the recursion
     // verifier binaries, so a mismatch produces proofs the combine cannot verify. Both
     // map the same per-version record, so they cannot drift apart.
-    let security_level = proving_security_level()?;
+    let security_level = proving_security_level();
     #[cfg(feature = "gpu")]
     {
-        Ok(CarriedChainCombiner::new_gpu(
-            security_level,
-            GpuConfig::default(),
-        ))
+        CarriedChainCombiner::new_gpu(security_level, GpuConfig::default())
     }
     #[cfg(not(feature = "gpu"))]
     {
-        Ok(CarriedChainCombiner::new_cpu(
-            security_level,
-            CpuConfig::default(),
-        ))
+        CarriedChainCombiner::new_cpu(security_level, CpuConfig::default())
     }
 }
 
@@ -217,21 +230,18 @@ pub fn create_combiner() -> anyhow::Result<CarriedChainCombiner> {
 /// mapped to airbender's type — the same mapping `zksync_os_fri_prover` applies (kept
 /// as two four-line matches rather than a crate dependency between the two provers).
 /// Errors if no supported version records a level.
-fn proving_security_level() -> anyhow::Result<SecurityLevel> {
-    let level = SupportedProtocolVersions::default()
-        .proving_security_level()
-        .context("no supported protocol version records a proving security level")?;
-    Ok(match level {
-        protocol_version::SecurityLevel::Security80 => SecurityLevel::Security80,
+fn proving_security_level() -> SecurityLevel {
+    match SupportedProtocolVersions::default().proving_security_level() {
         protocol_version::SecurityLevel::Security100 => SecurityLevel::Security100,
-    })
+    }
 }
 
 /// Merge the job's FRI proofs into the single unified-layer proof the SNARK wrapper expects.
 ///
 /// Multi-proof jobs are combined via airbender's combined-recursion-layers flow:
 /// every input proof is verified against the recursion chain it carries (all proofs of a
-/// job must share one), the combined statement is proved with the unified-layer recursion
+/// job must resolve to one chain), the combined statement is proved with the unified-layer
+/// recursion
 /// program and shrunk back to a converged unified-layer proof whose output words 0..8 are
 /// the keccak rolling hash of the batch outputs (words 8..16 carry the shared recursion
 /// chain through unchanged). Like the single-proof path, this keeps the SNARK prover
@@ -242,6 +252,7 @@ fn proving_security_level() -> anyhow::Result<SecurityLevel> {
 pub fn merge_fris(
     snark_proof_input: SnarkProofInputs,
     combiner: &mut CarriedChainCombiner,
+    expected_program_commitment: ProgramCommitment,
 ) -> anyhow::Result<UnrolledProgramProof> {
     SNARK_PROVER_METRICS
         .fri_proofs_merged
@@ -254,9 +265,27 @@ pub fn merge_fris(
         ..
     } = snark_proof_input;
 
+    anyhow::ensure!(
+        !fri_proofs.is_empty(),
+        "cannot merge an empty FRI proof range"
+    );
+
     if fri_proofs.len() == 1 {
         tracing::info!("No proof merging needed, only one proof provided");
-        return Ok(fri_proofs.pop().unwrap());
+        let proof = fri_proofs.pop().unwrap();
+        let carried = carried_program_commitment(&proof);
+        return match classify_singleton_commitment(
+            carried,
+            output_program_commitment(&proof),
+            expected_program_commitment,
+        )
+        .with_context(|| format!("invalid singleton proof for batch {from_batch_number}"))?
+        {
+            SingletonDisposition::AlreadyWrapperReady => Ok(proof),
+            SingletonDisposition::ContinueOneUnifiedPass => {
+                continue_single_for_wrapper(proof, from_batch_number.0 as u64, combiner)
+            }
+        };
     }
 
     tracing::info!(
@@ -333,6 +362,77 @@ pub fn merge_fris(
     Ok(combined.proof)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commitment(word: u32) -> ProgramCommitment {
+        ProgramCommitment([word; 8])
+    }
+
+    #[test]
+    fn wrapper_ready_singleton_needs_no_extra_pass() {
+        let expected = commitment(3);
+        assert_eq!(
+            classify_singleton_commitment(expected, expected, expected).unwrap(),
+            SingletonDisposition::AlreadyWrapperReady
+        );
+    }
+
+    #[test]
+    fn one_fold_short_singleton_is_continued() {
+        let expected = commitment(3);
+        assert_eq!(
+            classify_singleton_commitment(commitment(2), expected, expected).unwrap(),
+            SingletonDisposition::ContinueOneUnifiedPass
+        );
+    }
+
+    #[test]
+    fn wrong_program_singleton_is_rejected() {
+        let error = classify_singleton_commitment(commitment(1), commitment(2), commitment(3))
+            .expect_err("unrelated recursion chain must be rejected");
+        assert!(error.to_string().contains("expected app commitment"));
+    }
+}
+
+/// Advance a converged singleton through one ordinary unified self-recursion pass.
+///
+/// A V8 proof that converged on its first unified pass may carry the pre-unified
+/// app chain in its stored registers even though verification outputs the final
+/// app commitment. The app-bound wrapper constrains those stored registers, so a
+/// singleton range needs one real continuation pass. Duplicating the proof or
+/// treating a singleton as a combined statement would change the public output.
+fn continue_single_for_wrapper(
+    proof: UnrolledProgramProof,
+    batch_id: u64,
+    combiner: &mut CarriedChainCombiner,
+) -> anyhow::Result<UnrolledProgramProof> {
+    let (family, inits_and_teardowns, delegation) = proof.get_proof_counts();
+    let artifact = ProofArtifact {
+        schema_version: 1,
+        security_level: combiner.security_level(),
+        target: ProofTarget::RecursionUnified,
+        backend: ProverBackend::Cpu,
+        batch_id,
+        cycles: 0,
+        program_bin_keccak: [0; 32],
+        program_text_keccak: [0; 32],
+        timings_ms: ProofTimingsMs::default(),
+        proof_counts: ProofCounts {
+            family_proof_count: family,
+            inits_and_teardowns_proof_count: inits_and_teardowns,
+            delegation_proof_count: delegation,
+            delegation_proof_count_by_type: Vec::new(),
+        },
+        proof,
+    };
+    combiner
+        .continue_single(artifact)
+        .map(|artifact| artifact.proof)
+        .map_err(|err| anyhow::anyhow!("failed to continue singleton FRI proof: {err}"))
+}
+
 pub async fn run_linking_fri_snark(
     clients: Vec<Box<dyn ProofClient + Send + Sync>>,
     output_dir: String,
@@ -340,6 +440,7 @@ pub async fn run_linking_fri_snark(
     app_bin_path: PathBuf,
     iterations: Option<usize>,
     disable_zk: bool,
+    mut stop_receiver: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let startup_started_at = Instant::now();
 
@@ -352,16 +453,16 @@ pub async fn run_linking_fri_snark(
     }
 
     let supported_versions = SupportedProtocolVersions::default();
+    supported_versions
+        .ensure_syscoin_release_constants()
+        .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
-    let mut wrapper_source = WrapperSource::Resident(Box::new(create_snark_wrapper(
-        trusted_setup_file,
-        &app_bin_path,
-    )?));
+    let mut wrapper_source = WrapperSource::new(trusted_setup_file, app_bin_path);
 
     // Warm the combiner eagerly, mirroring the SNARK precomputation above: setup
     // problems surface at startup and the first multi-proof job doesn't pay for it.
-    let mut combiner = create_combiner()?;
+    let mut combiner = create_combiner();
     combiner.warm_up();
 
     SNARK_PROVER_METRICS
@@ -370,20 +471,37 @@ pub async fn run_linking_fri_snark(
 
     let mut proof_count = 0;
 
-    // Cycle through clients in round-robin fashion
-    for client in clients.iter().cycle() {
-        tracing::debug!("Polling sequencer: {}", client.sequencer_url());
+    loop {
+        if *stop_receiver.borrow() {
+            tracing::info!("SNARK prover stop requested between jobs");
+            return Ok(());
+        }
 
-        let proof_generated = run_inner(
-            client.as_ref(),
-            &mut wrapper_source,
-            &mut combiner,
-            output_dir.clone(),
-            disable_zk,
-            &supported_versions,
-        )
-        .await
-        .expect("Failed to run SNARK prover");
+        let mut proof_generated = false;
+        let client_order =
+            ordered_client_indices(&clients, JobQueueStage::Snark, STATUS_PROBE_CONCURRENCY).await;
+        for client_idx in client_order {
+            if *stop_receiver.borrow() {
+                tracing::info!("SNARK prover stop requested before claiming another job");
+                return Ok(());
+            }
+            let client = &clients[client_idx];
+            tracing::debug!("Polling sequencer: {}", client.sequencer_url());
+            if run_inner(
+                client.as_ref(),
+                &mut wrapper_source,
+                &mut combiner,
+                output_dir.clone(),
+                disable_zk,
+                &supported_versions,
+            )
+            .await
+            .expect("Failed to run SNARK prover")
+            {
+                proof_generated = true;
+                break;
+            }
+        }
 
         if proof_generated {
             proof_count += 1;
@@ -399,11 +517,17 @@ pub async fn run_linking_fri_snark(
         } else {
             // If no task was found, wait before trying again
             tracing::info!("No pending SNARK jobs from sequencer, retrying in 5s...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                changed = stop_receiver.changed() => {
+                    if changed.is_err() || *stop_receiver.borrow() {
+                        tracing::info!("SNARK prover stop requested while polling");
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
-
-    Ok(())
 }
 
 pub async fn run_inner(
@@ -440,7 +564,6 @@ pub async fn run_inner(
             if let Some(expected) =
                 supported_protocol_versions.program_commitment_for(&snark_proof_input.vk_hash)
             {
-                let single = snark_proof_input.fri_proofs.len() == 1;
                 for (i, proof) in snark_proof_input.fri_proofs.iter().enumerate() {
                     let output = output_program_commitment(proof);
                     if output != expected {
@@ -452,22 +575,6 @@ pub async fn run_inner(
                             snark_proof_input.to_batch_number.0,
                             client.sequencer_url(),
                             snark_proof_input.vk_hash,
-                        );
-                        return Ok(false);
-                    }
-                    // A single-proof job skips the merge, so the wrapped proof's raw
-                    // registers 18..=25 (not the continued chain) meet check_aux_params.
-                    let carried = carried_program_commitment(proof);
-                    if single && carried != expected {
-                        tracing::error!(
-                            "single-proof SNARK job for batches [{} to {}]: the FRI proof \
-                             converged in one unified pass and carries the pre-merge chain \
-                             {carried} in registers 18..=25, but the wrapper VK constrains \
-                             them to {expected}; unprovable with the current VK — the job \
-                             needs >=2 FRI proofs (or the proof an extra unified pass); \
-                             skipping",
-                            snark_proof_input.from_batch_number.0,
-                            snark_proof_input.to_batch_number.0,
                         );
                         return Ok(false);
                     }
@@ -506,6 +613,9 @@ pub async fn run_inner(
     let start_batch = snark_proof_input.from_batch_number;
     let end_batch = snark_proof_input.to_batch_number;
     let vk_hash = snark_proof_input.vk_hash.clone();
+    let expected_program_commitment = supported_protocol_versions
+        .program_commitment_for(&vk_hash)
+        .context("supported V8 protocol version is missing its app program commitment")?;
 
     tracing::info!(
         "Finished picking job from sequencer {} with VK hash {}, will aggregate from {} to {} inclusive",
@@ -520,31 +630,24 @@ pub async fn run_inner(
     // A job whose proofs fail to combine would be re-picked forever, so treat merge
     // failures as fatal rather than skipping the job.
     let proof = stats.measure_step(SnarkStage::MergeFri, || {
-        merge_fris(snark_proof_input, combiner)
+        merge_fris(snark_proof_input, combiner, expected_program_commitment)
     })?;
 
     // Materialize the wrapper only after the merge: the merge's GPU prover sizes its
     // device pool to all free VRAM, so the wrapper's device-resident state must not
-    // be alive yet. In `PerJob` mode the wrapper (and any VRAM it touches) lives
-    // exactly from here until this job's proving is done; its host-side setup caches
+    // be alive yet. With the canonical per-job lifecycle, the wrapper (and any VRAM it touches)
+    // lives exactly from here until this job's proving is done; its host-side setup caches
     // carry over from the previous job, so only the first job of the process pays the
     // full setup derivation in the `wrapper_setup` stage.
-    let mut per_job_wrapper = None;
-    let snark_wrapper: &mut SnarkWrapper = match wrapper_source {
-        WrapperSource::Resident(wrapper) => wrapper,
-        WrapperSource::PerJob {
-            trusted_setup_file,
-            app_bin_path,
-            host_cache,
-        } => {
-            tracing::info!("Building per-job SNARK wrapper");
-            let cache = host_cache.take().map(|cache| *cache);
-            per_job_wrapper = Some(stats.measure_step(SnarkStage::WrapperSetup, || {
-                create_snark_wrapper_with_cache(trusted_setup_file.clone(), app_bin_path, cache)
-            })?);
-            per_job_wrapper.as_mut().expect("wrapper was just built")
-        }
-    };
+    tracing::info!("Building per-job SNARK wrapper");
+    let cache = wrapper_source.host_cache.take().map(|cache| *cache);
+    let mut snark_wrapper = stats.measure_step(SnarkStage::WrapperSetup, || {
+        create_snark_wrapper_with_cache(
+            wrapper_source.trusted_setup_file.clone(),
+            &wrapper_source.app_bin_path,
+            cache,
+        )
+    })?;
 
     tracing::info!("Wrapping and compressing FRI proof");
 
@@ -571,11 +674,7 @@ pub async fn run_inner(
     // The per-job wrapper is done with the GPU; retire it but keep its host-side setup
     // caches so the next job's wrapper build is a cheap rehydration instead of a full
     // re-derivation.
-    if let Some(wrapper) = per_job_wrapper {
-        if let WrapperSource::PerJob { host_cache, .. } = wrapper_source {
-            *host_cache = Some(Box::new(wrapper.into_host_cache()));
-        }
-    }
+    wrapper_source.host_cache = Some(Box::new(snark_wrapper.into_host_cache()));
 
     // Persist the proof next to the other artifacts, mirroring the old flow (best effort).
     let snark_proof_path = Path::new(&output_dir).join("snark_proof.json");

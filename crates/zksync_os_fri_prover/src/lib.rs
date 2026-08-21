@@ -15,7 +15,8 @@ use zksync_airbender_cli::prover_utils::{
 };
 use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
 use zksync_sequencer_proof_client::{
-    FriJobInputs, ProofClient, SequencerEndpoint, SequencerProofClient,
+    ordered_client_indices, FriJobInputs, JobQueueStage, ProofClient, SequencerEndpoint,
+    SequencerProofClient, STATUS_PROBE_CONCURRENCY,
 };
 
 use crate::metrics::FRI_PROVER_METRICS;
@@ -28,7 +29,7 @@ pub mod metrics;
 #[command(version = "1.0")]
 #[command(about = "Prover for Zksync OS", long_about = None)]
 pub struct Args {
-    /// Sequencer URL(s) to poll for tasks. Comma-separated for round-robin.
+    /// Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
     ///
     /// Format: http[s]://[username:password@]host:port
     ///
@@ -56,11 +57,12 @@ pub struct Args {
     pub path: Option<PathBuf>,
 
     /// Port to run the Prometheus metrics server on
-    #[arg(long, default_value = "3124")]
+    #[arg(long, default_value = "3125")]
     pub prometheus_port: u16,
 
-    /// Timeout for HTTP requests to sequencer in seconds. If no response is received within this time, the prover will exit.
-    #[arg(long, default_value = "2")]
+    /// Total HTTP request backstop in seconds. Connect timeout is 5s and
+    /// read-inactivity timeout is 10s.
+    #[arg(long, default_value = "600")]
     pub request_timeout_secs: u64,
 
     /// Name of the prover for identification in the sequencer's prover api
@@ -78,14 +80,10 @@ pub fn init_tracing() {
 /// combiner and the SNARK wrapper in `zksync_os_snark_prover` (which maps the same
 /// record) — since it selects the recursion verifier binaries. Errors if no supported
 /// version records a level.
-fn proving_security_level() -> anyhow::Result<SecurityLevel> {
-    let level = SupportedProtocolVersions::default()
-        .proving_security_level()
-        .context("no supported protocol version records a proving security level")?;
-    Ok(match level {
-        protocol_version::SecurityLevel::Security80 => SecurityLevel::Security80,
+fn proving_security_level() -> SecurityLevel {
+    match SupportedProtocolVersions::default().proving_security_level() {
         protocol_version::SecurityLevel::Security100 => SecurityLevel::Security100,
-    })
+    }
 }
 
 /// Create a new prover for the given program binary.
@@ -110,7 +108,7 @@ pub fn create_prover(binary_path: &Path) -> anyhow::Result<ProgramProver> {
         target: ProofTarget::RecursionUnified,
         // The level changes the recursion chain, and so the program commitment and the VK -
         // not a knob that can be flipped independently of those constants.
-        security_level: proving_security_level()?,
+        security_level: proving_security_level(),
         // `gpu` defaults to `GpuMemoryPreset::Auto`: 28 GiB arena, falling back to 21.5 GiB.
         ..Default::default()
     };
@@ -154,6 +152,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     );
 
     let supported_versions = SupportedProtocolVersions::default();
+    supported_versions
+        .ensure_syscoin_release_constants()
+        .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
     let clients = SequencerProofClient::new_clients(
@@ -200,19 +201,27 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // If no proof is generated for 10 seconds, log a message
     let retry_log_interval = Duration::from_secs(10);
 
-    // Cycle through clients in round-robin fashion
-    for client in clients.iter().cycle() {
-        tracing::debug!("Polling sequencer: {}", client.sequencer_url());
-
-        let proof_generated = run_inner(
-            client.as_ref(),
-            &prover,
-            args.path.clone(),
-            &supported_versions,
-            &program_commitment,
-        )
-        .await
-        .expect("Failed to run FRI prover");
+    loop {
+        let mut proof_generated = false;
+        let client_order =
+            ordered_client_indices(&clients, JobQueueStage::Fri, STATUS_PROBE_CONCURRENCY).await;
+        for client_idx in client_order {
+            let client = &clients[client_idx];
+            tracing::debug!("Polling sequencer: {}", client.sequencer_url());
+            if run_inner(
+                client.as_ref(),
+                &prover,
+                args.path.clone(),
+                &supported_versions,
+                &program_commitment,
+            )
+            .await
+            .expect("Failed to run FRI prover")
+            {
+                proof_generated = true;
+                break;
+            }
+        }
 
         if proof_generated {
             proof_count += 1;
@@ -244,8 +253,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             tokio::time::sleep(retry_interval).await;
         }
     }
-
-    Ok(())
 }
 
 pub async fn run_inner(

@@ -24,12 +24,11 @@ struct ProtocolVersion {
     /// The SNARK wrapper bakes it into the VK (registers 18..=25 == aux_params, via
     /// `check_aux_params`), so `vk_hash` alone identifies the app program again; this field
     /// is the plaintext of that binding, used to reject wrong-program FRI proofs up front
-    /// and to re-derive/verify the VK. `None` pre-V8 (the VK already covered the binary).
-    program_commitment: Option<ProgramCommitment>,
+    /// and to re-derive/verify the VK.
+    program_commitment: ProgramCommitment,
     /// FRI proving security level the version's constants were generated at (see
-    /// [`SecurityLevel`]). `None` pre-V8: those versions predate the level being recorded
-    /// and proved at airbender's then-default.
-    security_level: Option<SecurityLevel>,
+    /// [`SecurityLevel`]).
+    security_level: SecurityLevel,
 }
 
 /// FRI proving security level of a protocol version. The level selects the recursion
@@ -41,18 +40,16 @@ struct ProtocolVersion {
 /// the prover crates map it to airbender's type where they configure proving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityLevel {
-    /// 80-bit security.
-    Security80,
     /// 100-bit security.
     Security100,
 }
 
 /// Blake2s recursion-chain commitment binding a protocol version to its app program: the
-/// base program's `end_params` folded with the unrolled recursion verifier's — the value
-/// proofs expose in final registers 18..=25. The SNARK wrapper constrains those registers
-/// to this value in-circuit (`check_aux_params`), so the app program is bound through the
-/// VK rather than carried in the SNARK public input. See
-/// `zksync_os_fri_prover::compute_program_commitment`.
+/// base program's `end_params` folded first with the unrolled verifier and then with the
+/// unified verifier — the value wrapper-ready proofs expose in final registers 18..=25.
+/// The SNARK wrapper constrains those registers to this value in-circuit
+/// (`check_aux_params`), so the app program is bound through the VK rather than carried in
+/// the SNARK public input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgramCommitment(pub [u32; 8]);
 
@@ -81,95 +78,26 @@ struct ZkOsWrapperVersion(&'static str);
 #[allow(dead_code)]
 struct BinMd5Sum(&'static str);
 
-/// Corresponds to server's execution_version 3 (or v1.1)
-#[allow(dead_code)]
-const V3: ProtocolVersion = ProtocolVersion {
-    vk_hash: VerificationKeyHash(
-        "0x6a4509801ec284b8921c63dc6aaba668a0d71382d87ae4095ffc2235154e9fa3",
-    ),
-    airbender_version: AirbenderVersion("v0.5.0"),
-    zksync_os_version: ZkSyncOSVersion("v0.0.26"),
-    zkos_wrapper: ZkOsWrapperVersion("v0.5.0"),
-    bin_md5sum: BinMd5Sum("fd9fd6ebfcfe7b3d1557e8a8b8563dd6"),
-    program_commitment: None,
-    security_level: None,
-};
+const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const SYSCOIN_APP_MD5: &str = "2806a0fdb0c8ecf1a8f2e8ca552a0aea";
+const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
+    0x61f3308c, 0xa3a0a59b, 0xbe416638, 0x7bbccea7, 0xeed7900d, 0xe94cb514, 0x7c83f52e, 0x7dd02a63,
+]);
 
-/// Corresponds to server's execution_version 4 (or v1.2)
-#[allow(dead_code)]
-const V4: ProtocolVersion = ProtocolVersion {
-    vk_hash: VerificationKeyHash(
-        "0xa385a997a63cc78e724451dca8b044b5ef29fcdc9d8b6ced33d9f58de531faa5",
-    ),
-    airbender_version: AirbenderVersion("v0.5.1"),
-    zksync_os_version: ZkSyncOSVersion("v0.1.0"),
-    zkos_wrapper: ZkOsWrapperVersion("v0.5.3"),
-    bin_md5sum: BinMd5Sum("a3fffd4f2e14e7171c2207e470316e5f"),
-    program_commitment: None,
-    security_level: None,
-};
-
-/// Corresponds to server's execution_version 5 (or v1.3)
-#[allow(dead_code)]
-const V5: ProtocolVersion = ProtocolVersion {
-    vk_hash: VerificationKeyHash(
-        "0x996b02b1d0420e997b4dc0d629a3a1bba93ed3185ac463f17b02ff83be139581",
-    ),
-    airbender_version: AirbenderVersion("v0.5.1"),
-    zksync_os_version: ZkSyncOSVersion("v0.2.4"),
-    zkos_wrapper: ZkOsWrapperVersion("v0.5.3"),
-    bin_md5sum: BinMd5Sum("a2421384eb817ba2649f1438dc321d54"),
-    program_commitment: None,
-    security_level: None,
-};
-
-/// Corresponds to server's execution_version 6 (or v1.3.1)
-#[allow(dead_code)]
-const V6: ProtocolVersion = ProtocolVersion {
-    vk_hash: VerificationKeyHash(
-        "0x124ebcd537a1e1c152774dd18f67660e35625bba0b669bf3b4836d636b105337",
-    ),
-    airbender_version: AirbenderVersion("v0.5.2"),
-    zksync_os_version: ZkSyncOSVersion("v0.2.5"),
-    zkos_wrapper: ZkOsWrapperVersion("v0.5.4"),
-    bin_md5sum: BinMd5Sum("e77ced130723f3e52099658d589a8454"),
-    program_commitment: None,
-    security_level: None,
-};
-
-/// Corresponds to server's execution_version 7
-#[allow(dead_code)]
-const V7: ProtocolVersion = ProtocolVersion {
-    vk_hash: VerificationKeyHash(
-        "0x23156cf220288cd1e436dccfc09aa4883ea8288da61aa69e2c7251b0c0c44ccd",
-    ),
-    airbender_version: AirbenderVersion("v0.5.2"),
-    zksync_os_version: ZkSyncOSVersion("v0.3.0"),
-    zkos_wrapper: ZkOsWrapperVersion("v0.5.5"),
-    bin_md5sum: BinMd5Sum("99d1618fdf63d80c4a6ed41cf21ed4d6"),
-    program_commitment: None,
-    security_level: None,
-};
-
-/// Corresponds to server's execution_version 8 (protocol v32.0, zksync-os 0.4.0 native batch prover)
-const V8: ProtocolVersion = ProtocolVersion {
+/// The sole canonical Syscoin lane: protocol v31.0, Execution V7, Proving V8.
+/// It uses the patched zksync-os v0.4.0 app with compact Bitcoin DA.
+const SYSCOIN_V31_EXECUTION_V7_PROVING_V8: ProtocolVersion = ProtocolVersion {
     // Keccak256 of the phase-3 SNARK VK (`generate-vk --check-aux-params`), so it binds the
-    // app binary below. Regenerate when the binary, the level, or the pins change.
-    vk_hash: VerificationKeyHash(
-        "0x9f7576b911e7d3f528d49f894208682c81800814db9e3beac7fc3b1c4d626e7a",
-    ),
+    // app binary below. The zero sentinel deliberately blocks deployment until keygen.
+    vk_hash: VerificationKeyHash(ZERO_VK_HASH),
     airbender_version: AirbenderVersion("v0.6.0-rc.2"),
     zksync_os_version: ZkSyncOSVersion("v0.4.0"),
     zkos_wrapper: ZkOsWrapperVersion("v0.6.0-rc.2"),
-    // zksync-os v0.4.0 release tag (@ 69bc4305), built reproducibly.
-    bin_md5sum: BinMd5Sum("31cb9cb3b42d4a183fb858594eeb8706"),
+    bin_md5sum: BinMd5Sum(SYSCOIN_APP_MD5),
     // base -> unrolled -> unified: what real proofs expose in registers 18..=25.
     // Specific to the 100-bit level below, like the vk_hash above.
-    program_commitment: Some(ProgramCommitment([
-        0xad042447, 0x3747a5ec, 0xba3294e4, 0xde778e30, 0x5b433c2c, 0x27948140, 0x84ccda7a,
-        0xc817312d,
-    ])),
-    security_level: Some(SecurityLevel::Security100),
+    program_commitment: SYSCOIN_PROGRAM_COMMITMENT,
+    security_level: SecurityLevel::Security100,
 };
 
 /// Represents the set of supported protocol versions by this prover implementation.
@@ -180,11 +108,43 @@ pub struct SupportedProtocolVersions {
 
 impl Default for SupportedProtocolVersions {
     fn default() -> Self {
-        Self { versions: vec![V8] }
+        Self {
+            versions: vec![SYSCOIN_V31_EXECUTION_V7_PROVING_V8],
+        }
     }
 }
 
 impl SupportedProtocolVersions {
+    /// Fail closed until keygen replaces the zero VK sentinel, and ensure the
+    /// remaining release constants are exactly the patched Syscoin app values.
+    pub fn ensure_syscoin_release_constants(&self) -> Result<(), String> {
+        let [version] = self.versions.as_slice() else {
+            return Err("the prover must contain exactly one canonical Syscoin version".to_owned());
+        };
+        if version.bin_md5sum.0 != SYSCOIN_APP_MD5
+            || version.program_commitment != SYSCOIN_PROGRAM_COMMITMENT
+            || version.security_level != SecurityLevel::Security100
+        {
+            return Err("canonical Syscoin app/security constants do not match".to_owned());
+        }
+        if version.vk_hash.0 == ZERO_VK_HASH {
+            return Err(
+                "Syscoin app-bound V8 VK is the zero regeneration sentinel; run production \
+                 keygen and update the prover, server, and Era verifier atomically"
+                    .to_owned(),
+            );
+        }
+        if version.vk_hash.0.len() != 66
+            || !version.vk_hash.0.starts_with("0x")
+            || !version.vk_hash.0[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("Syscoin app-bound V8 VK hash is not a 32-byte hex value".to_owned());
+        }
+        Ok(())
+    }
+
     /// Checks if the given VK hash is supported.
     pub fn contains(&self, vk_hash: &str) -> bool {
         self.versions.iter().any(|v| v.vk_hash.0 == vk_hash)
@@ -199,53 +159,78 @@ impl SupportedProtocolVersions {
     }
 
     /// The app-program commitment recorded for the version with this VK hash;
-    /// `None` if the version is unsupported or pre-V8.
+    /// `None` if the VK hash is unsupported.
     pub fn program_commitment_for(&self, vk_hash: &str) -> Option<ProgramCommitment> {
         self.versions
             .iter()
             .find(|v| v.vk_hash.0 == vk_hash)
-            .and_then(|v| v.program_commitment)
+            .map(|v| v.program_commitment)
     }
 
     /// Checks whether some supported version proves the app program with this commitment.
     pub fn supports_program(&self, commitment: &ProgramCommitment) -> bool {
         self.versions
             .iter()
-            .any(|v| v.program_commitment.as_ref() == Some(commitment))
+            .any(|v| &v.program_commitment == commitment)
     }
 
-    /// The security level the prover process proves at: the one level shared by every
-    /// supported version that records one, `None` if no version records a level.
-    ///
-    /// The level is fixed per process — the provers and the combiner are configured with
-    /// it at construction, before any job (and its vk_hash) is known — so a version set
-    /// mixing levels cannot be served by one process. This panics on such a set rather
-    /// than silently picking a level; the set is a compile-time constant, so the panic
-    /// marks a broken edit of this file, not a runtime condition.
-    pub fn proving_security_level(&self) -> Option<SecurityLevel> {
-        let mut levels = self.versions.iter().filter_map(|v| v.security_level);
-        let first = levels.next()?;
-        assert!(
-            levels.all(|level| level == first),
-            "supported protocol versions record different proving security levels; \
-             one prover process cannot serve them all"
-        );
-        Some(first)
+    /// The sole canonical lane's fixed proving security level.
+    pub fn proving_security_level(&self) -> SecurityLevel {
+        self.versions
+            .first()
+            .expect("one canonical version")
+            .security_level
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
-    /// The getter panics on a mixed-level version set; catch that here instead of at
-    /// prover startup. Pinning the value also guards the V8+ constants against a level
-    /// edit that forgets to regenerate `program_commitment` and `vk_hash` with it.
+    /// Pinning the value guards the V8 constants against a level edit that forgets
+    /// to regenerate `program_commitment` and `vk_hash` with it.
     #[test]
     fn default_versions_share_one_proving_security_level() {
         assert_eq!(
             SupportedProtocolVersions::default().proving_security_level(),
-            Some(SecurityLevel::Security100)
+            SecurityLevel::Security100
+        );
+    }
+
+    #[test]
+    fn zero_vk_sentinel_blocks_deployment() {
+        let error = SupportedProtocolVersions::default()
+            .ensure_syscoin_release_constants()
+            .expect_err("zero VK sentinel must keep the deployment gate closed");
+        assert!(error.contains("zero regeneration sentinel"));
+    }
+
+    #[test]
+    fn canonical_app_constants_match_checked_in_syscoin_artifacts() {
+        let versions = SupportedProtocolVersions::default();
+        let [version] = versions.versions.as_slice() else {
+            panic!("expected one canonical version")
+        };
+        assert_eq!(version.bin_md5sum.0, "2806a0fdb0c8ecf1a8f2e8ca552a0aea");
+        let app_bin = include_bytes!("../../../multiblock_batch.bin");
+        let app_text = include_bytes!("../../../multiblock_batch.text");
+        assert_eq!(app_bin.len(), 1_324_616);
+        assert_eq!(app_text.len(), 1_195_064);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(app_bin)),
+            "20fe50c9840cc7ff872cc1f190e320b4595e006c56a385b10a0e10bbba712f19"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(app_text)),
+            "462cc621c6d44b4a04b8455f0ddeebc8269234817b85dbaebefdaba88c67bf07"
+        );
+        assert_eq!(
+            version.program_commitment.0,
+            [
+                1643327628, 2745214363, 3191957048, 2075971239, 4007104525, 3914118420, 2089022766,
+                2110794339,
+            ]
         );
     }
 }

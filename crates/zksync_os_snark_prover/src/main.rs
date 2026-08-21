@@ -27,7 +27,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     RunProver {
-        /// Sequencer URL(s) to poll for tasks. Comma-separated for round-robin.
+        /// Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
         ///
         /// Format: http[s]://[username:password@]host:port
         ///
@@ -55,10 +55,11 @@ enum Commands {
         #[arg(long)]
         iterations: Option<usize>,
         /// Port to run the Prometheus metrics server on
-        #[arg(long, default_value = "3124")]
+        #[arg(long, default_value = "3126")]
         prometheus_port: u16,
-        /// Timeout for HTTP requests to sequencer in seconds. If no response is received within this time, the prover will exit.
-        #[arg(long, default_value = "2")]
+        /// Total HTTP request backstop in seconds. Connect timeout is 5s and
+        /// read-inactivity timeout is 10s.
+        #[arg(long, default_value = "600")]
         request_timeout_secs: u64,
         /// Disable ZK for SNARK proofs
         #[arg(long, default_value_t = false)]
@@ -109,10 +110,11 @@ fn main() -> anyhow::Result<()> {
             let app_bin_path = app_bin_path
                 .unwrap_or_else(|| Path::new(&manifest_path).join("../../multiblock_batch.bin"));
             let (stop_sender, stop_receiver) = watch::channel(false);
+            let metrics_stop_receiver = stop_receiver.clone();
 
             runtime.block_on(async move {
                 let metrics_handle = tokio::spawn(async move {
-                    metrics::start_metrics_exporter(prometheus_port, stop_receiver).await
+                    metrics::start_metrics_exporter(prometheus_port, metrics_stop_receiver).await
                 });
 
                 let timeout = Duration::from_secs(request_timeout_secs);
@@ -123,6 +125,9 @@ fn main() -> anyhow::Result<()> {
                     sequencer_urls
                 );
                 let supported_versions = SupportedProtocolVersions::default();
+                supported_versions
+                    .ensure_syscoin_release_constants()
+                    .expect("Syscoin app/VK release constants are not configured");
                 let clients = SequencerProofClient::new_clients(
                     sequencer_urls,
                     prover_name,
@@ -140,7 +145,7 @@ fn main() -> anyhow::Result<()> {
                 // runtime blocking thread (which gets the explicit stack size above)
                 // rather than polling it on the OS-sized main thread via `block_on`.
                 let runtime_handle = tokio::runtime::Handle::current();
-                let prover_task = tokio::task::spawn_blocking(move || {
+                let mut prover_task = tokio::task::spawn_blocking(move || {
                     runtime_handle.block_on(run_linking_fri_snark(
                         clients,
                         output_dir,
@@ -148,19 +153,26 @@ fn main() -> anyhow::Result<()> {
                         app_bin_path,
                         iterations,
                         disable_zk,
+                        stop_receiver,
                     ))
                 });
 
                 tokio::select! {
-                    result = prover_task => {
+                    result = &mut prover_task => {
                         tracing::info!("SNARK prover finished");
                         result
                             .expect("SNARK prover task panicked")
                             .expect("SNARK prover finished with error");
-                        stop_sender.send(true).expect("failed to send stop signal");
+                        // The metrics task may already have stopped and dropped its receiver.
+                        stop_sender.send_replace(true);
                     }
                     _ = tokio::signal::ctrl_c() => {
-                        tracing::info!("Stop request received, shutting down");
+                        tracing::info!("Stop request received; waiting for any in-flight proof to finish");
+                        stop_sender.send_replace(true);
+                        prover_task
+                            .await
+                            .expect("SNARK prover task panicked")
+                            .expect("SNARK prover finished with error during shutdown");
                     },
                 }
 

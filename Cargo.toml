@@ -53,16 +53,34 @@ async-trait = "0.1"
 base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }
 clap = { version = "4.5.40", features = ["derive"] }
-reqwest = { version = "0.12.19", features = ["json"] }
+futures-util = "0.3"
+# Large prover API responses (witnesses and FRI bundles) are compressed by the
+# sequencer. Keep every decoder enabled so reqwest transparently decodes them.
+reqwest = { version = "0.12.19", features = ["json", "gzip", "brotli", "zstd", "deflate"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros"] }
+sha2 = "0.10.9"
+tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros", "time"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 vise = "0.3.2"
 vise-exporter = "0.3.2"
 url = "2.5"
+
+# Keep the source requested by this workspace and zkos-wrapper identical, while replacing
+# the exact rc.2 checkout with Syscoin's reviewed singleton-continuation descendant. Every
+# Airbender package that crosses the wrapper boundary is patched to one immutable revision;
+# mixing Git URLs here would create duplicate nominal Rust types.
+[patch."https://github.com/matter-labs/zksync-airbender"]
+cli = { git = "https://github.com/syscoin/zksync-airbender", rev = "92136242812c2de8bbd4d850ab3b85ceba778346" }
+execution_utils = { git = "https://github.com/syscoin/zksync-airbender", rev = "92136242812c2de8bbd4d850ab3b85ceba778346" }
+unified_reduced_machine_verifier = { git = "https://github.com/syscoin/zksync-airbender", rev = "92136242812c2de8bbd4d850ab3b85ceba778346" }
+blake2_with_compression_verifier = { git = "https://github.com/syscoin/zksync-airbender", rev = "92136242812c2de8bbd4d850ab3b85ceba778346" }
+setups = { git = "https://github.com/syscoin/zksync-airbender", rev = "92136242812c2de8bbd4d850ab3b85ceba778346" }
+field = { git = "https://github.com/syscoin/zksync-airbender", rev = "92136242812c2de8bbd4d850ab3b85ceba778346" }
+verifier_generator = { git = "https://github.com/syscoin/zksync-airbender", rev = "92136242812c2de8bbd4d850ab3b85ceba778346" }
+prover = { git = "https://github.com/syscoin/zksync-airbender", rev = "92136242812c2de8bbd4d850ab3b85ceba778346" }
 
 # Things below are to guarantee that we can compile in reasonable time.
 # Once we do some optimizations to the zkos-wrapper and compression verifier, we'll be able to remove some of them.

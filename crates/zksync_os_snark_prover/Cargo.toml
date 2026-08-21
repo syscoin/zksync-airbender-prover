@@ -36,3 +36,6 @@ url.workspace = true
 
 [features]
 gpu = ["zkos_wrapper/gpu", "zksync_airbender_cli/gpu"]
+
+[dev-dependencies]
+serde_json.workspace = true

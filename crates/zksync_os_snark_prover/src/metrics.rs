@@ -37,9 +37,10 @@ pub struct SnarkProverMetrics {
     pub time_taken_startup: Histogram,
     #[metrics(buckets = PROVING_LATENCIES, unit = vise::Unit::Seconds)]
     pub time_taken_merge_fri: Histogram,
-    /// Time spent building the per-job SNARK wrapper in the combined prover service,
-    /// which drops the wrapper between jobs so it can't compete with the FRI prover
-    /// for the GPU (see `WrapperSource::PerJob`). The full setup-chain derivation is
+    /// Time spent building the per-job SNARK wrapper. Both standalone and combined
+    /// services drop the wrapper between jobs so it cannot compete with FRI merging
+    /// for the GPU (see `WrapperSource`).
+    /// The full setup-chain derivation is
     /// paid only by the process's first job; later jobs rehydrate from the host-side
     /// cache in negligible time.
     #[metrics(buckets = vise::Buckets::linear(30.0..=300.0, 30.0), unit = vise::Unit::Seconds)]
