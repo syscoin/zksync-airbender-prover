@@ -12,7 +12,7 @@ fn carried(proof: &UnrolledProgramProof) -> ProgramCommitment {
 }
 
 /// Commitment output by proof verification. `continue_recursion_chain` carries an already-final
-/// chain unchanged and advances a first-pass singleton exactly once.
+/// chain unchanged and advances a first-pass stored chain exactly once.
 fn verification_output(proof: &UnrolledProgramProof) -> ProgramCommitment {
     let carried = carried(proof);
     let hash = proof

@@ -23,6 +23,16 @@ use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
 pub mod metrics;
 
+const MIN_FRIS_PER_REAL_SNARK: usize = 2;
+
+fn ensure_real_snark_proof_count(proof_count: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        proof_count >= MIN_FRIS_PER_REAL_SNARK,
+        "real SNARK jobs require at least {MIN_FRIS_PER_REAL_SNARK} FRI proofs; got {proof_count}"
+    );
+    Ok(())
+}
+
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     FmtSubscriber::builder().with_env_filter(filter).init();
@@ -179,27 +189,6 @@ fn output_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment 
     ProgramCommitment(continued)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SingletonDisposition {
-    AlreadyWrapperReady,
-    ContinueOneUnifiedPass,
-}
-
-fn classify_singleton_commitment(
-    carried: ProgramCommitment,
-    verification_output: ProgramCommitment,
-    expected: ProgramCommitment,
-) -> anyhow::Result<SingletonDisposition> {
-    if carried == expected {
-        return Ok(SingletonDisposition::AlreadyWrapperReady);
-    }
-    anyhow::ensure!(
-        verification_output == expected,
-        "singleton proof does not authenticate the expected app commitment {expected}"
-    );
-    Ok(SingletonDisposition::ContinueOneUnifiedPass)
-}
-
 /// Build the FRI-proof combiner used by [`merge_fris`] for multi-proof jobs.
 ///
 /// The combiner caches everything that survives across jobs — the unified recursion
@@ -244,15 +233,13 @@ fn proving_security_level() -> SecurityLevel {
 /// recursion
 /// program and shrunk back to a converged unified-layer proof whose output words 0..8 are
 /// the keccak rolling hash of the batch outputs (words 8..16 carry the shared recursion
-/// chain through unchanged). Like the single-proof path, this keeps the SNARK prover
-/// detached from the app binary: the chain is bound to the expected program by the
-/// downstream verifier of the wrapped proof, not by local files. On `gpu` builds the
-/// unified-layer proving passes run on the GPU; verification and witness building stay
-/// on the host either way.
+/// chain through unchanged). This keeps the SNARK prover detached from the app binary:
+/// the chain is bound to the expected program by the downstream verifier of the wrapped
+/// proof, not by local files. On `gpu` builds the unified-layer proving passes run on the
+/// GPU; verification and witness building stay on the host either way.
 pub fn merge_fris(
     snark_proof_input: SnarkProofInputs,
     combiner: &mut CarriedChainCombiner,
-    expected_program_commitment: ProgramCommitment,
 ) -> anyhow::Result<UnrolledProgramProof> {
     SNARK_PROVER_METRICS
         .fri_proofs_merged
@@ -261,32 +248,13 @@ pub fn merge_fris(
     let SnarkProofInputs {
         from_batch_number,
         to_batch_number,
-        mut fri_proofs,
+        fri_proofs,
         ..
     } = snark_proof_input;
 
-    anyhow::ensure!(
-        !fri_proofs.is_empty(),
-        "cannot merge an empty FRI proof range"
-    );
-
-    if fri_proofs.len() == 1 {
-        tracing::info!("No proof merging needed, only one proof provided");
-        let proof = fri_proofs.pop().unwrap();
-        let carried = carried_program_commitment(&proof);
-        return match classify_singleton_commitment(
-            carried,
-            output_program_commitment(&proof),
-            expected_program_commitment,
-        )
-        .with_context(|| format!("invalid singleton proof for batch {from_batch_number}"))?
-        {
-            SingletonDisposition::AlreadyWrapperReady => Ok(proof),
-            SingletonDisposition::ContinueOneUnifiedPass => {
-                continue_single_for_wrapper(proof, from_batch_number.0 as u64, combiner)
-            }
-        };
-    }
+    ensure_real_snark_proof_count(fri_proofs.len()).with_context(|| {
+        format!("invalid server range for batches {from_batch_number} to {to_batch_number}")
+    })?;
 
     tracing::info!(
         "Combining {} FRI proofs for batches {from_batch_number} to {to_batch_number} into one",
@@ -364,73 +332,20 @@ pub fn merge_fris(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn commitment(word: u32) -> ProgramCommitment {
-        ProgramCommitment([word; 8])
-    }
+    use super::ensure_real_snark_proof_count;
 
     #[test]
-    fn wrapper_ready_singleton_needs_no_extra_pass() {
-        let expected = commitment(3);
-        assert_eq!(
-            classify_singleton_commitment(expected, expected, expected).unwrap(),
-            SingletonDisposition::AlreadyWrapperReady
-        );
+    fn real_snark_range_requires_at_least_two_fris() {
+        for count in [0, 1] {
+            let error = ensure_real_snark_proof_count(count)
+                .expect_err("an empty or singleton real SNARK range must fail closed");
+            assert!(error.to_string().contains("at least 2 FRI proofs"));
+        }
+        for count in [2, 100] {
+            ensure_real_snark_proof_count(count)
+                .expect("a multi-FRI real SNARK range must be accepted");
+        }
     }
-
-    #[test]
-    fn one_fold_short_singleton_is_continued() {
-        let expected = commitment(3);
-        assert_eq!(
-            classify_singleton_commitment(commitment(2), expected, expected).unwrap(),
-            SingletonDisposition::ContinueOneUnifiedPass
-        );
-    }
-
-    #[test]
-    fn wrong_program_singleton_is_rejected() {
-        let error = classify_singleton_commitment(commitment(1), commitment(2), commitment(3))
-            .expect_err("unrelated recursion chain must be rejected");
-        assert!(error.to_string().contains("expected app commitment"));
-    }
-}
-
-/// Advance a converged singleton through one ordinary unified self-recursion pass.
-///
-/// A V8 proof that converged on its first unified pass may carry the pre-unified
-/// app chain in its stored registers even though verification outputs the final
-/// app commitment. The app-bound wrapper constrains those stored registers, so a
-/// singleton range needs one real continuation pass. Duplicating the proof or
-/// treating a singleton as a combined statement would change the public output.
-fn continue_single_for_wrapper(
-    proof: UnrolledProgramProof,
-    batch_id: u64,
-    combiner: &mut CarriedChainCombiner,
-) -> anyhow::Result<UnrolledProgramProof> {
-    let (family, inits_and_teardowns, delegation) = proof.get_proof_counts();
-    let artifact = ProofArtifact {
-        schema_version: 1,
-        security_level: combiner.security_level(),
-        target: ProofTarget::RecursionUnified,
-        backend: ProverBackend::Cpu,
-        batch_id,
-        cycles: 0,
-        program_bin_keccak: [0; 32],
-        program_text_keccak: [0; 32],
-        timings_ms: ProofTimingsMs::default(),
-        proof_counts: ProofCounts {
-            family_proof_count: family,
-            inits_and_teardowns_proof_count: inits_and_teardowns,
-            delegation_proof_count: delegation,
-            delegation_proof_count_by_type: Vec::new(),
-        },
-        proof,
-    };
-    combiner
-        .continue_single(artifact)
-        .map(|artifact| artifact.proof)
-        .map_err(|err| anyhow::anyhow!("failed to continue singleton FRI proof: {err}"))
 }
 
 pub async fn run_linking_fri_snark(
@@ -541,11 +456,15 @@ pub async fn run_inner(
     tracing::debug!("Picking job from sequencer {}", client.sequencer_url());
     let snark_proof_input = match client.pick_snark_job().await {
         Ok(Some(snark_proof_input)) => {
-            if snark_proof_input.fri_proofs.is_empty() {
-                let err_msg =
-                    "No FRI proofs were sent, issue with Prover API/Sequencer, quitting...";
-                tracing::error!(err_msg);
-                return Err(anyhow::anyhow!(err_msg));
+            if let Err(error) = ensure_real_snark_proof_count(snark_proof_input.fri_proofs.len()) {
+                let error = error.context(format!(
+                    "sequencer {} returned an invalid real SNARK range for batches [{} to {}]",
+                    client.sequencer_url(),
+                    snark_proof_input.from_batch_number.0,
+                    snark_proof_input.to_batch_number.0,
+                ));
+                tracing::error!("{error:#}");
+                return Err(error);
             }
             if !supported_protocol_versions.contains(&snark_proof_input.vk_hash) {
                 tracing::error!(
@@ -613,10 +532,6 @@ pub async fn run_inner(
     let start_batch = snark_proof_input.from_batch_number;
     let end_batch = snark_proof_input.to_batch_number;
     let vk_hash = snark_proof_input.vk_hash.clone();
-    let expected_program_commitment = supported_protocol_versions
-        .program_commitment_for(&vk_hash)
-        .context("supported V8 protocol version is missing its app program commitment")?;
-
     tracing::info!(
         "Finished picking job from sequencer {} with VK hash {}, will aggregate from {} to {} inclusive",
         client.sequencer_url(),
@@ -630,7 +545,7 @@ pub async fn run_inner(
     // A job whose proofs fail to combine would be re-picked forever, so treat merge
     // failures as fatal rather than skipping the job.
     let proof = stats.measure_step(SnarkStage::MergeFri, || {
-        merge_fris(snark_proof_input, combiner, expected_program_commitment)
+        merge_fris(snark_proof_input, combiner)
     })?;
 
     // Materialize the wrapper only after the merge: the merge's GPU prover sizes its

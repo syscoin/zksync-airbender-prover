@@ -117,14 +117,24 @@ CUDA_VISIBLE_DEVICES=2 RUST_MIN_STACK=267108864 cargo run --release \
   --prover-name syscoin-snark-gpu2 --prometheus-port 3212
 ```
 
-The workspace pins every Airbender package crossing the wrapper boundary to the exact reviewed
-Syscoin descendant of upstream `v0.6.0-rc.2`; this includes the singleton continuation and avoids
-duplicate Git-source Rust types. Fake FRI and SNARK provers must be off. For the dedicated SNARK
-worker, batching readiness is authoritative on the server: target 100 FRIs, release an older
-range after 3600 seconds, and force upgrade/security boundaries to singleton ranges. The
-combined-service flags below do not control this worker. Queue `/status` does not expose that
-readiness, so an adaptive local threshold (the old value was 80) must not be used to switch
-early and churn on an unavailable SNARK job.
+The workspace uses the exact upstream Matter Labs Airbender `v0.6.0-rc.2` graph, with no Syscoin
+core fork. Every real SNARK job must therefore contain at least two compatible FRI proofs; the
+prover fails before merge or wrapper setup if the server violates that contract. Fake FRI and
+SNARK provers must be off. For the dedicated SNARK worker, batching readiness is authoritative on
+the server: target 100 FRIs and release an older compatible range after 3600 seconds, but never
+release fewer than two. The combined-service flags below do not control this worker. Queue
+`/status` does not expose that readiness, so an adaptive local threshold (the old value was 80)
+must not be used to switch early and churn on an unavailable SNARK job.
+
+Rare upgrade or security boundaries need a second real, same-VK proof. Before activating such a
+boundary, operators must ensure that a second same-VK batch is actually sealed and committed; an
+intentionally empty real batch is one option, but this repository does not automate creating it.
+Otherwise the range waits. A future upstream Airbender API could instead add an output-preserving
+extra unified pass before a singleton is wrapped. Duplicating a proof is not valid: stock
+aggregation hashes every input and would change the settlement public output.
+
+The release names belong to different repositories: `v0.6.0-rc.2` is the pinned Airbender proving
+stack, while the checked-in Syscoin guest below is based on final `zksync-os v0.4.0`.
 
 The canonical record already contains the patched Syscoin app MD5 and Security100 program
 commitment. Its VK is deliberately a zero regeneration sentinel, so the binaries fail closed
