@@ -332,25 +332,6 @@ pub fn merge_fris(
     Ok(combined.proof)
 }
 
-// SYSCOIN: Lock the stock-Airbender minimum-two range requirement.
-#[cfg(test)]
-mod tests {
-    use super::ensure_real_snark_proof_count;
-
-    #[test]
-    fn real_snark_range_requires_at_least_two_fris() {
-        for count in [0, 1] {
-            let error = ensure_real_snark_proof_count(count)
-                .expect_err("an empty or singleton real SNARK range must fail closed");
-            assert!(error.to_string().contains("at least 2 FRI proofs"));
-        }
-        for count in [2, 100] {
-            ensure_real_snark_proof_count(count)
-                .expect("a multi-FRI real SNARK range must be accepted");
-        }
-    }
-}
-
 pub async fn run_linking_fri_snark(
     clients: Vec<Box<dyn ProofClient + Send + Sync>>,
     output_dir: String,
@@ -650,6 +631,25 @@ pub async fn run_inner(
             }
             // Return false so caller doesn't increment proof counter
             Ok(false)
+        }
+    }
+}
+
+// SYSCOIN: Lock the stock-Airbender minimum-two range requirement.
+#[cfg(test)]
+mod tests {
+    use super::ensure_real_snark_proof_count;
+
+    #[test]
+    fn real_snark_range_requires_at_least_two_fris() {
+        for count in [0, 1] {
+            let error = ensure_real_snark_proof_count(count)
+                .expect_err("an empty or singleton real SNARK range must fail closed");
+            assert!(error.to_string().contains("at least 2 FRI proofs"));
+        }
+        for count in [2, 100] {
+            ensure_real_snark_proof_count(count)
+                .expect("a multi-FRI real SNARK range must be accepted");
         }
     }
 }
