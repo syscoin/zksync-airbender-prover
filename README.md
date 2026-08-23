@@ -66,32 +66,38 @@ Note: the app program consists of the `.bin` file passed via `--app-bin-path` **
 `.text` sibling, which is resolved by replacing the extension (e.g. `multiblock_batch.bin`
 + `multiblock_batch.text`). Both files must be present; the prover refuses to start otherwise.
 
-**This command currently requires around 140 GB of RAM - and GPU**
+The standalone SNARK prover supports either the CPU backend (no `gpu` feature) or the GPU
+backend (`--features gpu`). The canonical Syscoin layout below uses a dedicated CPU worker so
+the three FRI GPUs stay resident. Plan 256 GiB of physical RAM for that worker (192 GiB is a
+bring-up floor), do not rely on swap, and keep the initial server lease at two hours until a
+production-size Security100 range is measured.
 
 ```bash
 # optional - increase stack size to 300M (TODO: check if this could be lower)
 ulimit -s 300000
 
-# start SNARK prover with a single sequencer
-RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs
+# start the canonical CPU SNARK worker with a single sequencer
+RUST_MIN_STACK=267108864 cargo run --release --no-default-features --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs
 
-# start SNARK prover with multiple sequencers
-RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs
+# start the canonical CPU SNARK worker with multiple sequencers
+RUST_MIN_STACK=267108864 cargo run --release --no-default-features --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
 The same timeout, decompression, and multi-sequencer scheduling rules described for the FRI
 prover apply here.
 
-### Canonical three-GPU deployment
+### Canonical three-GPU FRI plus CPU SNARK deployment
 
-Use two standalone FRI workers and one standalone SNARK worker. Expose exactly one GPU to
-each process: Airbender enumerates all visible CUDA devices, so leaving all three visible can
-allow one process to reserve the whole machine. All workers must use the same generated
-Syscoin `multiblock_batch.bin` and `.text` artifacts.
+<!-- SYSCOIN: Keep FRI residency separate from the server-leased CPU combine/wrap worker. -->
+Use three standalone, permanently resident FRI workers and one standalone CPU SNARK worker on
+a separate high-memory server. Expose exactly one GPU to each FRI process: Airbender enumerates
+all visible CUDA devices, so leaving all three visible can allow one process to reserve the whole
+machine. The CPU worker must not be built with `--features gpu`. All workers must use the same
+generated Syscoin `multiblock_batch.bin` and `.text` artifacts.
 
 ```bash
-mkdir -p output/fri-gpu0 output/fri-gpu1 output/snark-gpu2
+mkdir -p output/fri-gpu0 output/fri-gpu1 output/fri-gpu2
 
 CUDA_VISIBLE_DEVICES=0 cargo run --release --features gpu \
   --bin zksync_os_fri_prover -- \
@@ -107,15 +113,29 @@ CUDA_VISIBLE_DEVICES=1 cargo run --release --features gpu \
   --prover-name syscoin-fri-gpu1 --prometheus-port 3211 \
   --path ./output/fri-gpu1/fri_proof.json
 
-CUDA_VISIBLE_DEVICES=2 RUST_MIN_STACK=267108864 cargo run --release \
-  --features gpu \
+CUDA_VISIBLE_DEVICES=2 cargo run --release --features gpu \
+  --bin zksync_os_fri_prover -- \
+  --sequencer-urls http://localhost:3124 \
+  --app-bin-path ./multiblock_batch.bin \
+  --prover-name syscoin-fri-gpu2 --prometheus-port 3212 \
+  --path ./output/fri-gpu2/fri_proof.json
+
+# Run this process on the separate CPU server. No CUDA device is required or used.
+mkdir -p output/snark-cpu
+RUST_MIN_STACK=267108864 cargo run --release --no-default-features \
   --bin zksync_os_snark_prover -- run-prover \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
   --trusted-setup-file crs/setup_compact.key \
-  --output-dir ./output/snark-gpu2 \
-  --prover-name syscoin-snark-gpu2 --prometheus-port 3212
+  --output-dir ./output/snark-cpu \
+  --prover-name syscoin-snark-cpu --prometheus-port 3213
 ```
+
+The sequencer owns SNARK assignment and atomically leases one compatible range to one eligible
+requester. A worker asks for work when ready; the server does not broadcast the same range to
+every SNARK prover. In a decentralized pool this lease remains the single-work guarantee while
+multiple compatible workers may request jobs. The CPU worker combines its assigned FRI range and
+performs the wrapper entirely on CPU.
 
 <!-- SYSCOIN: This section documents the downstream deployment and batching policy. -->
 The workspace uses the exact upstream Matter Labs Airbender `v0.6.0-rc.2` graph, with no Syscoin
