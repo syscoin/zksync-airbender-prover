@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+// SYSCOIN: Bound concurrent queue-status hints without delaying normal pick fallbacks.
 use std::num::NonZeroUsize;
 use std::time::Duration;
 use url::Url;

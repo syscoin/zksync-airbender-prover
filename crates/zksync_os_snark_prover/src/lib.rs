@@ -573,7 +573,7 @@ pub async fn run_inner(
     stats.observe_full();
     tracing::info!("Finished generating proof, time stats: {}", stats);
 
-    // The per-job wrapper is done with the GPU; retire it but keep its host-side setup
+    // SYSCOIN: The per-job wrapper is done with the GPU; retire it but keep its host-side setup
     // caches so the next job's wrapper build is a cheap rehydration instead of a full
     // re-derivation.
     wrapper_source.host_cache = Some(Box::new(snark_wrapper.into_host_cache()));

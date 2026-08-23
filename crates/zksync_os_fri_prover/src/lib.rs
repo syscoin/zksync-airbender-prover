@@ -109,6 +109,7 @@ pub fn create_prover(binary_path: &Path) -> anyhow::Result<ProgramProver> {
         target: ProofTarget::RecursionUnified,
         // The level changes the recursion chain, and so the program commitment and the VK -
         // not a knob that can be flipped independently of those constants.
+        // SYSCOIN: The fresh-only registry makes this canonical Security100 selection infallible.
         security_level: proving_security_level(),
         // `gpu` defaults to `GpuMemoryPreset::Auto`: 28 GiB arena, falling back to 21.5 GiB.
         ..Default::default()

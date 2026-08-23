@@ -360,6 +360,7 @@ mod tests {
         assert!(attempts.load(Ordering::Relaxed) >= 3);
     }
 
+    // SYSCOIN: Lock the combined service's target-or-latency phase transition policy.
     #[test]
     fn fri_phase_limits_have_or_semantics() {
         assert!(fri_phase_limit_reached(
