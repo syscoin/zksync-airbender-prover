@@ -137,11 +137,16 @@ impl SnarkProofTimeStats {
 
     pub fn observe_full(&mut self) {
         let merge_fri = self.time_taken.get(&SnarkStage::MergeFri);
+        // SYSCOIN: Wrapper construction moved into the per-job lifecycle, so its cold-cache
+        // cost is part of the end-to-end latency used to tune production job leases.
+        let wrapper_setup = self.time_taken.get(&SnarkStage::WrapperSetup);
         let final_proof = self.time_taken.get(&SnarkStage::FinalProof);
         let snark = self.time_taken.get(&SnarkStage::Snark);
 
-        if let (Some(merge_fri), Some(final_proof), Some(snark)) = (merge_fri, final_proof, snark) {
-            let full_duration = *merge_fri + *final_proof + *snark;
+        if let (Some(merge_fri), Some(wrapper_setup), Some(final_proof), Some(snark)) =
+            (merge_fri, wrapper_setup, final_proof, snark)
+        {
+            let full_duration = *merge_fri + *wrapper_setup + *final_proof + *snark;
             self.observe_step(SnarkStage::Full, full_duration);
         } else {
             tracing::error!("Failed to observe full duration of snark proof, some of the items are missing: {:?}", self.time_taken);
@@ -156,5 +161,36 @@ impl SnarkProofTimeStats {
         let result = step();
         self.observe_step(stage, start.elapsed());
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_duration_includes_per_job_wrapper_setup() {
+        let mut stats = SnarkProofTimeStats::new();
+        stats
+            .time_taken
+            .insert(SnarkStage::MergeFri, Duration::from_secs(1));
+        stats
+            .time_taken
+            .insert(SnarkStage::WrapperSetup, Duration::from_secs(2));
+        stats
+            .time_taken
+            .insert(SnarkStage::FinalProof, Duration::from_secs(3));
+        stats
+            .time_taken
+            .insert(SnarkStage::Snark, Duration::from_secs(4));
+
+        stats.observe_full();
+
+        // SYSCOIN: A regression here would understate cold-wrapper P99 latency and make the
+        // sequencer's SNARK lease shorter than the prover's actual end-to-end work.
+        assert_eq!(
+            stats.time_taken.get(&SnarkStage::Full),
+            Some(&Duration::from_secs(10))
+        );
     }
 }
