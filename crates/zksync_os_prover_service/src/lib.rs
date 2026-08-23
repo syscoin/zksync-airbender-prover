@@ -11,6 +11,7 @@ use std::{
 use anyhow::Context;
 use clap::Parser;
 use protocol_version::SupportedProtocolVersions;
+use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use zksync_sequencer_proof_client::{
     ordered_client_indices, JobQueueStage, SequencerEndpoint, SequencerProofClient,
@@ -95,6 +96,7 @@ fn fri_phase_limit_reached(
 async fn acquire_snark_proof<F, Fut>(
     snark_acquire_timeout: Duration,
     poll_interval: Duration,
+    stop_receiver: &mut watch::Receiver<bool>,
     mut run_snark_attempt: F,
 ) -> anyhow::Result<bool>
 where
@@ -103,15 +105,42 @@ where
 {
     let started_at = Instant::now();
     loop {
+        if shutdown_requested(stop_receiver) {
+            return Ok(false);
+        }
+
+        // SYSCOIN: Once an attempt starts it may own a sequencer lease. Let it finish and
+        // submit before observing shutdown so operator Ctrl-C cannot discard paid proving work.
         if run_snark_attempt().await? {
             return Ok(true);
         }
 
-        if started_at.elapsed() >= snark_acquire_timeout {
+        if shutdown_requested(stop_receiver) || started_at.elapsed() >= snark_acquire_timeout {
             return Ok(false);
         }
 
-        tokio::time::sleep(poll_interval).await;
+        if wait_for_shutdown(poll_interval, stop_receiver).await {
+            return Ok(false);
+        }
+    }
+}
+
+fn shutdown_requested(stop_receiver: &watch::Receiver<bool>) -> bool {
+    *stop_receiver.borrow()
+}
+
+async fn wait_for_shutdown(duration: Duration, stop_receiver: &mut watch::Receiver<bool>) -> bool {
+    if shutdown_requested(stop_receiver) {
+        return true;
+    }
+
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => false,
+        changed = stop_receiver.changed() => {
+            // SYSCOIN: A dropped shutdown controller is terminal too; never leave an
+            // unattended prover polling for fresh work.
+            changed.is_err() || shutdown_requested(stop_receiver)
+        }
     }
 }
 
@@ -120,7 +149,7 @@ pub fn init_tracing() {
     FmtSubscriber::builder().with_env_filter(filter).init();
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub async fn run(args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
     tracing::info!(
         "Creating {} sequencer proof clients for urls: {:?}",
         args.sequencer_urls.len(),
@@ -178,6 +207,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     // SYSCOIN: Schedule each phase independently across every configured sequencer.
     loop {
+        if shutdown_requested(&stop_receiver) {
+            tracing::info!("Shutdown requested before acquiring another prover job");
+            return Ok(());
+        }
+
         let mut fri_proof_count = 0;
 
         // The FRI prover holds the program setups (and the GPU context when built with the
@@ -203,6 +237,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 ordered_client_indices(&clients, JobQueueStage::Fri, STATUS_PROBE_CONCURRENCY)
                     .await;
             for client_idx in client_order {
+                if shutdown_requested(&stop_receiver) {
+                    tracing::info!("Shutdown requested before acquiring another FRI job");
+                    return Ok(());
+                }
                 let client = &clients[client_idx];
                 if zksync_os_fri_prover::run_inner(
                     client.as_ref(),
@@ -217,6 +255,13 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     proof_generated = true;
                     break;
                 }
+            }
+
+            // SYSCOIN: `run_inner` owns any claimed lease until proof submission returns.
+            // Observe shutdown only after that durable handoff has completed.
+            if shutdown_requested(&stop_receiver) {
+                tracing::info!("Shutdown requested after completing the in-flight FRI attempt");
+                return Ok(());
             }
 
             fri_proof_count += proof_generated as usize;
@@ -234,22 +279,28 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 );
                 break;
             }
-            if !proof_generated {
-                tokio::time::sleep(FRI_POLL_INTERVAL).await;
+            if !proof_generated && wait_for_shutdown(FRI_POLL_INTERVAL, &mut stop_receiver).await {
+                return Ok(());
             }
         }
         // Release the FRI prover's airbender GPU resources (as now SNARKing will be taking them).
         drop(fri_prover);
+
+        if shutdown_requested(&stop_receiver) {
+            return Ok(());
+        }
 
         // Here we do exactly one SNARK proof
         tracing::info!("Running SNARK prover across {} sequencer(s)", clients.len());
         // Holding the RefCell guard across the await is fine here: `run` executes as a
         // single (non-Send) future and SNARK attempts run strictly sequentially, so no
         // concurrent borrow of the wrapper can occur.
+        let snark_attempt_stop = stop_receiver.clone();
         #[allow(clippy::await_holding_refcell_ref)]
         let proof_generated = acquire_snark_proof(
             Duration::from_secs(args.snark_acquire_timeout_secs),
             SNARK_POLL_INTERVAL,
+            &mut stop_receiver,
             || async {
                 let client_order = ordered_client_indices(
                     &clients,
@@ -258,6 +309,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 )
                 .await;
                 for client_idx in client_order {
+                    if shutdown_requested(&snark_attempt_stop) {
+                        return Ok(false);
+                    }
                     let client = &clients[client_idx];
                     if zksync_os_snark_prover::run_inner(
                         client.as_ref(),
@@ -291,6 +345,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             snark_latency = Instant::now();
         }
 
+        if shutdown_requested(&stop_receiver) {
+            tracing::info!("Shutdown requested after completing the in-flight SNARK attempt");
+            return Ok(());
+        }
+
         // Check if we've reached the iteration limit
         if let Some(max_iterations) = args.iterations {
             if snark_proof_count >= max_iterations {
@@ -314,12 +373,14 @@ mod tests {
     async fn snark_acquire_times_out_instead_of_looping_forever() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_for_closure = attempts.clone();
+        let (_stop_sender, mut stop_receiver) = watch::channel(false);
 
         let acquired = tokio::time::timeout(
             Duration::from_millis(100),
             acquire_snark_proof(
                 Duration::from_millis(20),
                 Duration::from_millis(1),
+                &mut stop_receiver,
                 move || {
                     let attempts = attempts_for_closure.clone();
                     async move {
@@ -341,10 +402,12 @@ mod tests {
     async fn snark_acquire_succeeds_before_timeout() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_for_closure = attempts.clone();
+        let (_stop_sender, mut stop_receiver) = watch::channel(false);
 
         let acquired = acquire_snark_proof(
             Duration::from_millis(100),
             Duration::from_millis(1),
+            &mut stop_receiver,
             move || {
                 let attempts = attempts_for_closure.clone();
                 async move {
@@ -358,6 +421,82 @@ mod tests {
 
         assert!(acquired);
         assert!(attempts.load(Ordering::Relaxed) >= 3);
+    }
+
+    // SYSCOIN: Ctrl-C must not cancel an attempt that may already own a sequencer lease.
+    #[tokio::test]
+    async fn shutdown_waits_for_in_flight_snark_attempt() {
+        let (stop_sender, mut stop_receiver) = watch::channel(false);
+        let (started_sender, mut started_receiver) = tokio::sync::oneshot::channel();
+        let (finish_sender, finish_receiver) = tokio::sync::oneshot::channel();
+        let mut started_sender = Some(started_sender);
+        let mut finish_receiver = Some(finish_receiver);
+
+        let acquire = acquire_snark_proof(
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            &mut stop_receiver,
+            move || {
+                let started_sender = started_sender
+                    .take()
+                    .expect("the test attempt must run exactly once");
+                let finish_receiver = finish_receiver
+                    .take()
+                    .expect("the test attempt must run exactly once");
+                async move {
+                    started_sender.send(()).expect("test observer must remain");
+                    finish_receiver
+                        .await
+                        .expect("test must release the attempt");
+                    Ok(true)
+                }
+            },
+        );
+        tokio::pin!(acquire);
+
+        tokio::select! {
+            result = &mut started_receiver => result.expect("attempt must start"),
+            result = &mut acquire => panic!("attempt returned before it was released: {result:?}"),
+        }
+        stop_sender.send_replace(true);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut acquire)
+                .await
+                .is_err(),
+            "shutdown must wait for an acquired proof"
+        );
+
+        finish_sender.send(()).expect("attempt must still be alive");
+        assert!(acquire.await.expect("attempt must succeed"));
+    }
+
+    // SYSCOIN: After an in-flight attempt completes without a proof, shutdown prevents
+    // another queue claim rather than leaving a fresh lease behind.
+    #[tokio::test]
+    async fn shutdown_prevents_next_snark_attempt() {
+        let (stop_sender, mut stop_receiver) = watch::channel(false);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_closure = attempts.clone();
+
+        let acquired = acquire_snark_proof(
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            &mut stop_receiver,
+            move || {
+                let attempts = attempts_for_closure.clone();
+                let stop_sender = stop_sender.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                    stop_sender.send_replace(true);
+                    Ok(false)
+                }
+            },
+        )
+        .await
+        .expect("shutdown should be graceful");
+
+        assert!(!acquired);
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
     }
 
     // SYSCOIN: Lock the combined service's target-or-latency phase transition policy.

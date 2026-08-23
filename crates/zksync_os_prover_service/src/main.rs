@@ -11,15 +11,17 @@ pub async fn main() -> anyhow::Result<()> {
     let args = zksync_os_prover_service::Args::parse();
 
     let (stop_sender, stop_receiver) = watch::channel(false);
+    let service_stop_receiver = stop_receiver.clone();
 
     let prometheus_port = args.prometheus_port;
 
     let mut metrics_handle = tokio::spawn(async move {
         metrics::start_metrics_exporter(prometheus_port, stop_receiver).await
     });
+    let mut service = Box::pin(zksync_os_prover_service::run(args, service_stop_receiver));
 
     let (service_result, metrics_task_finished) = tokio::select! {
-        result = zksync_os_prover_service::run(args) => {
+        result = &mut service => {
             match &result {
                 Ok(_) => tracing::info!("Zksync OS Prover Service finished successfully"),
                 Err(e) => tracing::error!("Zksync OS Prover Service finished with error: {e:#}"),
@@ -36,12 +38,18 @@ pub async fn main() -> anyhow::Result<()> {
                 )),
             };
             stop_sender.send_replace(true);
+            // SYSCOIN: Stop queue polling cooperatively and retain any currently leased proof
+            // through submission even when the auxiliary exporter fails.
+            if let Err(service_err) = service.await {
+                tracing::error!("Prover service also failed during metrics shutdown: {service_err:#}");
+            }
             (result, true)
         }
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Stop request received, shutting down");
+            tracing::info!("Stop request received; waiting for any in-flight proof to finish");
             stop_sender.send_replace(true);
-            (Ok(()), false)
+            // SYSCOIN: Dropping `run` here could abandon an acquired FRI or SNARK lease.
+            (service.await, false)
         },
     };
 
