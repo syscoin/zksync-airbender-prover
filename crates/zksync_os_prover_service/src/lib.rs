@@ -208,14 +208,20 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
     // SNARK wrapper starves the FRI prover into OOM). So the wrapper is built per
     // SNARK job — after the job's proofs are merged — and dropped with the job,
     // mirroring how `fri_prover` is dropped before SNARKing. Its host-side setup
-    // caches survive between jobs, so only the first job pays the full setup
-    // derivation (reported as the `wrapper_setup` stage). It is kept in a RefCell so
-    // the retry closure below can borrow it mutably.
-    // SYSCOIN: Use the same cached per-job wrapper lifecycle as the dedicated SNARK worker.
-    let wrapper_source = RefCell::new(zksync_os_snark_prover::WrapperSource::new(
-        args.trusted_setup_file.clone(),
-        binary_path.clone(),
-    ));
+    // caches are authenticated and initialized below before polling, then survive between jobs,
+    // so no leased job pays the full setup derivation. It is kept in a RefCell so the retry
+    // closure below can borrow it mutably.
+    // SYSCOIN: Use the dedicated worker's authenticated pre-lease initialization, then retain
+    // only its host cache. Missing/corrupt setup and an app-bound VK mismatch must fail before the
+    // combined service can acquire either FRI or SNARK work.
+    let wrapper_source = RefCell::new(
+        zksync_os_snark_prover::WrapperSource::new_validated(
+            args.trusted_setup_file.clone(),
+            binary_path.clone(),
+            &supported_versions,
+        )
+        .context("initialize combined-service app-bound SNARK wrapper before queue polling")?,
+    );
 
     // The FRI-proof combiner likewise caches its setup data (and, on `gpu` builds, the
     // GPU prover's host state — pinned host RAM only, no VRAM) across jobs and across

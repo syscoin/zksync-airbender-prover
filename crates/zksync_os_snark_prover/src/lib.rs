@@ -55,21 +55,14 @@ pub struct WrapperSource {
     trusted_setup_file: String,
     /// App binary whose commitment is bound into the wrapper VK via `check_aux_params`.
     app_bin_path: PathBuf,
-    /// Setup caches carried between jobs; `None` until the first wrapper is retired.
-    /// This holds no GPU memory (see [`SnarkWrapperHostCache`]).
+    /// Setup caches carried between jobs. Validated construction populates this before polling;
+    /// it is temporarily `None` only while one job owns the materialized wrapper.
+    /// The cache holds no GPU memory (see [`SnarkWrapperHostCache`]).
     host_cache: Option<Box<SnarkWrapperHostCache>>,
 }
 
 impl WrapperSource {
-    pub fn new(trusted_setup_file: String, app_bin_path: PathBuf) -> Self {
-        Self {
-            trusted_setup_file,
-            app_bin_path,
-            host_cache: None,
-        }
-    }
-
-    /// SYSCOIN: Initialize and authenticate the standalone worker's app-bound wrapper before its
+    /// SYSCOIN: Initialize and authenticate a worker's app-bound wrapper before its
     /// first queue claim. The final VK commits to `app_bin_path` through `check_aux_params`, so an
     /// exact supported-VK match proves that the configured program commitment is registered by
     /// [`SupportedProtocolVersions`]. Retiring the initialized wrapper into its host-only cache
@@ -726,10 +719,10 @@ mod tests {
         assert!(ensure_real_snark_proof_count(101).is_err());
     }
 
-    // SYSCOIN: A standalone worker may advertise only the exact app-bound wrapper VK it derived
-    // before polling; a different configured app must fail before any SNARK lease can be picked.
+    // SYSCOIN: Every worker may advertise only the exact app-bound wrapper VK it derived before
+    // polling; a different configured app must fail before any SNARK lease can be picked.
     #[test]
-    fn standalone_wrapper_vk_must_match_supported_protocol_registry() {
+    fn wrapper_vk_must_match_supported_protocol_registry() {
         let versions = SupportedProtocolVersions::default();
         let registered = versions
             .vk_hashes()
@@ -747,5 +740,27 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("configured-app.bin"));
         assert!(message.contains("not registered by any supported protocol version"));
+    }
+
+    // SYSCOIN: The validated constructor is the sole WrapperSource construction path, so a
+    // missing setup must fail before a worker can hold an empty cache and begin queue polling.
+    #[test]
+    fn validated_wrapper_source_rejects_missing_setup_before_polling() {
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let app_path = crate_dir.join("../../multiblock_batch.bin");
+        let missing_setup = crate_dir.join("missing-trusted-setup-for-wrapper-source-test.key");
+        assert!(!missing_setup.exists(), "test setup path must stay absent");
+
+        let error = match super::WrapperSource::new_validated(
+            missing_setup.to_string_lossy().into_owned(),
+            app_path,
+            &SupportedProtocolVersions::default(),
+        ) {
+            Ok(_) => panic!("missing trusted setup must fail before polling"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("initialize app-bound SNARK wrapper before queue polling"));
+        assert!(message.contains("trusted setup metadata"));
     }
 }
