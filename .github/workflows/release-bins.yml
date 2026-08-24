@@ -12,16 +12,27 @@ on:
         description: "Tag to use for the release."
         type: string
         required: true
+      source_sha:
+        description: "Exact 40-character commit SHA peeled from the release tag."
+        type: string
+        required: true
   workflow_call:
     inputs:
       tag:
         description: "Tag to use for the release."
         type: string
         required: true
+      source_sha:
+        description: "Expected release source commit supplied by the trusted caller."
+        type: string
+        required: true
 
 env:
   # SYSCOIN: Validate this untrusted dispatch/caller input before using it in any shell or path.
   RELEASE_TAG: ${{ inputs.tag }}
+  # SYSCOIN: A manual dispatch may originate on any branch. Bind the requested tag to an
+  # explicit source commit instead of incorrectly treating the workflow's GITHUB_SHA as it.
+  RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
   # SYSCOIN: Release the optional combined worker and the independently scalable FRI/SNARK workers.
   ZKSYNC_OS_PROVER_BIN: 'zksync-os-prover-service'
   ZKSYNC_OS_FRI_PROVER_BIN: 'zksync_os_fri_prover'
@@ -65,6 +76,12 @@ jobs:
             echo "Invalid release tag: ${RELEASE_TAG}" >&2
             exit 1
           fi
+          # SYSCOIN: Require the caller to capture the complete commit identity; abbreviated or
+          # symbolic revisions would be ambiguous if repository history changes later.
+          if [[ ! "${RELEASE_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid release source SHA: ${RELEASE_SOURCE_SHA}" >&2
+            exit 1
+          fi
 
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -75,12 +92,13 @@ jobs:
 
       - name: Verify release source identity
         run: |
-          # SYSCOIN: OIDC provenance describes GITHUB_SHA. Refuse to build a caller-supplied tag
-          # unless that exact peeled tag commit is also the workflow event/caller commit.
+          # SYSCOIN: GITHUB_SHA identifies the workflow invocation, which can legitimately be the
+          # default branch during a manual rebuild of an older release. The explicitly captured
+          # release source instead binds both the checked-out tree and the tag's peeled commit.
           checked_out=$(git rev-parse HEAD)
           tag_commit=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")
-          if [[ "${checked_out}" != "${tag_commit}" || "${checked_out}" != "${GITHUB_SHA}" ]]; then
-            echo "Release source mismatch: checkout=${checked_out} tag=${tag_commit} workflow=${GITHUB_SHA}" >&2
+          if [[ "${checked_out}" != "${tag_commit}" || "${checked_out}" != "${RELEASE_SOURCE_SHA}" ]]; then
+            echo "Release source mismatch: checkout=${checked_out} tag=${tag_commit} expected=${RELEASE_SOURCE_SHA} workflow=${GITHUB_SHA}" >&2
             exit 1
           fi
 
@@ -183,6 +201,10 @@ jobs:
           # SYSCOIN: Revalidate at the publication trust boundary; jobs do not share shell state.
           if [[ ! "${RELEASE_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
             echo "Invalid release tag: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid release source SHA: ${RELEASE_SOURCE_SHA}" >&2
             exit 1
           fi
 
