@@ -20,7 +20,8 @@ Useful for troubleshooting (i.e. manually pushing a SNARK proof to sequencer, in
 ### ZKsync OS FRI Prover
 
 The FRI prover for ZKsync OS. Retrieves proof input, proves a batch (which is a set of blocks) and submits it back to sequencer.
-There's no state persisted in between.
+Generated proof submissions are persisted with their exact lease capability until the sequencer
+returns the SYSCOIN application disposition contract described below.
 
 ### ZKsync OS SNARK Prover
 
@@ -61,6 +62,40 @@ Specify `--sequencer-urls` to provide a comma-separated list. Status is probed c
 with a bounded fan-out and a two-second hint deadline; the oldest unassigned head is tried
 first, and every client remains in the pick fallback if status is empty, slow, unavailable,
 or unsupported.
+
+**SYSCOIN security:** Never embed `username:password@` in `--sequencer-urls`; command arguments
+are visible in shell history and process listings. For an authenticated deployment, store the full
+HTTPS URL in an owner-only (`0600`) secret file and have the service manager load it into
+`ZKSYNC_SEQUENCER_URLS`; omit `--sequencer-urls` entirely. The manual proof client accepts the
+same pattern through `ZKSYNC_SEQUENCER_URL`. Environment injection avoids argv/history exposure,
+while the secret file remains the durable source of authority.
+
+Non-loopback plaintext `http://` endpoints fail closed by default, even with credentials. Use
+HTTPS for every remote production sequencer. The
+`--allow-insecure-sequencer-http` escape hatch is only for an isolated private container network
+whose transport is protected outside this process; it must never be used across the public
+internet.
+
+Every production worker also owns an exclusively locked durable submission spool. FRI defaults to
+`.zksync-prover-submissions/fri`; SNARK and combined workers default to
+`<output-dir>/.pending-submissions`. Give each process its own `--submission-dir`. Files are
+created mode `0600` inside a mode-`0700` directory and couple the sanitized endpoint identity,
+stage/range, VK, opaque token, and exact encoded proof. On restart they replay before any new pick.
+Responses 408/425/429, every 5xx (including proxy 520-524), and transport failures retry identical
+bytes. A retained 401/403/404/redirect/config response fails the worker visibly and blocks all new
+picks until configuration is corrected; it does not spin or discard the proof.
+The spool is a dedicated directory: any unknown/non-UTF8 entry or unrecovered runtime temporary
+record fails closed. Put no logs, notes, or unrelated artifacts in it. Crash durability assumes a
+local Unix filesystem with reliable `flock`, same-filesystem atomic hard links, and file/directory
+`fsync`; NFS, FUSE, object-backed mounts, and ephemeral container layers are unsupported unless
+their equivalent semantics have been explicitly validated.
+
+**SYSCOIN disposition contract:** a submission is retired only for `204` plus
+`x-syscoin-prover-disposition: accepted`, or one of `400`, `409`, `413`, and `422` plus
+`x-syscoin-prover-disposition: rejected`. The server must add this header only after the FRI/SNARK
+manager reaches that exact terminal outcome. An unmarked response from a proxy, body limiter, JSON
+extractor, or older server—including any generic 2xx/4xx—retains the envelope and fails closed.
+Serialized submission bodies are rejected locally above the server's exact 10 MiB ceiling.
 
 Note: the app program consists of the `.bin` file passed via `--app-bin-path` **and** its
 `.text` sibling, which is resolved by replacing the extension (e.g. `multiblock_batch.bin`
@@ -104,6 +139,7 @@ CUDA_VISIBLE_DEVICES=0 cargo run --release --features gpu \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
   --prover-name syscoin-fri-gpu0 --prometheus-port 3210 \
+  --submission-dir ./output/fri-gpu0/pending-submissions \
   --path ./output/fri-gpu0/fri_proof.json
 
 CUDA_VISIBLE_DEVICES=1 cargo run --release --features gpu \
@@ -111,6 +147,7 @@ CUDA_VISIBLE_DEVICES=1 cargo run --release --features gpu \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
   --prover-name syscoin-fri-gpu1 --prometheus-port 3211 \
+  --submission-dir ./output/fri-gpu1/pending-submissions \
   --path ./output/fri-gpu1/fri_proof.json
 
 CUDA_VISIBLE_DEVICES=2 cargo run --release --features gpu \
@@ -118,6 +155,7 @@ CUDA_VISIBLE_DEVICES=2 cargo run --release --features gpu \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
   --prover-name syscoin-fri-gpu2 --prometheus-port 3212 \
+  --submission-dir ./output/fri-gpu2/pending-submissions \
   --path ./output/fri-gpu2/fri_proof.json
 
 # Run this process on the separate CPU server. No CUDA device is required or used.
@@ -173,18 +211,29 @@ program commitment is
 
 **This one is only needed if you want to manually upload.**
 
+**SYSCOIN:** Pick artifacts contain live bearer authority, so the client creates them owner-only
+and submit reads that authority from the saved job rather than exposing it on the command line.
+Each artifact records the credential-free canonical endpoint that issued the lease, and submit
+rejects an endpoint mismatch before opening the proof. Manual pick requires a current-user-owned
+parent that is not group/world-writable. It holds a deterministic owner-only lock, leaves the final
+name absent, and publishes by same-directory atomic no-replace hard link after file fsync. A stale
+hidden `*.manual-pick.pending` file is retained for operator recovery and blocks another pick.
+For authenticated remote use, load `ZKSYNC_SEQUENCER_URL` from an owner-only secret file and omit
+`--url`; never place embedded Basic Auth credentials in the command itself.
+
 ```bash
-# pick a FRI job manually and serialize to file specified in `--path`
+# pick a FRI job manually into a fresh owner-only job file (existing files are not overwritten)
 cargo run --release --bin zksync_sequencer_proof_client -- pick-fri --url http://localhost:3124 --path "./fri_job.json"
-# submit a FRI proof specified in `--path` manually to sequencer
-cargo run --release --bin zksync_sequencer_proof_client -- submit-fri --batch-number 1 --url http://localhost:3124 --path "./fri_proof.json"
-# pick a SNARK job manually and serialize to file specified in `--path`
+# submit using batch, VK, and private lease from the saved job; the proof stays a separate file
+cargo run --release --bin zksync_sequencer_proof_client -- submit-fri --url http://localhost:3124 --job-path "./fri_job.json" --proof-path "./fri_proof.json"
+# pick a SNARK job manually into a fresh owner-only job file
 cargo run --release --bin zksync_sequencer_proof_client -- pick-snark --url http://localhost:3124 --path "./snark_job.json"
-# submit a SNARK proof specified in `--path` manually to sequencer
-cargo run --release --bin zksync_sequencer_proof_client -- submit-snark --from-batch-number 1 --to-batch-number 2 --url http://localhost:3124 --path "./snark_proof.json"
+# submit using range, VK, and private lease from the saved job; the proof stays a separate file
+cargo run --release --bin zksync_sequencer_proof_client -- submit-snark --url http://localhost:3124 --job-path "./snark_job.json" --proof-path "./snark_proof.json"
 ```
 
-Specify --path argument to override default location.
+Pick refuses to overwrite an existing job file so a live lease cannot be lost accidentally.
+Use `--path` to select a fresh pick file and pass that same file back with `--job-path`.
 
 **This command starts ZKsync OS Prover Service**
 

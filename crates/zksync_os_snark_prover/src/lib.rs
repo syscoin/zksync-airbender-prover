@@ -1,7 +1,11 @@
 use anyhow::Context as _;
 use protocol_version::{ProgramCommitment, SupportedProtocolVersions};
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use std::{
+    fs::File,
+    io::Write as _,
+    path::{Path, PathBuf},
+};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use zkos_wrapper::{
     CompressionProof, SnarkWrapper, SnarkWrapperConfig, SnarkWrapperHostCache, SnarkWrapperProof,
@@ -16,7 +20,8 @@ use zksync_airbender_cli::prover_utils::{
 };
 use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
 use zksync_sequencer_proof_client::{
-    ordered_client_indices, JobQueueStage, ProofClient, SnarkProofInputs, STATUS_PROBE_CONCURRENCY,
+    error_follows_job_acquisition, ordered_client_indices, JobQueueStage, ProofClient,
+    ProofRunOutcome, SnarkProofInputs, MAX_FRIS_PER_SNARK_JOB, STATUS_PROBE_CONCURRENCY,
 };
 
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
@@ -28,8 +33,8 @@ const MIN_FRIS_PER_REAL_SNARK: usize = 2;
 
 fn ensure_real_snark_proof_count(proof_count: usize) -> anyhow::Result<()> {
     anyhow::ensure!(
-        proof_count >= MIN_FRIS_PER_REAL_SNARK,
-        "real SNARK jobs require at least {MIN_FRIS_PER_REAL_SNARK} FRI proofs; got {proof_count}"
+        (MIN_FRIS_PER_REAL_SNARK..=MAX_FRIS_PER_SNARK_JOB).contains(&proof_count),
+        "real SNARK jobs require {MIN_FRIS_PER_REAL_SNARK}..={MAX_FRIS_PER_SNARK_JOB} FRI proofs; got {proof_count}"
     );
     Ok(())
 }
@@ -377,6 +382,11 @@ pub async fn run_linking_fri_snark(
             tracing::info!("SNARK prover stop requested between jobs");
             return Ok(());
         }
+        // SYSCOIN: Retained auth/path/redirect/config envelopes must resolve or fail startup/run;
+        // never hide them behind continued queue polling or a newly acquired proving lease.
+        zksync_sequencer_proof_client::resume_pending_submissions(&clients)
+            .await
+            .context("durable submission replay blocks new SNARK picks")?;
 
         let mut proof_generated = false;
         let client_order =
@@ -388,7 +398,9 @@ pub async fn run_linking_fri_snark(
             }
             let client = &clients[client_idx];
             tracing::debug!("Polling sequencer: {}", client.sequencer_url());
-            if run_inner(
+            // SYSCOIN: Preserve typed no-job/endpoint outcomes while propagating every acquired-
+            // lease or durable-submission error; only a submitted proof advances iterations.
+            match run_inner(
                 client.as_ref(),
                 &mut wrapper_source,
                 &mut combiner,
@@ -396,11 +408,13 @@ pub async fn run_linking_fri_snark(
                 disable_zk,
                 &supported_versions,
             )
-            .await
-            .expect("Failed to run SNARK prover")
+            .await?
             {
-                proof_generated = true;
-                break;
+                ProofRunOutcome::ProofSubmitted => {
+                    proof_generated = true;
+                    break;
+                }
+                ProofRunOutcome::NoJob | ProofRunOutcome::EndpointUnavailable => {}
             }
         }
 
@@ -438,7 +452,7 @@ pub async fn run_inner(
     output_dir: String,
     disable_zk: bool,
     supported_protocol_versions: &SupportedProtocolVersions,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<ProofRunOutcome> {
     tracing::debug!("Picking job from sequencer {}", client.sequencer_url());
     let snark_proof_input = match client.pick_snark_job().await {
         Ok(Some(snark_proof_input)) => {
@@ -454,14 +468,14 @@ pub async fn run_inner(
                 return Err(error);
             }
             if !supported_protocol_versions.contains(&snark_proof_input.vk_hash) {
-                tracing::error!(
-                    "Received unsupported protocol version with vk_hash {} for batches between [{} and {}] from sequencer {}, skipping",
+                // SYSCOIN: A supported-version mismatch follows lease acquisition and is fatal.
+                anyhow::bail!(
+                    "received unsupported protocol version with vk_hash {} for leased batches [{} and {}] from sequencer {}",
                     snark_proof_input.vk_hash,
                     snark_proof_input.from_batch_number.0,
                     snark_proof_input.to_batch_number.0,
                     client.sequencer_url()
                 );
-                return Ok(false);
             }
             // SYSCOIN: Reject wrong-program proofs up front with a clear error. The wrapper VK now
             // binds the app program (check_aux_params constrains registers 18..=25 to the
@@ -473,16 +487,16 @@ pub async fn run_inner(
                 for (i, proof) in snark_proof_input.fri_proofs.iter().enumerate() {
                     let output = output_program_commitment(proof);
                     if output != expected {
-                        tracing::error!(
+                        // SYSCOIN: Never abandon an exact aggregate lease after validating proofs.
+                        anyhow::bail!(
                             "FRI proof {i} of batches [{} to {}] from sequencer {} proves \
                              program commitment {output}, but protocol version {} proves \
-                             {expected}; skipping",
+                             {expected}",
                             snark_proof_input.from_batch_number.0,
                             snark_proof_input.to_batch_number.0,
                             client.sequencer_url(),
                             snark_proof_input.vk_hash,
                         );
-                        return Ok(false);
                     }
                 }
             }
@@ -493,9 +507,15 @@ pub async fn run_inner(
                 "No SNARK jobs found from sequencer {}",
                 client.sequencer_url()
             );
-            return Ok(false);
+            return Ok(ProofRunOutcome::NoJob);
         }
         Err(e) => {
+            // SYSCOIN: HTTP 200 transfers the range lease before bounded payload decoding.
+            if error_follows_job_acquisition(&e) {
+                return Err(e).context(
+                    "SNARK lease was acquired but its response was invalid; no endpoint fallback is allowed",
+                );
+            }
             // Check if the error is a timeout error
             if e.downcast_ref::<reqwest::Error>()
                 .map(|err| err.is_timeout())
@@ -507,18 +527,20 @@ pub async fn run_inner(
                 );
                 tracing::error!("Exiting prover due to timeout");
                 SNARK_PROVER_METRICS.timeout_errors.inc();
-                return Ok(false);
+                return Ok(ProofRunOutcome::EndpointUnavailable);
             }
             tracing::error!(
                 "Failed to pick SNARK job from sequencer {}: {e:?}",
                 client.sequencer_url()
             );
-            return Ok(false);
+            return Ok(ProofRunOutcome::EndpointUnavailable);
         }
     };
     let start_batch = snark_proof_input.from_batch_number;
     let end_batch = snark_proof_input.to_batch_number;
     let vk_hash = snark_proof_input.vk_hash.clone();
+    // SYSCOIN: Preserve the exact-range capability before consuming the picked FRI inputs.
+    let lease_token = snark_proof_input.lease_token.clone();
     tracing::info!(
         "Finished picking job from sequencer {} with VK hash {}, will aggregate from {} to {} inclusive",
         client.sequencer_url(),
@@ -578,61 +600,59 @@ pub async fn run_inner(
     // re-derivation.
     wrapper_source.host_cache = Some(Box::new(snark_wrapper.into_host_cache()));
 
-    // Persist the proof next to the other artifacts, mirroring the old flow (best effort).
+    // SYSCOIN: Retain a pure in-memory copy for the historical operator artifact; all fallible
+    // serialization and filesystem work stays after the canonical durable submission boundary.
     let snark_proof_path = Path::new(&output_dir).join("snark_proof.json");
-    if let Some(path) = snark_proof_path.to_str() {
-        if let Err(e) = zkos_wrapper::serialize_to_file(&snark_proof, path) {
-            tracing::warn!("failed to persist SNARK proof to {path}: {e:?}");
-        }
-    }
+    let snark_proof_for_artifact = snark_proof.clone();
 
-    match client
-        .submit_snark_proof(start_batch, end_batch, vk_hash.clone(), snark_proof)
+    // SYSCOIN: Return the exact aggregate capability with the wrapper generated from its picked
+    // FRI set; the client's retry loop keeps these same serialized proof bytes and token together.
+    client
+        .submit_snark_proof(
+            start_batch,
+            end_batch,
+            vk_hash.clone(),
+            snark_proof,
+            lease_token,
+        )
         .await
-    {
-        Ok(()) => {
-            tracing::info!(
-                "Successfully submitted SNARK proof for batches {} to {} with vk hash {} to sequencer {}",
-                start_batch,
-                end_batch,
-                vk_hash,
-                client.sequencer_url()
-            );
-
-            SNARK_PROVER_METRICS
-                .latest_proven_batch
-                .set(end_batch.0 as i64);
-
-            Ok(true)
-        }
-        Err(e) => {
-            // Check if the error is a timeout error
-            if e.downcast_ref::<reqwest::Error>()
-                .map(|err| err.is_timeout())
-                .unwrap_or(false)
-            {
-                tracing::error!(
-                    "Timeout submitting SNARK proof with vk hash {} for batches {} to {} to sequencer {}: {e:?}",
-                    vk_hash,
-                    start_batch,
-                    end_batch,
-                    client.sequencer_url()
-                );
-                tracing::error!("Exiting prover due to timeout");
-                SNARK_PROVER_METRICS.timeout_errors.inc();
-            } else {
-                tracing::error!(
-                    "Failed to submit SNARK job with vk hash {}, batches {} to {} to sequencer {} due to {e:?}, skipping",
-                    vk_hash,
-                    start_batch,
-                    end_batch,
-                    client.sequencer_url(),
-                );
-            }
-            // Return false so caller doesn't increment proof counter
-            Ok(false)
-        }
+        .with_context(|| {
+            format!(
+                "generated SNARK proof for leased batches {start_batch}-{end_batch} could not reach a definitive manager disposition; no fresh pick is allowed"
+            )
+        })?;
+    // SYSCOIN: A bad output directory must not destroy a generated wrapper before the exact lease
+    // is durably resolved. Preserve the historical artifact as best-effort after submit.
+    let write_result = serde_json::to_vec_pretty(&snark_proof_for_artifact)
+        .context("serialize optional SNARK proof artifact")
+        .and_then(|bytes| {
+            let mut file = File::create(&snark_proof_path).with_context(|| {
+                format!("create optional SNARK proof artifact {snark_proof_path:?}")
+            })?;
+            file.write_all(&bytes)
+                .context("write optional SNARK proof artifact")?;
+            file.sync_all()
+                .context("fsync optional SNARK proof artifact")
+        });
+    if let Err(error) = write_result {
+        tracing::warn!(
+            output_path = ?snark_proof_path,
+            "failed to persist optional SNARK proof artifact after submission: {error:#}"
+        );
     }
+    tracing::info!(
+        "Successfully submitted SNARK proof for batches {} to {} with vk hash {} to sequencer {}",
+        start_batch,
+        end_batch,
+        vk_hash,
+        client.sequencer_url()
+    );
+
+    SNARK_PROVER_METRICS
+        .latest_proven_batch
+        .set(end_batch.0 as i64);
+
+    Ok(ProofRunOutcome::ProofSubmitted)
 }
 
 // SYSCOIN: Lock the stock-Airbender minimum-two range requirement.
@@ -645,11 +665,12 @@ mod tests {
         for count in [0, 1] {
             let error = ensure_real_snark_proof_count(count)
                 .expect_err("an empty or singleton real SNARK range must fail closed");
-            assert!(error.to_string().contains("at least 2 FRI proofs"));
+            assert!(error.to_string().contains("2..=100 FRI proofs"));
         }
         for count in [2, 100] {
             ensure_real_snark_proof_count(count)
                 .expect("a multi-FRI real SNARK range must be accepted");
         }
+        assert!(ensure_real_snark_proof_count(101).is_err());
     }
 }

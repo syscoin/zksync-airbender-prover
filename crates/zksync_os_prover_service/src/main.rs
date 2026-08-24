@@ -4,6 +4,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use tokio::sync::watch;
 use zksync_os_prover_service::{init_tracing, metrics};
+use zksync_sequencer_proof_client::wait_for_operator_shutdown;
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
@@ -45,11 +46,17 @@ pub async fn main() -> anyhow::Result<()> {
             }
             (result, true)
         }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Stop request received; waiting for any in-flight proof to finish");
+        // SYSCOIN: Honor both interactive SIGINT and the SIGTERM used by production supervisors.
+        signal = wait_for_operator_shutdown() => {
+            tracing::info!("Operator stop request received; waiting for any in-flight proof to finish");
             stop_sender.send_replace(true);
             // SYSCOIN: Dropping `run` here could abandon an acquired FRI or SNARK lease.
-            (service.await, false)
+            let service_result = service.await;
+            let result = match signal {
+                Ok(()) => service_result,
+                Err(error) => Err(error),
+            };
+            (result, false)
         },
     };
 

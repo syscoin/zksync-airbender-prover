@@ -52,12 +52,17 @@ memmap2 = "0.9.11"
 async-trait = "0.1"
 base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }
-clap = { version = "4.5.40", features = ["derive"] }
+# SYSCOIN: Allow authenticated sequencer URLs to enter via secret-backed environment variables
+# instead of shell history and process argv.
+clap = { version = "4.5.40", features = ["derive", "env"] }
 # SYSCOIN: Probe configured sequencers concurrently with bounded fan-out.
 futures-util = "0.3"
+# SYSCOIN: Enforce one live Unix prover process per owner-only durable submission spool.
+libc = "0.2"
 # SYSCOIN: Large prover API responses (witnesses and FRI bundles) are compressed by the
 # sequencer. Keep every decoder enabled so reqwest transparently decodes them.
-reqwest = { version = "0.12.19", features = ["json", "gzip", "brotli", "zstd", "deflate"] }
+# SYSCOIN: Stream transparently decompressed prover responses under explicit allocation caps.
+reqwest = { version = "0.12.19", features = ["json", "stream", "gzip", "brotli", "zstd", "deflate"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"

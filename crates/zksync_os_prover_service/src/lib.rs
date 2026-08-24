@@ -14,7 +14,8 @@ use protocol_version::SupportedProtocolVersions;
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use zksync_sequencer_proof_client::{
-    ordered_client_indices, JobQueueStage, SequencerEndpoint, SequencerProofClient,
+    ordered_client_indices, parse_configured_sequencer_endpoints, resume_pending_submissions,
+    JobQueueStage, OpaqueSequencerEndpoint, ProofRunOutcome, SequencerProofClient,
     STATUS_PROBE_CONCURRENCY,
 };
 
@@ -37,10 +38,8 @@ pub struct Args {
     pub snark_acquire_timeout_secs: u64,
     /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
     ///
-    /// Format: http[s]://[username:password@]host:port
-    ///
-    /// Examples:
-    ///   --sequencer-urls http://localhost:3124,https://user1:pass1@sequencer1.com:3124,https://user2:pass2@sequencer2.com
+    /// Format: http[s]://[username:password@]host:port. Do not put credentials on argv; set
+    /// `ZKSYNC_SEQUENCER_URLS` from an owner-only secret file instead.
     ///
     /// Credentials are extracted and sent via HTTP Authorization headers.
     #[arg(
@@ -49,15 +48,24 @@ pub struct Args {
         alias = "base-url",
         value_delimiter = ',',
         num_args = 1..,
+        env = "ZKSYNC_SEQUENCER_URLS",
+        hide_env_values = true,
         default_value = "http://localhost:3124"
     )]
-    pub sequencer_urls: Vec<SequencerEndpoint>,
+    pub sequencer_urls: Vec<OpaqueSequencerEndpoint>,
     /// Path to `app.bin`
     #[arg(long)]
     pub app_bin_path: Option<PathBuf>,
     /// Directory to store the output files for SNARK prover
     #[arg(long)]
     pub output_dir: String,
+    /// SYSCOIN: Owner-only durable exact proof/capability spool. Defaults below output_dir and is
+    /// exclusively locked so two worker processes cannot replay one envelope.
+    #[arg(long)]
+    pub submission_dir: Option<PathBuf>,
+    /// SYSCOIN: Explicit isolated-network escape hatch. Production remote sequencers must use HTTPS.
+    #[arg(long, default_value_t = false)]
+    pub allow_insecure_sequencer_http: bool,
     /// Path to the trusted setup file for SNARK prover
     #[arg(long)]
     pub trusted_setup_file: String,
@@ -149,11 +157,15 @@ pub fn init_tracing() {
     FmtSubscriber::builder().with_env_filter(filter).init();
 }
 
-pub async fn run(args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
+pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
+    // SYSCOIN: Defer semantic URL parsing until after Clap has consumed the secret-backed env
+    // value, preventing malformed credentials from being echoed in a typed-parser error.
+    let sequencer_urls =
+        parse_configured_sequencer_endpoints(std::mem::take(&mut args.sequencer_urls))?;
     tracing::info!(
         "Creating {} sequencer proof clients for urls: {:?}",
-        args.sequencer_urls.len(),
-        args.sequencer_urls
+        sequencer_urls.len(),
+        sequencer_urls
     );
     let supported_versions = SupportedProtocolVersions::default();
     // SYSCOIN: Refuse to prove before the generated app-bound VK replaces the sentinel.
@@ -162,13 +174,25 @@ pub async fn run(args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow
         .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
-    let clients = SequencerProofClient::new_clients(
-        args.sequencer_urls,
+    let submission_directory = args
+        .submission_dir
+        .clone()
+        .unwrap_or_else(|| Path::new(&args.output_dir).join(".pending-submissions"));
+    // SYSCOIN: Combined workers share one process-locked durable submission namespace.
+    let clients = SequencerProofClient::new_durable_clients(
+        sequencer_urls,
         "prover_service".to_string(),
         Some(Duration::from_secs(args.request_timeout_secs)),
         supported_versions.vk_hashes(),
+        submission_directory,
+        stop_receiver.clone(),
+        args.allow_insecure_sequencer_http,
     )
     .context("failed to create sequencer proof clients")?;
+    // SYSCOIN: Resolve crash-retained exact submissions before GPU setup or any fresh pick.
+    resume_pending_submissions(&clients)
+        .await
+        .context("failed to resume durable prover submissions")?;
 
     let manifest_path = if let Ok(manifest_path) = std::env::var("CARGO_MANIFEST_DIR") {
         manifest_path
@@ -232,6 +256,10 @@ pub async fn run(args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow
         // Run FRI prover until we hit one of the limits
         tracing::info!("Running FRI prover across {} sequencer(s)", clients.len());
         loop {
+            // SYSCOIN: Retained config/auth envelopes block the whole worker before another lease.
+            resume_pending_submissions(&clients)
+                .await
+                .context("durable submission replay blocks new combined-service picks")?;
             let mut proof_generated = false;
             let client_order =
                 ordered_client_indices(&clients, JobQueueStage::Fri, STATUS_PROBE_CONCURRENCY)
@@ -242,18 +270,20 @@ pub async fn run(args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow
                     return Ok(());
                 }
                 let client = &clients[client_idx];
-                if zksync_os_fri_prover::run_inner(
+                match zksync_os_fri_prover::run_inner(
                     client.as_ref(),
                     &fri_prover,
                     args.fri_path.clone(),
                     &supported_versions,
                     &program_commitment,
                 )
-                .await
-                .expect("Failed to run FRI prover")
+                .await?
                 {
-                    proof_generated = true;
-                    break;
+                    ProofRunOutcome::ProofSubmitted => {
+                        proof_generated = true;
+                        break;
+                    }
+                    ProofRunOutcome::NoJob | ProofRunOutcome::EndpointUnavailable => {}
                 }
             }
 
@@ -302,6 +332,11 @@ pub async fn run(args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow
             SNARK_POLL_INTERVAL,
             &mut stop_receiver,
             || async {
+                // SYSCOIN: Do not switch stages or acquire a SNARK lease behind a retained FRI or
+                // SNARK envelope; unresolved config responses fail the service visibly.
+                resume_pending_submissions(&clients)
+                    .await
+                    .context("durable submission replay blocks new SNARK picks")?;
                 let client_order = ordered_client_indices(
                     &clients,
                     JobQueueStage::Snark,
@@ -313,7 +348,7 @@ pub async fn run(args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow
                         return Ok(false);
                     }
                     let client = &clients[client_idx];
-                    if zksync_os_snark_prover::run_inner(
+                    match zksync_os_snark_prover::run_inner(
                         client.as_ref(),
                         &mut wrapper_source.borrow_mut(),
                         &mut combiner.borrow_mut(),
@@ -323,14 +358,17 @@ pub async fn run(args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow
                     )
                     .await?
                     {
-                        return Ok(true);
+                        ProofRunOutcome::ProofSubmitted => return Ok(true),
+                        ProofRunOutcome::NoJob | ProofRunOutcome::EndpointUnavailable => {}
                     }
                 }
                 Ok(false)
             },
         )
         .await
-        .expect("Failed to run SNARK prover");
+        // SYSCOIN: Propagate a post-lease/proof failure through normal service shutdown; panicking
+        // obscures the durable-envelope diagnostic and skips orderly auxiliary-task cleanup.
+        .context("failed to run SNARK prover")?;
 
         if proof_generated {
             // Increment SNARK proof counter
@@ -368,6 +406,7 @@ mod tests {
     };
 
     use super::*;
+    use clap::CommandFactory as _;
 
     #[tokio::test]
     async fn snark_acquire_times_out_instead_of_looping_forever() {
@@ -538,5 +577,32 @@ mod tests {
         .expect("both OR limits must be accepted");
         assert_eq!(args.max_snark_latency, Some(3600));
         assert_eq!(args.max_fris_per_snark, Some(100));
+    }
+
+    // SYSCOIN: Malformed credential text is rejected only after Clap, and live env values are
+    // hidden from the help renderer for the combined worker too.
+    #[test]
+    fn cli_endpoint_validation_is_deferred_and_env_help_is_redacted() {
+        let secret = "combined-clap-password-secret";
+        let mut args = Args::try_parse_from([
+            "prover-service",
+            "--output-dir",
+            "out",
+            "--trusted-setup-file",
+            "setup.key",
+            "--sequencer-urls",
+            &format!("https://:{secret}@sequencer.example/"),
+        ])
+        .expect("opaque endpoint must not fail inside Clap");
+        let error = parse_configured_sequencer_endpoints(std::mem::take(&mut args.sequencer_urls))
+            .unwrap_err();
+        assert!(!format!("{error:#}").contains(secret));
+
+        let command = Args::command();
+        let endpoint = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "sequencer_urls")
+            .expect("sequencer_urls argument");
+        assert!(endpoint.is_hide_env_values_set());
     }
 }

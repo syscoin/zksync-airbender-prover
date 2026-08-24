@@ -10,13 +10,13 @@ use clap::Parser;
 use protocol_version::{ProgramCommitment, SupportedProtocolVersions};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use zksync_airbender_cli::prover_utils::{
-    serialize_to_file, ProgramProver, ProgramProverConfig, ProgramSource, ProofTarget,
-    SecurityLevel,
+    ProgramProver, ProgramProverConfig, ProgramSource, ProofTarget, SecurityLevel,
 };
 use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
 use zksync_sequencer_proof_client::{
-    ordered_client_indices, FriJobInputs, JobQueueStage, ProofClient, SequencerEndpoint,
-    SequencerProofClient, STATUS_PROBE_CONCURRENCY,
+    error_follows_job_acquisition, ordered_client_indices, parse_configured_sequencer_endpoints,
+    resume_pending_submissions, FriJobInputs, JobQueueStage, OpaqueSequencerEndpoint, ProofClient,
+    ProofRunOutcome, SequencerProofClient, STATUS_PROBE_CONCURRENCY,
 };
 
 use crate::metrics::FRI_PROVER_METRICS;
@@ -31,10 +31,8 @@ pub mod metrics;
 pub struct Args {
     /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
     ///
-    /// Format: http[s]://[username:password@]host:port
-    ///
-    /// Examples:
-    ///   --sequencer-urls http://localhost:3124,https://user1:pass1@sequencer1.com:3124,https://user2:pass2@sequencer2.com
+    /// Format: http[s]://[username:password@]host:port. Do not put credentials on argv; set
+    /// `ZKSYNC_SEQUENCER_URLS` from an owner-only secret file instead.
     ///
     /// Credentials are extracted and sent via HTTP Authorization headers.
     #[arg(
@@ -43,9 +41,11 @@ pub struct Args {
         alias = "base-url",
         value_delimiter = ',',
         num_args = 1..,
+        env = "ZKSYNC_SEQUENCER_URLS",
+        hide_env_values = true,
         default_value = "http://localhost:3124"
     )]
-    pub sequencer_urls: Vec<SequencerEndpoint>,
+    pub sequencer_urls: Vec<OpaqueSequencerEndpoint>,
     /// Path to `app.bin`
     #[arg(long)]
     pub app_bin_path: Option<PathBuf>,
@@ -55,6 +55,15 @@ pub struct Args {
     /// Path to the output file
     #[arg(short, long)]
     pub path: Option<PathBuf>,
+
+    /// SYSCOIN: Owner-only durable exact proof/capability spool. Run one worker per directory;
+    /// startup fails if another process owns the same spool.
+    #[arg(long, default_value = ".zksync-prover-submissions/fri")]
+    pub submission_dir: PathBuf,
+
+    /// SYSCOIN: Explicit isolated-network escape hatch. Production remote sequencers must use HTTPS.
+    #[arg(long, default_value_t = false)]
+    pub allow_insecure_sequencer_http: bool,
 
     /// SYSCOIN: Dedicated default metrics port for parallel GPU workers.
     #[arg(long, default_value = "3125")]
@@ -144,13 +153,22 @@ pub fn create_proof(
     Ok(artifact.proof)
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+// SYSCOIN: Cooperative shutdown is carried into submission retries so any generated proof is
+// fsynced with its exact lease before this long-lived worker may exit.
+pub async fn run(
+    mut args: Args,
+    mut stop_receiver: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let timeout = Duration::from_secs(args.request_timeout_secs);
+    // SYSCOIN: Parse opaque secret-backed env values only after Clap has completed, so malformed
+    // credentials can never be reflected by Clap's error renderer.
+    let sequencer_urls =
+        parse_configured_sequencer_endpoints(std::mem::take(&mut args.sequencer_urls))?;
 
     tracing::info!(
         "Creating {} sequencer proof clients for urls: {:?}",
-        args.sequencer_urls.len(),
-        args.sequencer_urls
+        sequencer_urls.len(),
+        sequencer_urls
     );
 
     let supported_versions = SupportedProtocolVersions::default();
@@ -160,13 +178,21 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
-    let clients = SequencerProofClient::new_clients(
-        args.sequencer_urls,
+    // SYSCOIN: Replace upstream in-memory clients with one process-locked, crash-durable spool.
+    let clients = SequencerProofClient::new_durable_clients(
+        sequencer_urls,
         args.prover_name,
         Some(timeout),
         supported_versions.vk_hashes(),
+        args.submission_dir,
+        stop_receiver.clone(),
+        args.allow_insecure_sequencer_http,
     )
     .context("failed to create sequencer proof clients")?;
+    // SYSCOIN: Drain crash-retained exact submissions before GPU setup or any new lease pick.
+    resume_pending_submissions(&clients)
+        .await
+        .context("failed to resume durable prover submissions")?;
 
     let manifest_path = if let Ok(manifest_path) = std::env::var("CARGO_MANIFEST_DIR") {
         manifest_path
@@ -207,24 +233,38 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // SYSCOIN: Probe all configured sequencers in oldest-head order while retaining every
     // endpoint as a fail-open claim fallback.
     loop {
+        if *stop_receiver.borrow() {
+            tracing::info!("FRI prover stop requested before acquiring another job");
+            return Ok(());
+        }
+        // SYSCOIN: A retained auth/path/redirect/config envelope is process-blocking: replay it or
+        // fail the service rather than silently polling/picking new work behind unresolved proof.
+        resume_pending_submissions(&clients)
+            .await
+            .context("durable submission replay blocks new FRI picks")?;
         let mut proof_generated = false;
         let client_order =
             ordered_client_indices(&clients, JobQueueStage::Fri, STATUS_PROBE_CONCURRENCY).await;
         for client_idx in client_order {
+            if *stop_receiver.borrow() {
+                return Ok(());
+            }
             let client = &clients[client_idx];
             tracing::debug!("Polling sequencer: {}", client.sequencer_url());
-            if run_inner(
+            match run_inner(
                 client.as_ref(),
                 &prover,
                 args.path.clone(),
                 &supported_versions,
                 &program_commitment,
             )
-            .await
-            .expect("Failed to run FRI prover")
+            .await?
             {
-                proof_generated = true;
-                break;
+                ProofRunOutcome::ProofSubmitted => {
+                    proof_generated = true;
+                    break;
+                }
+                ProofRunOutcome::NoJob | ProofRunOutcome::EndpointUnavailable => {}
             }
         }
 
@@ -255,7 +295,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 "No pending batches to prove from sequencer, retrying in {} ms",
                 retry_interval.as_millis()
             );
-            tokio::time::sleep(retry_interval).await;
+            // SYSCOIN: Wake idle polling on shutdown without cancelling an acquired run_inner.
+            tokio::select! {
+                _ = tokio::time::sleep(retry_interval) => {}
+                changed = stop_receiver.changed() => {
+                    if changed.is_err() || *stop_receiver.borrow() {
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
 }
@@ -266,13 +314,20 @@ pub async fn run_inner(
     path: Option<PathBuf>,
     supported_versions: &SupportedProtocolVersions,
     program_commitment: &ProgramCommitment,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<ProofRunOutcome> {
     let FriJobInputs {
         batch_number,
         vk_hash,
         prover_input,
+        lease_token,
     } = match client.pick_fri_job().await {
         Err(err) => {
+            // SYSCOIN: A malformed/oversize HTTP 200 was already leased by the sequencer.
+            if error_follows_job_acquisition(&err) {
+                return Err(err).context(
+                    "FRI lease was acquired but its response was invalid; no endpoint fallback is allowed",
+                );
+            }
             // Check if the error is a timeout error
             if err
                 .downcast_ref::<reqwest::Error>()
@@ -285,38 +340,38 @@ pub async fn run_inner(
                 );
                 tracing::error!("Exiting prover due to timeout");
                 FRI_PROVER_METRICS.timeout_errors.inc();
-                return Ok(false);
+                return Ok(ProofRunOutcome::EndpointUnavailable);
             }
             tracing::error!(
                 "Error fetching next prover job from sequencer {}: {err}",
                 client.sequencer_url()
             );
-            return Ok(false);
+            return Ok(ProofRunOutcome::EndpointUnavailable);
         }
         Ok(Some(fri_job_input)) => {
             if !supported_versions.contains(&fri_job_input.vk_hash) {
-                tracing::error!(
-                    "Unsupported protocol version with vk_hash: {} for batch number {} from sequencer {}",
+                // SYSCOIN: The pick already transferred an exact lease. Treat an unsupported VK
+                // as fatal instead of falling through to another endpoint and abandoning it.
+                anyhow::bail!(
+                    "unsupported protocol version with vk_hash {} for leased batch {} from sequencer {}",
                     fri_job_input.vk_hash,
                     fri_job_input.batch_number,
                     client.sequencer_url()
                 );
-                return Ok(false);
             }
             // The job's version must prove the loaded program — a mismatched proof
             // would be rejected downstream, after the GPU time is spent.
             let expected = supported_versions.program_commitment_for(&fri_job_input.vk_hash);
             if expected != Some(*program_commitment) {
-                tracing::error!(
-                    "Protocol version with vk_hash {} for batch number {} from sequencer {} \
-                     proves a different app program (version's commitment: {}, loaded binary: \
-                     {program_commitment})",
+                // SYSCOIN: A leased wrong-program job is a fatal server/configuration fault.
+                anyhow::bail!(
+                    "protocol version with vk_hash {} for leased batch {} from sequencer {} \
+                     proves a different app program (version's commitment: {}, loaded binary: {program_commitment})",
                     fri_job_input.vk_hash,
                     fri_job_input.batch_number,
                     client.sequencer_url(),
                     expected.map_or_else(|| "none".to_string(), |c| c.to_string()),
                 );
-                return Ok(false);
             }
             fri_job_input
         }
@@ -326,7 +381,7 @@ pub async fn run_inner(
                 "No pending batches to prove from sequencer {}",
                 client.sequencer_url()
             );
-            return Ok(false);
+            return Ok(ProofRunOutcome::NoJob);
         }
     };
 
@@ -365,10 +420,6 @@ pub async fn run_inner(
     // 2) base64-encode that binary blob
     let proof_b64 = STANDARD.encode(&proof_bytes);
 
-    if let Some(ref path) = path {
-        serialize_to_file(&proof_b64, path);
-    }
-
     FRI_PROVER_METRICS
         .latest_proven_batch
         .set(batch_number as i64);
@@ -377,46 +428,71 @@ pub async fn run_inner(
 
     FRI_PROVER_METRICS.time_taken.observe(proof_time);
 
-    match client
-        .submit_fri_proof(batch_number, vk_hash.clone(), proof_b64)
+    // SYSCOIN: Retain a second in-memory copy only when the optional post-submission artifact is
+    // requested; the canonical copy moves directly into the durable submission boundary.
+    let optional_proof = path.as_ref().map(|_| proof_b64.clone());
+    client
+        // SYSCOIN: Return the opaque capability from this exact pick; the public prover name is
+        // diagnostic only and cannot authorize or revoke another worker's lease.
+        .submit_fri_proof(batch_number, vk_hash.clone(), proof_b64, lease_token)
         .await
-    {
-        Ok(_) => {
-            tracing::info!(
-                "Successfully submitted proof for batch number {} with vk hash {} to sequencer {}, generated in {} seconds",
-                batch_number,
-                vk_hash,
-                client.sequencer_url(),
-                proof_time
+        .with_context(|| {
+            format!(
+                "generated FRI proof for batch {batch_number} could not reach a definitive manager disposition; no fresh pick is allowed"
+            )
+        })?;
+    if let (Some(path), Some(proof_b64)) = (path.as_ref(), optional_proof.as_ref()) {
+        // SYSCOIN: Write this optional operator artifact only after the proof/capability reached a
+        // definitive manager disposition. Upstream's helper unwraps filesystem/JSON errors; keep
+        // them best-effort so an output-disk fault cannot destroy or invalidate submitted work.
+        let write_result = std::fs::File::create(path)
+            .with_context(|| format!("create optional FRI proof artifact {path:?}"))
+            .and_then(|mut file| {
+                serde_json::to_writer_pretty(&mut file, &proof_b64)
+                    .context("serialize optional FRI proof artifact")?;
+                file.sync_all().context("fsync optional FRI proof artifact")
+            });
+        if let Err(error) = write_result {
+            tracing::warn!(
+                output_path = ?path,
+                "failed to persist optional FRI proof artifact after submission: {error:#}"
             );
-            Ok(true)
         }
-        Err(err) => {
-            // Check if the error is a timeout error
-            if err
-                .downcast_ref::<reqwest::Error>()
-                .map(|e| e.is_timeout())
-                .unwrap_or(false)
-            {
-                tracing::error!(
-                    "Timeout submitting proof for batch number {} with vk hash {} to sequencer {}: {}",
-                    batch_number,
-                    vk_hash,
-                    client.sequencer_url(),
-                    err
-                );
-                tracing::error!("Exiting prover due to timeout");
-                FRI_PROVER_METRICS.timeout_errors.inc();
-            } else {
-                tracing::error!(
-                    "Failed to submit proof for batch number {} with vk hash {} to sequencer {}: {}",
-                    batch_number,
-                    vk_hash,
-                    client.sequencer_url(),
-                    err
-                );
-            }
-            Ok(false)
-        }
+    }
+    tracing::info!(
+        "Successfully submitted proof for batch number {} with vk hash {} to sequencer {}, generated in {} seconds",
+        batch_number,
+        vk_hash,
+        client.sequencer_url(),
+        proof_time
+    );
+    Ok(ProofRunOutcome::ProofSubmitted)
+}
+
+#[cfg(test)]
+mod cli_security_tests {
+    use super::*;
+    use clap::CommandFactory as _;
+
+    // SYSCOIN: Secret-backed endpoint text is opaque to Clap and hidden from generated help.
+    #[test]
+    fn sequencer_endpoint_validation_is_deferred_and_env_help_is_redacted() {
+        let secret = "fri-clap-password-secret";
+        let mut args = Args::try_parse_from([
+            "fri-prover",
+            "--sequencer-urls",
+            &format!("https://:{secret}@sequencer.example/"),
+        ])
+        .expect("opaque endpoint must not fail inside Clap");
+        let error = parse_configured_sequencer_endpoints(std::mem::take(&mut args.sequencer_urls))
+            .unwrap_err();
+        assert!(!format!("{error:#}").contains(secret));
+
+        let command = Args::command();
+        let endpoint = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "sequencer_urls")
+            .expect("sequencer_urls argument");
+        assert!(endpoint.is_hide_env_values_set());
     }
 }
