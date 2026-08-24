@@ -23,7 +23,9 @@ jobs:
   #     General checks       #
   ############################
   check:
-    runs-on: matterlabs-ci-runner-high-performance
+    # SYSCOIN: The upstream Matter Labs runner label is private to their organization. This
+    # no-default-features CPU lane must run on a runner available to the Syscoin fork.
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
