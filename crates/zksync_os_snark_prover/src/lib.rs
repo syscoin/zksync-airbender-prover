@@ -8,7 +8,8 @@ use std::{
 };
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use zkos_wrapper::{
-    CompressionProof, SnarkWrapper, SnarkWrapperConfig, SnarkWrapperHostCache, SnarkWrapperProof,
+    calculate_verification_key_hash, CompressionProof, SnarkWrapper, SnarkWrapperConfig,
+    SnarkWrapperHostCache, SnarkWrapperProof,
 };
 #[cfg(not(feature = "gpu"))]
 use zksync_airbender_cli::prover_utils::CpuConfig;
@@ -67,6 +68,50 @@ impl WrapperSource {
             host_cache: None,
         }
     }
+
+    /// SYSCOIN: Initialize and authenticate the standalone worker's app-bound wrapper before its
+    /// first queue claim. The final VK commits to `app_bin_path` through `check_aux_params`, so an
+    /// exact supported-VK match proves that the configured program commitment is registered by
+    /// [`SupportedProtocolVersions`]. Retiring the initialized wrapper into its host-only cache
+    /// prevents this pre-lease gate from repeating the expensive setup on the first job.
+    pub fn new_validated(
+        trusted_setup_file: String,
+        app_bin_path: PathBuf,
+        supported_versions: &SupportedProtocolVersions,
+    ) -> anyhow::Result<Self> {
+        let mut wrapper = create_snark_wrapper(trusted_setup_file.clone(), &app_bin_path)
+            .context("initialize app-bound SNARK wrapper before queue polling")?;
+        let vk_hash = format!(
+            "{:?}",
+            calculate_verification_key_hash(
+                wrapper
+                    .snark_vk()
+                    .context("derive app-bound SNARK VK before queue polling")?
+                    .clone(),
+            )
+        );
+        ensure_supported_wrapper_vk(&vk_hash, &app_bin_path, supported_versions)?;
+
+        Ok(Self {
+            trusted_setup_file,
+            app_bin_path,
+            host_cache: Some(Box::new(wrapper.into_host_cache())),
+        })
+    }
+}
+
+// SYSCOIN: Keep the actual wrapper VK (and therefore its `check_aux_params` app commitment) in
+// lockstep with the exact versions advertised to the sequencer before a lease can be acquired.
+fn ensure_supported_wrapper_vk(
+    vk_hash: &str,
+    app_bin_path: &Path,
+    supported_versions: &SupportedProtocolVersions,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        supported_versions.contains(vk_hash),
+        "configured app {app_bin_path:?} produces SNARK VK hash {vk_hash}, which is not registered by any supported protocol version"
+    );
+    Ok(())
 }
 
 /// SYSCOIN: Build the app-bound SNARK wrapper session used for proving and VK generation.
@@ -363,7 +408,10 @@ pub async fn run_linking_fri_snark(
         .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
-    let mut wrapper_source = WrapperSource::new(trusted_setup_file, app_bin_path);
+    // SYSCOIN: Authenticate the configured app-bound wrapper and retain its setup cache before
+    // the polling loop below can acquire any SNARK lease.
+    let mut wrapper_source =
+        WrapperSource::new_validated(trusted_setup_file, app_bin_path, &supported_versions)?;
 
     // Warm the combiner eagerly, mirroring the SNARK precomputation above: setup
     // problems surface at startup and the first multi-proof job doesn't pay for it.
@@ -658,7 +706,11 @@ pub async fn run_inner(
 // SYSCOIN: Lock the stock-Airbender minimum-two range requirement.
 #[cfg(test)]
 mod tests {
-    use super::ensure_real_snark_proof_count;
+    use std::path::Path;
+
+    use protocol_version::SupportedProtocolVersions;
+
+    use super::{ensure_real_snark_proof_count, ensure_supported_wrapper_vk};
 
     #[test]
     fn real_snark_range_requires_at_least_two_fris() {
@@ -672,5 +724,28 @@ mod tests {
                 .expect("a multi-FRI real SNARK range must be accepted");
         }
         assert!(ensure_real_snark_proof_count(101).is_err());
+    }
+
+    // SYSCOIN: A standalone worker may advertise only the exact app-bound wrapper VK it derived
+    // before polling; a different configured app must fail before any SNARK lease can be picked.
+    #[test]
+    fn standalone_wrapper_vk_must_match_supported_protocol_registry() {
+        let versions = SupportedProtocolVersions::default();
+        let registered = versions
+            .vk_hashes()
+            .into_iter()
+            .next()
+            .expect("one canonical protocol version");
+        let app_path = Path::new("configured-app.bin");
+
+        ensure_supported_wrapper_vk(&registered, app_path, &versions)
+            .expect("the registered app-bound wrapper VK must be accepted");
+
+        let unsupported = format!("0x{}", "ff".repeat(32));
+        let error = ensure_supported_wrapper_vk(&unsupported, app_path, &versions)
+            .expect_err("a wrapper VK for another app must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("configured-app.bin"));
+        assert!(message.contains("not registered by any supported protocol version"));
     }
 }
