@@ -56,9 +56,9 @@ pub struct Args {
     #[arg(short, long)]
     pub path: Option<PathBuf>,
 
-    /// SYSCOIN: Owner-only durable exact proof/capability spool. Run one worker per directory;
-    /// startup fails if another process owns the same spool.
-    #[arg(long, default_value = ".zksync-prover-submissions/fri")]
+    /// SYSCOIN: Explicit absolute owner-only durable proof/capability spool. Run one worker per
+    /// directory; startup fails if another process owns it or the path is relative.
+    #[arg(long)]
     pub submission_dir: PathBuf,
 
     /// SYSCOIN: Explicit isolated-network escape hatch. Production remote sequencers must use HTTPS.
@@ -308,6 +308,8 @@ pub async fn run(
     }
 }
 
+/// SYSCOIN: Return a typed acquisition outcome so endpoint fallback is possible only before a
+/// lease exists; every acquired lease remains bound to exactly one proof/disposition path.
 pub async fn run_inner(
     client: &dyn ProofClient,
     prover: &ProgramProver,
@@ -480,6 +482,8 @@ mod cli_security_tests {
         let secret = "fri-clap-password-secret";
         let mut args = Args::try_parse_from([
             "fri-prover",
+            "--submission-dir",
+            "/tmp/fri-prover-test-submissions",
             "--sequencer-urls",
             &format!("https://:{secret}@sequencer.example/"),
         ])

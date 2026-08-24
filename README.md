@@ -47,10 +47,10 @@ Sample usage for commands.
 
 ```bash
 # start FRI prover with a single sequencer
-cargo run --release --features gpu --bin zksync_os_fri_prover -- --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --path ./output/fri_proof.json
+cargo run --release --features gpu --bin zksync_os_fri_prover -- --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --submission-dir "$PWD/output/fri-submissions" --path ./output/fri_proof.json
 
 # start FRI prover with multiple sequencers
-cargo run --release --features gpu --bin zksync_os_fri_prover -- --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --path ./output/fri_proof.json
+cargo run --release --features gpu --bin zksync_os_fri_prover -- --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --submission-dir "$PWD/output/fri-submissions" --path ./output/fri_proof.json
 ```
 
 Specify optional `--iterations` argument to run FRI prover N times and then exit.
@@ -76,9 +76,9 @@ HTTPS for every remote production sequencer. The
 whose transport is protected outside this process; it must never be used across the public
 internet.
 
-Every production worker also owns an exclusively locked durable submission spool. FRI defaults to
-`.zksync-prover-submissions/fri`; SNARK and combined workers default to
-`<output-dir>/.pending-submissions`. Give each process its own `--submission-dir`. Files are
+Every production worker also owns an exclusively locked durable submission spool. Give each
+process its own explicit absolute `--submission-dir`; relative paths are rejected so a service
+manager working-directory change cannot silently abandon a retained proof. Files are
 created mode `0600` inside a mode-`0700` directory and couple the sanitized endpoint identity,
 stage/range, VK, opaque token, and exact encoded proof. On restart they replay before any new pick.
 Responses 408/425/429, every 5xx (including proxy 520-524), and transport failures retry identical
@@ -86,7 +86,7 @@ bytes. A retained 401/403/404/redirect/config response fails the worker visibly 
 picks until configuration is corrected; it does not spin or discard the proof.
 The spool is a dedicated directory: any unknown/non-UTF8 entry or unrecovered runtime temporary
 record fails closed. Put no logs, notes, or unrelated artifacts in it. Crash durability assumes a
-local Unix filesystem with reliable `flock`, same-filesystem atomic hard links, and file/directory
+local Unix filesystem with reliable `flock`, atomic rename, and file/directory
 `fsync`; NFS, FUSE, object-backed mounts, and ephemeral container layers are unsupported unless
 their equivalent semantics have been explicitly validated.
 
@@ -112,10 +112,10 @@ production-size Security100 range is measured.
 ulimit -s 300000
 
 # start the canonical CPU SNARK worker with a single sequencer
-RUST_MIN_STACK=267108864 cargo run --release --no-default-features --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs
+RUST_MIN_STACK=267108864 cargo run --release --no-default-features --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 
 # start the canonical CPU SNARK worker with multiple sequencers
-RUST_MIN_STACK=267108864 cargo run --release --no-default-features --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs
+RUST_MIN_STACK=267108864 cargo run --release --no-default-features --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
@@ -139,7 +139,7 @@ CUDA_VISIBLE_DEVICES=0 cargo run --release --features gpu \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
   --prover-name syscoin-fri-gpu0 --prometheus-port 3210 \
-  --submission-dir ./output/fri-gpu0/pending-submissions \
+  --submission-dir "$PWD/output/fri-gpu0/pending-submissions" \
   --path ./output/fri-gpu0/fri_proof.json
 
 CUDA_VISIBLE_DEVICES=1 cargo run --release --features gpu \
@@ -147,7 +147,7 @@ CUDA_VISIBLE_DEVICES=1 cargo run --release --features gpu \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
   --prover-name syscoin-fri-gpu1 --prometheus-port 3211 \
-  --submission-dir ./output/fri-gpu1/pending-submissions \
+  --submission-dir "$PWD/output/fri-gpu1/pending-submissions" \
   --path ./output/fri-gpu1/fri_proof.json
 
 CUDA_VISIBLE_DEVICES=2 cargo run --release --features gpu \
@@ -155,7 +155,7 @@ CUDA_VISIBLE_DEVICES=2 cargo run --release --features gpu \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
   --prover-name syscoin-fri-gpu2 --prometheus-port 3212 \
-  --submission-dir ./output/fri-gpu2/pending-submissions \
+  --submission-dir "$PWD/output/fri-gpu2/pending-submissions" \
   --path ./output/fri-gpu2/fri_proof.json
 
 # Run this process on the separate CPU server. No CUDA device is required or used.
@@ -166,6 +166,7 @@ RUST_MIN_STACK=267108864 cargo run --release --no-default-features \
   --app-bin-path ./multiblock_batch.bin \
   --trusted-setup-file crs/setup_compact.key \
   --output-dir ./output/snark-cpu \
+  --submission-dir "$PWD/output/snark-cpu/pending-submissions" \
   --prover-name syscoin-snark-cpu --prometheus-port 3213
 ```
 
@@ -215,9 +216,15 @@ program commitment is
 and submit reads that authority from the saved job rather than exposing it on the command line.
 Each artifact records the credential-free canonical endpoint that issued the lease, and submit
 rejects an endpoint mismatch before opening the proof. Manual pick requires a current-user-owned
-parent that is not group/world-writable. It holds a deterministic owner-only lock, leaves the final
-name absent, and publishes by same-directory atomic no-replace hard link after file fsync. A stale
-hidden `*.manual-pick.pending` file is retained for operator recovery and blocks another pick.
+parent that is not group/world-writable. Before the lease-changing request it creates the final
+artifact with no-overwrite mode `0600`, fsyncs the empty file and parent directory, and therefore
+uses that visible name as the reservation. An explicit no-job response removes and directory-fsyncs
+the reservation. Once the request can begin, any request error, crash, serialization failure, or
+sync failure retains the empty, partial, or complete artifact and blocks another pick; inspect it
+and remove it only after the possible lease has expired. A successful pick writes and fsyncs the
+complete endpoint-bound job into that same reserved file. Proof input is separate, but must be
+current-user-owned and not group/world-writable so substituted bytes cannot consume the leased
+attempt.
 For authenticated remote use, load `ZKSYNC_SEQUENCER_URL` from an owner-only secret file and omit
 `--url`; never place embedded Basic Auth credentials in the command itself.
 
@@ -242,7 +249,7 @@ Use `--path` to select a fresh pick file and pass that same file back with `--jo
 ulimit -s 300000
 
 # start prover service
-RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_prover_service -- --base-url http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --max-snark-latency 3600 --max-fris-per-snark 100
+RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_prover_service -- --base-url http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/combined-submissions" --max-snark-latency 3600 --max-fris-per-snark 100
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
@@ -264,7 +271,9 @@ Bellman Cuda (see instructions below).
 ## Installing bellman-cuda
 
 ```shell
-git clone https://github.com/matter-labs/era-bellman-cuda.git --branch main bellman-cuda && \
+# SYSCOIN: Match the immutable CUDA source used by production release artifacts.
+git clone https://github.com/matter-labs/era-bellman-cuda.git bellman-cuda && \
+git -C bellman-cuda checkout --detach d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206 && \
 cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release && \
 cmake --build bellman-cuda/build/
 ```

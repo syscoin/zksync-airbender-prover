@@ -375,6 +375,8 @@ pub fn merge_fris(
     Ok(combined.proof)
 }
 
+/// SYSCOIN: Run the dedicated wrapper lane while retaining exact aggregate authority across
+/// retries and honoring cooperative shutdown only at durable ownership boundaries.
 pub async fn run_linking_fri_snark(
     clients: Vec<Box<dyn ProofClient + Send + Sync>>,
     output_dir: String,
@@ -406,7 +408,7 @@ pub async fn run_linking_fri_snark(
     let mut wrapper_source =
         WrapperSource::new_validated(trusted_setup_file, app_bin_path, &supported_versions)?;
 
-    // Warm the combiner eagerly, mirroring the SNARK precomputation above: setup
+    // SYSCOIN: Warm the combiner eagerly, mirroring the SNARK precomputation above: setup
     // problems surface at startup and the first multi-proof job doesn't pay for it.
     let mut combiner = create_combiner();
     combiner.warm_up();
@@ -486,6 +488,8 @@ pub async fn run_linking_fri_snark(
     }
 }
 
+/// SYSCOIN: Return a typed acquisition outcome so endpoint fallback is possible only before a
+/// lease exists; every acquired SNARK range remains bound to one combiner/disposition path.
 pub async fn run_inner(
     client: &dyn ProofClient,
     wrapper_source: &mut WrapperSource,

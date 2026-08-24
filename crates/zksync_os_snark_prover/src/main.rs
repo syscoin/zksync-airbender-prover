@@ -72,9 +72,9 @@ enum Commands {
         /// Name of the prover for identification in the sequencer
         #[arg(long, default_value = "unknown_prover")]
         prover_name: String,
-        /// SYSCOIN: Owner-only durable exact proof/capability spool. Defaults below output_dir.
+        /// SYSCOIN: Explicit absolute owner-only durable exact proof/capability spool.
         #[arg(long)]
-        submission_dir: Option<PathBuf>,
+        submission_dir: PathBuf,
         /// SYSCOIN: Explicit isolated-network escape hatch. Remote production uses HTTPS.
         #[arg(long, default_value_t = false)]
         allow_insecure_sequencer_http: bool,
@@ -197,15 +197,12 @@ fn main() -> anyhow::Result<()> {
                     .map_err(anyhow::Error::msg)?;
                 // SYSCOIN: Standalone SNARK workers use the same exclusively locked durable
                 // proof/capability spool as the combined service before any wrapper setup.
-                let submission_directory = submission_dir.unwrap_or_else(|| {
-                    Path::new(&output_dir).join(".pending-submissions")
-                });
                 let clients = SequencerProofClient::new_durable_clients(
                     sequencer_urls,
                     prover_name,
                     Some(timeout),
                     supported_versions.vk_hashes(),
-                    submission_directory,
+                    submission_dir,
                     stop_receiver.clone(),
                     allow_insecure_sequencer_http,
                 )
@@ -327,6 +324,8 @@ mod tests {
             "out",
             "--trusted-setup-file",
             "setup.key",
+            "--submission-dir",
+            "/tmp/snark-prover-test-submissions",
             "--sequencer-urls",
             &format!("https://:{secret}@sequencer.example/"),
         ])

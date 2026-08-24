@@ -2,9 +2,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use serde::Serialize;
-#[cfg(unix)]
-use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
+use std::io::Read as _;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -80,27 +79,15 @@ struct SavedSnarkJobAuthority {
     lease_token: ProverLeaseToken,
 }
 
-// SYSCOIN: Manual publication uses only local-Unix semantics: a process-held `flock`, same-directory
-// hard links, and file/directory fsync. NFS/FUSE/object-backed filesystems are unsupported unless
-// they provide the same atomic no-replace, advisory-lock, and durability guarantees.
-#[cfg(unix)]
-const MANUAL_LOCK_SUFFIX: &str = ".manual-pick.lock";
-#[cfg(unix)]
-const MANUAL_PENDING_SUFFIX: &str = ".manual-pick.pending";
-
-/// SYSCOIN: Hold a deterministic per-final lock while the final name remains absent. Publication
-/// hard-links a fully fsynced same-directory pending file into the final name, which is a portable
-/// local-Unix atomic no-overwrite operation. A crash-retained pending file blocks another pick for
-/// explicit operator recovery instead of silently discarding a live lease.
+/// SYSCOIN: Reserve the final owner-only job artifact before acquiring a lease. `create_new`
+/// prevents concurrent or accidental overwrite, while a crash leaves one visible artifact that
+/// the operator may retire after the lease expires.
 #[cfg(unix)]
 #[derive(Debug)]
 struct ReservedJobPath {
     path: PathBuf,
-    pending_path: PathBuf,
-    _lock: File,
+    file: File,
     parent: File,
-    parent_path: PathBuf,
-    published: bool,
 }
 
 #[cfg(unix)]
@@ -111,285 +98,110 @@ impl ReservedJobPath {
             .file_name()
             .filter(|name| !name.is_empty())
             .context("manual job destination must have a filename")?;
-        ensure_manual_final_name_is_not_reserved(file_name)?;
         let requested_parent = requested_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        let (parent_path, parent) = open_private_parent_directory(requested_parent)?;
-        // SYSCOIN: Rebuild every authority-bearing name below the validated canonical parent.
-        // A trusted lexical alias cannot redirect later operations to a different directory.
-        let path = parent_path.join(file_name);
-        let lock_path = manual_control_path(&path, MANUAL_LOCK_SUFFIX)?;
-        let pending_path = manual_control_path(&path, MANUAL_PENDING_SUFFIX)?;
-
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&lock_path)
-            .with_context(|| format!("open private manual-pick lock {}", lock_path.display()))?;
-        ensure_private_regular_file(&lock_path, &lock.metadata()?, Some(1))?;
-        try_lock_exclusive(&lock).with_context(|| {
+        // SYSCOIN: Resolve a caller-chosen alias once, then perform every authority-bearing path
+        // operation below the stable canonical parent instead of reusing the alias.
+        let parent_path = fs::canonicalize(requested_parent).with_context(|| {
             format!(
-                "manual job destination {} is already reserved by another process",
-                path.display()
+                "canonicalize private manual job parent {}",
+                requested_parent.display()
             )
         })?;
-
-        // SYSCOIN: Check both names only after holding the deterministic lock. The final remains
-        // absent throughout the lease-changing request, so hard-link publication can be no-replace.
-        ensure_path_absent(&path, "manual job destination already exists")?;
-        ensure_path_absent(
-            &pending_path,
-            "stale manual job pending artifact requires operator recovery",
-        )?;
-        ensure_private_parent_identity(&parent_path, &parent)?;
-        lock.sync_all().context("fsync private manual-pick lock")?;
-        parent
-            .sync_all()
-            .with_context(|| format!("fsync manual job parent {}", parent_path.display()))?;
-
-        Ok(Self {
-            path,
-            pending_path,
-            _lock: lock,
-            parent,
-            parent_path,
-            published: false,
-        })
-    }
-
-    fn publish_json<T: Serialize>(&mut self, value: &T, maximum_bytes: usize) -> Result<()> {
-        anyhow::ensure!(!self.published, "manual job artifact is already published");
-        ensure_path_absent(&self.path, "manual job destination already exists")?;
-        ensure_path_absent(
-            &self.pending_path,
-            "stale manual job pending artifact requires operator recovery",
-        )?;
-        ensure_private_parent_identity(&self.parent_path, &self.parent)?;
-
-        let mut pending = OpenOptions::new()
+        let parent = open_private_parent_directory(&parent_path)?;
+        let path = parent_path.join(file_name);
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(&self.pending_path)
-            .with_context(|| {
-                format!(
-                    "create private manual job pending file {}",
-                    self.pending_path.display()
-                )
-            })?;
-        let expected = pending.metadata()?;
-        ensure_private_regular_file(&self.pending_path, &expected, Some(1))?;
-
-        // SYSCOIN: Until serialization succeeds the pending file is only an incomplete artifact,
-        // so a bounded serialization failure safely removes only the inode this process created.
-        let write_result = (|| -> Result<()> {
-            let mut bounded = BoundedWriter {
-                inner: &mut pending,
-                remaining: maximum_bytes,
-            };
-            // SYSCOIN: A successful serializer return is the exact transition from safely
-            // disposable partial bytes to a complete capability that must be retained on every
-            // later error. Do not append an optional newline or flush inside the cleanup window.
-            serde_json::to_writer(&mut bounded, value)?;
-            Ok(())
-        })();
-        if let Err(error) = write_result {
-            cleanup_file_if_same_inode(&self.pending_path, &expected, &self.parent);
-            return Err(error);
-        }
-
-        // SYSCOIN: A complete capability is now present. Even a file-fsync error is ambiguous,
-        // so retain the exact pending inode and block another pick for operator/restart recovery.
-        pending
+            .open(&path)
+            .with_context(|| format!("reserve private manual job file {}", path.display()))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_file()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.permissions().mode() & 0o777 == 0o600,
+            "manual job destination is not a current-user-owned mode-0600 regular file"
+        );
+        ensure_private_parent_identity(&parent_path, &parent)?;
+        file.sync_all().context("fsync reserved manual job file")?;
+        parent
             .sync_all()
-            .context("fsync private manual job pending file")?;
+            .with_context(|| format!("fsync reserved manual job name {}", path.display()))?;
 
-        // SYSCOIN: From this point the pending file itself is the only crash-durable copy of the
-        // picked capability. Persist its directory entry before linking the final name; any later
-        // publication failure retains it and blocks later picks.
-        ensure_path_matches_file(&self.pending_path, &expected, Some(1))?;
-        self.parent.sync_all().with_context(|| {
-            format!(
-                "fsync durable manual job pending name {}",
-                self.pending_path.display()
-            )
-        })?;
-        fs::hard_link(&self.pending_path, &self.path).with_context(|| {
-            format!(
-                "atomically publish private job file {} without overwrite; pending artifact retained at {}",
-                self.path.display(),
-                self.pending_path.display()
-            )
-        })?;
-        ensure_path_matches_file(&self.path, &expected, Some(2))?;
-        ensure_path_matches_file(&self.pending_path, &expected, Some(2))?;
+        Ok(Self { path, file, parent })
+    }
 
-        // SYSCOIN: Persist the two-name hard-link state before removing its recovery anchor.
-        self.parent.sync_all().with_context(|| {
-            format!(
-                "fsync published manual job and pending names for {}",
-                self.path.display()
-            )
-        })?;
-
-        fs::remove_file(&self.pending_path).with_context(|| {
-            format!(
-                "remove published manual job pending link {}",
-                self.pending_path.display()
-            )
-        })?;
-        ensure_path_matches_file(&self.path, &expected, Some(1))?;
-        self.parent
+    fn publish_json<T: Serialize>(&mut self, value: &T, maximum_bytes: usize) -> Result<()> {
+        let mut bounded = BoundedWriter {
+            inner: &mut self.file,
+            remaining: maximum_bytes,
+        };
+        // SYSCOIN: A serialization or sync failure after lease acquisition deliberately leaves the
+        // partial owner-only artifact in place, preventing an unnoticed second manual pick.
+        serde_json::to_writer(&mut bounded, value)?;
+        self.file
             .sync_all()
-            .with_context(|| format!("fsync parent directory for {}", self.path.display()))?;
-        ensure_private_parent_identity(&self.parent_path, &self.parent)?;
-        self.published = true;
+            .context("fsync private manual job file")?;
         Ok(())
+    }
+
+    fn remove_unleased(self) -> Result<()> {
+        let Self {
+            path, file, parent, ..
+        } = self;
+        drop(file);
+        fs::remove_file(&path)
+            .with_context(|| format!("remove unused manual job reservation {}", path.display()))?;
+        parent
+            .sync_all()
+            .with_context(|| format!("fsync removed manual job reservation {}", path.display()))
     }
 }
 
-// SYSCOIN: Control names are deterministic `.<final><suffix>` siblings. Forbid choosing one of
-// those hidden names as another command's final artifact, otherwise distinct per-final locks could
-// authorize two reservations whose final/control names collide after both have acquired leases.
+// SYSCOIN: The final reservation is the concurrency primitive, but pathname creation and fsync
+// still require one stable current-user-controlled parent directory.
 #[cfg(unix)]
-fn ensure_manual_final_name_is_not_reserved(file_name: &std::ffi::OsStr) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let bytes = file_name.as_bytes();
-    // SYSCOIN: APFS and other case-insensitive filesystems alias ASCII case variants of these
-    // control suffixes. Reject every such spelling before two distinct lexical locks can reserve
-    // one final/control entry and acquire separate leases.
-    let has_reserved_suffix =
-        [MANUAL_LOCK_SUFFIX, MANUAL_PENDING_SUFFIX]
-            .into_iter()
-            .any(|suffix| {
-                let suffix = suffix.as_bytes();
-                bytes.len() >= suffix.len()
-                    && bytes[bytes.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-            });
-    anyhow::ensure!(
-        !(bytes.starts_with(b".") && has_reserved_suffix),
-        "manual job destination filename is reserved for publication control state"
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
-fn manual_control_path(path: &Path, suffix: &str) -> Result<PathBuf> {
-    let file_name = path
-        .file_name()
-        .filter(|name| !name.is_empty())
-        .context("manual job destination must have a filename")?;
-    let mut control_name = OsString::from(".");
-    control_name.push(file_name);
-    control_name.push(suffix);
-    Ok(path.with_file_name(control_name))
-}
-
-#[cfg(unix)]
-fn open_private_parent_directory(path: &Path) -> Result<(PathBuf, File)> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    ensure_stable_manual_symlink_aliases(&absolute)?;
-    let canonical = fs::canonicalize(&absolute)
-        .with_context(|| format!("canonicalize manual job parent {}", path.display()))?;
-    ensure_stable_manual_parent_ancestry(&canonical)?;
-    let before = fs::symlink_metadata(&canonical)
-        .with_context(|| format!("inspect manual job parent {}", canonical.display()))?;
-    anyhow::ensure!(
-        before.file_type().is_dir(),
-        "job artifact parent is not a directory: {}",
-        canonical.display()
-    );
-    anyhow::ensure!(
-        before.uid() == unsafe { libc::geteuid() } && before.permissions().mode() & 0o022 == 0,
-        "manual job parent must be current-user-owned and not group/world-writable: {}",
-        canonical.display()
-    );
+fn open_private_parent_directory(path: &Path) -> Result<File> {
+    ensure_stable_parent_ancestry(path)?;
     let mut options = OpenOptions::new();
     options
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
     let directory = options
-        .open(&canonical)
-        .with_context(|| format!("open manual job parent {}", canonical.display()))?;
-    let opened = directory.metadata()?;
-    anyhow::ensure!(
-        opened.is_dir()
-            && opened.dev() == before.dev()
-            && opened.ino() == before.ino()
-            && opened.uid() == unsafe { libc::geteuid() }
-            && opened.permissions().mode() & 0o022 == 0,
-        "manual job parent changed or became unsafe while opening: {}",
-        canonical.display()
-    );
-    ensure_stable_manual_symlink_aliases(&absolute)?;
-    ensure_private_parent_identity(&canonical, &directory)?;
-    Ok((canonical, directory))
+        .open(path)
+        .with_context(|| format!("open private manual job parent {}", path.display()))?;
+    ensure_private_parent_identity(path, &directory)?;
+    Ok(directory)
 }
 
-// SYSCOIN: Manual capability paths use the same root/euid-only ancestor trust model as the
-// durable spool. An untrusted owner could otherwise chmod an ancestor and replace the parent after
-// validation even if its current mode is non-writable.
+// SYSCOIN: Canonical parents may sit below root/current-user-owned or sticky ancestors. Refuse an
+// ancestor another uid can rename now or make writable later; same-UID mutation is not a boundary.
 #[cfg(unix)]
-fn ensure_stable_manual_parent_ancestry(path: &Path) -> Result<()> {
+fn ensure_stable_parent_ancestry(path: &Path) -> Result<()> {
     let effective_uid = unsafe { libc::geteuid() };
     for child in path
         .ancestors()
         .take_while(|ancestor| ancestor.parent().is_some())
     {
-        let parent = child.parent().expect("non-root ancestor has a parent");
+        let parent = child.parent().expect("non-root path has a parent");
         let parent_metadata = fs::symlink_metadata(parent)?;
         let child_metadata = fs::symlink_metadata(child)?;
         anyhow::ensure!(
             parent_metadata.file_type().is_dir()
                 && child_metadata.file_type().is_dir()
                 && (parent_metadata.uid() == 0 || parent_metadata.uid() == effective_uid),
-            "manual job parent ancestry contains an untrusted or non-directory component"
+            "manual job parent has an untrusted or non-directory ancestor"
         );
         let mode = parent_metadata.permissions().mode();
-        if mode & 0o022 != 0 {
-            anyhow::ensure!(
-                mode & 0o1000 != 0 && child_metadata.uid() == effective_uid,
-                "manual job parent has a replaceable group/world-writable ancestor"
-            );
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn ensure_stable_manual_symlink_aliases(path: &Path) -> Result<()> {
-    let effective_uid = unsafe { libc::geteuid() };
-    for component in path
-        .ancestors()
-        .filter(|component| component.parent().is_some())
-    {
-        let metadata = match fs::symlink_metadata(component) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        if !metadata.file_type().is_symlink() {
-            continue;
-        }
-        let parent = fs::canonicalize(component.parent().expect("non-root path has a parent"))?;
-        let parent_metadata = fs::symlink_metadata(parent)?;
-        let mode = parent_metadata.permissions().mode();
         anyhow::ensure!(
-            (parent_metadata.uid() == 0 || parent_metadata.uid() == effective_uid)
-                && (mode & 0o022 == 0 || (mode & 0o1000 != 0 && metadata.uid() == effective_uid)),
-            "manual job destination uses a replaceable symlink alias"
+            mode & 0o022 == 0 || (mode & 0o1000 != 0 && child_metadata.uid() == effective_uid),
+            "manual job parent has a replaceable group/world-writable ancestor"
         );
     }
     Ok(())
@@ -397,7 +209,8 @@ fn ensure_stable_manual_symlink_aliases(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn ensure_private_parent_identity(path: &Path, directory: &File) -> Result<()> {
-    let named = fs::symlink_metadata(path)?;
+    let named = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect private manual job parent {}", path.display()))?;
     let opened = directory.metadata()?;
     anyhow::ensure!(
         named.file_type().is_dir()
@@ -405,86 +218,16 @@ fn ensure_private_parent_identity(path: &Path, directory: &File) -> Result<()> {
             && named.ino() == opened.ino()
             && opened.uid() == unsafe { libc::geteuid() }
             && opened.permissions().mode() & 0o022 == 0,
-        "manual job parent changed or lost its private identity"
+        "manual job parent must be stable, current-user-owned, and not group/world-writable"
     );
     Ok(())
 }
 
-#[cfg(unix)]
-fn ensure_path_absent(path: &Path, reason: &str) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => Err(anyhow!("{reason}: {}", path.display())),
-        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
-    }
-}
-
-#[cfg(unix)]
-fn ensure_private_regular_file(
-    path: &Path,
-    metadata: &fs::Metadata,
-    expected_links: Option<u64>,
-) -> Result<()> {
-    anyhow::ensure!(
-        metadata.is_file()
-            && metadata.uid() == unsafe { libc::geteuid() }
-            && metadata.permissions().mode() & 0o077 == 0
-            && expected_links.is_none_or(|links| metadata.nlink() == links),
-        "manual job control file must be regular, current-user-owned, owner-only, and have the expected link count: {}",
-        path.display()
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
-fn ensure_path_matches_file(
-    path: &Path,
-    expected: &fs::Metadata,
-    expected_links: Option<u64>,
-) -> Result<()> {
-    let current = fs::symlink_metadata(path)
-        .with_context(|| format!("inspect manual job file {}", path.display()))?;
-    ensure_private_regular_file(path, &current, expected_links)?;
-    anyhow::ensure!(
-        current.dev() == expected.dev() && current.ino() == expected.ino(),
-        "manual job file changed during publication: {}",
-        path.display()
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
-fn cleanup_file_if_same_inode(path: &Path, expected: &fs::Metadata, parent: &File) {
-    if ensure_path_matches_file(path, expected, Some(1)).is_ok() && fs::remove_file(path).is_ok() {
-        let _ = parent.sync_all();
-    }
-}
-
-#[cfg(unix)]
-fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd as _;
-
-    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-/// SYSCOIN: Open a manual capability artifact without following symlinks and require the current
-/// owner, one link, owner-only mode, regular-file type, and a bounded on-disk representation.
+/// SYSCOIN: Job artifacts contain bearer authority, so require an owner-only regular file and do
+/// not follow a symlink. Same-UID inode/link defenses add no security boundary here.
 #[cfg(unix)]
 fn open_private_job_file(path: impl AsRef<Path>, maximum_bytes: usize) -> Result<File> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
     let path = path.as_ref();
-    let before = fs::symlink_metadata(path)
-        .with_context(|| format!("inspect private job file {}", path.display()))?;
-    anyhow::ensure!(
-        before.file_type().is_file(),
-        "private job path is not a regular file"
-    );
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -492,55 +235,36 @@ fn open_private_job_file(path: impl AsRef<Path>, maximum_bytes: usize) -> Result
         .with_context(|| format!("open private job file {}", path.display()))?;
     let metadata = file.metadata()?;
     anyhow::ensure!(
-        metadata.dev() == before.dev()
-            && metadata.ino() == before.ino()
+        metadata.is_file()
             && metadata.uid() == unsafe { libc::geteuid() }
-            && metadata.nlink() == 1
-            && metadata.permissions().mode() & 0o077 == 0,
-        "private job file must be current-user-owned, owner-only, and have exactly one link"
-    );
-    anyhow::ensure!(
-        metadata.len() <= maximum_bytes as u64,
-        "private job file exceeds {maximum_bytes} bytes"
+            && metadata.permissions().mode() & 0o077 == 0
+            && metadata.len() <= maximum_bytes as u64,
+        "private job file must be current-user-owned, owner-only, regular, and no larger than {maximum_bytes} bytes"
     );
     Ok(file)
 }
 
-/// SYSCOIN: Read local manual artifacts fully under the same explicit wire-class caps used by the
-/// network client. Metadata is only a hint; `take(max + 1)` also catches a file that grows after
-/// open, before serde can allocate from attacker- or accident-controlled lengths.
+/// SYSCOIN: Read local manual artifacts under the same explicit caps used by the network client.
 fn deserialize_json_bounded<T: serde::de::DeserializeOwned>(
     file: File,
     maximum_bytes: usize,
     artifact_kind: &str,
 ) -> Result<T> {
-    let initial_metadata = file.metadata()?;
-    anyhow::ensure!(
-        initial_metadata.len() <= maximum_bytes as u64,
-        "{artifact_kind} exceeds {maximum_bytes} bytes"
-    );
     let read_limit = u64::try_from(maximum_bytes)
         .context("manual artifact size limit does not fit u64")?
         .checked_add(1)
         .context("manual artifact size limit overflow")?;
-    let mut limited = std::io::Read::take(file, read_limit);
-    let value = serde_json::from_reader(&mut limited)
+    let mut limited = file.take(read_limit);
+    let mut deserializer = serde_json::Deserializer::from_reader(&mut limited);
+    let value = T::deserialize(&mut deserializer)
         .with_context(|| format!("decode {artifact_kind} JSON"))?;
-    // SYSCOIN: Recheck the opened inode after streaming so growth cannot hide behind the initial
-    // metadata check or a valid JSON prefix at the reader limit.
-    let final_metadata = limited.get_ref().metadata()?;
+    deserializer
+        .end()
+        .with_context(|| format!("reject trailing {artifact_kind} data"))?;
+    drop(deserializer);
     anyhow::ensure!(
-        final_metadata.len() <= maximum_bytes as u64,
+        limited.limit() > 0,
         "{artifact_kind} exceeds {maximum_bytes} bytes"
-    );
-    #[cfg(unix)]
-    anyhow::ensure!(
-        final_metadata.dev() == initial_metadata.dev()
-            && final_metadata.ino() == initial_metadata.ino()
-            && final_metadata.uid() == initial_metadata.uid()
-            && final_metadata.nlink() == initial_metadata.nlink()
-            && final_metadata.permissions().mode() == initial_metadata.permissions().mode(),
-        "{artifact_kind} metadata changed while reading"
     );
     Ok(value)
 }
@@ -573,14 +297,6 @@ fn deserialize_proof_bounded<T: serde::de::DeserializeOwned>(
     maximum_bytes: usize,
 ) -> Result<T> {
     let path = path.as_ref();
-    let before = fs::symlink_metadata(path)
-        .with_context(|| format!("inspect manual proof artifact {}", path.display()))?;
-    anyhow::ensure!(
-        before.file_type().is_file() && before.len() <= maximum_bytes as u64,
-        "manual proof artifact must be a regular file no larger than {maximum_bytes} bytes"
-    );
-    // SYSCOIN: Close the inspect/open replacement window too: an untrusted writable parent must
-    // not swap a checked proof path for a symlink to an unrelated local JSON file.
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -589,28 +305,31 @@ fn deserialize_proof_bounded<T: serde::de::DeserializeOwned>(
         .open(path)
         .with_context(|| format!("open manual proof artifact {}", path.display()))?;
     let opened = file.metadata()?;
+    // SYSCOIN: Proof bytes contain no bearer token, but writable substitution could consume the
+    // exact leased attempt; link count remains irrelevant under the same-UID threat boundary.
+    #[cfg(unix)]
+    anyhow::ensure!(
+        opened.is_file()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && opened.permissions().mode() & 0o022 == 0
+            && opened.len() <= maximum_bytes as u64,
+        "manual proof artifact must be current-user-owned, non-writable by group/other, regular, and no larger than {maximum_bytes} bytes"
+    );
+    #[cfg(not(unix))]
     anyhow::ensure!(
         opened.is_file() && opened.len() <= maximum_bytes as u64,
-        "manual proof artifact changed type or exceeded {maximum_bytes} bytes while opening"
+        "manual proof artifact must be a regular file no larger than {maximum_bytes} bytes"
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        anyhow::ensure!(
-            opened.dev() == before.dev()
-                && opened.ino() == before.ino()
-                && opened.uid() == unsafe { libc::geteuid() }
-                && opened.nlink() == 1
-                && opened.permissions().mode() & 0o022 == 0,
-            "manual proof artifact must be current-user-owned, not group/world-writable, singly linked, and unchanged while opening"
-        );
-    }
     deserialize_json_bounded(file, maximum_bytes, "manual proof artifact")
 }
 
 /// SYSCOIN: Fail closed where std cannot guarantee an owner-only capability file.
 #[cfg(not(unix))]
-struct ReservedJobPath;
+struct ReservedJobPath {
+    // SYSCOIN: Platform-independent diagnostics still type-check this field even though `new()`
+    // always rejects platforms that cannot provide the required owner-only file semantics.
+    path: PathBuf,
+}
 
 #[cfg(not(unix))]
 impl ReservedJobPath {
@@ -621,6 +340,12 @@ impl ReservedJobPath {
     }
 
     fn publish_json<T: Serialize>(&mut self, _value: &T, _maximum_bytes: usize) -> Result<()> {
+        Err(anyhow!(
+            "manual pick requires an owner-only job file; this platform is not supported"
+        ))
+    }
+
+    fn remove_unleased(self) -> Result<()> {
         Err(anyhow!(
             "manual pick requires an owner-only job file; this platform is not supported"
         ))
@@ -637,7 +362,7 @@ fn open_private_job_file(_path: impl AsRef<Path>, _maximum_bytes: usize) -> Resu
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Sequencer URL to submit proofs to
+    /// SYSCOIN: Canonical sequencer URL to submit proofs to; credentials remain opaque/redacted.
     ///
     /// Format: http[s]://[username:password@]host:port. Do not put credentials on argv; set
     /// `ZKSYNC_SEQUENCER_URL` from an owner-only secret file instead.
@@ -761,26 +486,36 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::PickFri { path } => {
-            // SYSCOIN: Lock before the lease-changing request. No-job/request failure leaves only
-            // the reusable deterministic control lock; it never creates or removes the final name.
+            // SYSCOIN: Reserve before the lease-changing request. Only an explicit no-job response
+            // removes it; request failures retain the empty artifact because acquisition is unclear.
             let mut destination = ReservedJobPath::new(&path)?;
             tracing::info!("Picking next FRI proof job from sequencer at {}", url);
-            match client.pick_fri_job().await? {
+            // SYSCOIN: Any request error is acquisition-ambiguous. `?` drops only the descriptor;
+            // the fsynced empty reservation remains until the operator can rule out a live lease.
+            let picked = client.pick_fri_job().await.with_context(|| {
+                format!(
+                    "FRI pick outcome is ambiguous; reservation retained at {}",
+                    destination.path.display()
+                )
+            })?;
+            match picked {
                 Some(fri_job) => {
-                    // SYSCOIN: Publish the input and capability atomically and durably without
-                    // logging/group/world exposure, bound to the sanitized issuing endpoint.
+                    // SYSCOIN: Write the endpoint-bound input and capability durably into the
+                    // pre-reserved owner-only artifact without logging or group/world exposure.
                     let saved_job = SavedFriJob {
                         sequencer_endpoint: url.as_str(),
                         job: &fri_job,
                     };
                     destination.publish_json(&saved_job, MAX_MANUAL_FRI_JOB_ARTIFACT_BYTES)?;
                     tracing::info!(
-                        "Picked FRI job for batch {} with vk {}, saved job to path {path}",
+                        "Picked FRI job for batch {} with vk {}, saved job to path {}",
                         fri_job.batch_number,
                         fri_job.vk_hash,
+                        destination.path.display(),
                     );
                 }
                 None => {
+                    destination.remove_unleased()?;
                     tracing::info!("No FRI proof jobs available at the moment.");
                 }
             }
@@ -811,11 +546,19 @@ async fn main() -> Result<()> {
             );
         }
         Commands::PickSnark { path } => {
-            // SYSCOIN: Lock a safe owner-controlled destination before aggregate authority is
-            // leased. No-job/request failure leaves only the reusable deterministic control lock.
+            // SYSCOIN: Reserve an owner-only destination before aggregate authority is
+            // leased. Only explicit no-job removes it; every ambiguous outcome remains visible.
             let mut destination = ReservedJobPath::new(&path)?;
             tracing::info!("Picking next SNARK proof job from sequencer at {}", url);
-            match client.pick_snark_job().await? {
+            // SYSCOIN: A transport or post-200 decode error may follow aggregate acquisition, so
+            // retain the fsynced reservation and require explicit recovery after lease expiry.
+            let picked = client.pick_snark_job().await.with_context(|| {
+                format!(
+                    "SNARK pick outcome is ambiguous; reservation retained at {}",
+                    destination.path.display()
+                )
+            })?;
+            match picked {
                 Some(snark_proof_inputs) => {
                     tracing::info!(
                         "Received SNARK job for batchess [{}, {}], saving to disk...",
@@ -829,13 +572,15 @@ async fn main() -> Result<()> {
                     };
                     destination.publish_json(&saved_job, MAX_MANUAL_SNARK_JOB_ARTIFACT_BYTES)?;
                     tracing::info!(
-                        "Saved SNARK job for batches [{}, {}] with vk {} to path {path}",
+                        "Saved SNARK job for batches [{}, {}] with vk {} to path {}",
                         snark_proof_inputs.from_batch_number,
                         snark_proof_inputs.to_batch_number,
-                        snark_proof_inputs.vk_hash
+                        snark_proof_inputs.vk_hash,
+                        destination.path.display(),
                     );
                 }
                 None => {
+                    destination.remove_unleased()?;
                     tracing::info!("No SNARK proof jobs available at the moment.");
                 }
             }
@@ -933,6 +678,15 @@ mod tests {
             "secret",
         ])
         .is_err());
+        assert!(Cli::try_parse_from([
+            "proof-client",
+            "--url",
+            "http://localhost:3124",
+            "submit-snark",
+            "--lease-token",
+            "secret",
+        ])
+        .is_err());
     }
 
     // SYSCOIN: Clap accepts even malformed secret-bearing URL text opaquely and hides live env
@@ -967,14 +721,14 @@ mod tests {
         let path = directory.join("job.json");
         let mut reservation = ReservedJobPath::new(&path).unwrap();
         assert!(
-            !path.exists(),
-            "the final name must remain absent before pick"
+            path.exists(),
+            "the final name reserves the pick before HTTP"
         );
-        let lock_path = manual_control_path(&path, MANUAL_LOCK_SUFFIX).unwrap();
         assert_eq!(
-            fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        assert!(ReservedJobPath::new(&path).is_err());
         reservation
             .publish_json(&serde_json::json!({"authority":"private"}), 1024)
             .unwrap();
@@ -982,26 +736,27 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(ReservedJobPath::new(&path).is_err());
         assert!(open_private_job_file(&path, 1024).is_ok());
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn unused_reservation_is_removed_and_submit_rejects_unsafe_artifacts() {
+    fn unused_reservation_and_bounded_artifact_rules_are_explicit() {
         use std::os::unix::fs::{symlink, PermissionsExt as _};
 
         let directory = private_test_directory("private-safety");
         let reserved = directory.join("reserved.json");
-        drop(ReservedJobPath::new(&reserved).unwrap());
+        ReservedJobPath::new(&reserved)
+            .unwrap()
+            .remove_unleased()
+            .unwrap();
         assert!(!reserved.exists());
 
-        let replaced = directory.join("replaced.json");
-        let reservation = ReservedJobPath::new(&replaced).unwrap();
-        fs::write(&replaced, b"do-not-delete").unwrap();
-        drop(reservation);
-        assert_eq!(fs::read(&replaced).unwrap(), b"do-not-delete");
+        // SYSCOIN: Dropping after an acquisition-ambiguous error retains the durable reservation.
+        let ambiguous = directory.join("ambiguous.json");
+        drop(ReservedJobPath::new(&ambiguous).unwrap());
+        assert!(ambiguous.exists());
 
         let insecure = directory.join("insecure.json");
         fs::write(&insecure, b"{}").unwrap();
@@ -1016,25 +771,31 @@ mod tests {
         assert!(open_private_job_file(&link, 1024).is_err());
         assert!(deserialize_proof_bounded::<serde_json::Value>(&link, 1024).is_err());
 
-        // SYSCOIN: A proof path is integrity-sensitive because definitive rejection consumes the
-        // private lease. Reject writable or aliased inodes even when their JSON is syntactically
-        // valid and O_NOFOLLOW closes pathname substitution.
+        // SYSCOIN: Proofs contain no lease, but writable input could consume the leased attempt
+        // with substituted bytes. Link count is intentionally irrelevant; write authority is not.
         let writable_proof = directory.join("writable-proof.json");
-        fs::write(&writable_proof, br#""wrong-proof""#).unwrap();
+        fs::write(&writable_proof, br#""proof""#).unwrap();
         fs::set_permissions(&writable_proof, fs::Permissions::from_mode(0o622)).unwrap();
         assert!(deserialize_proof_bounded::<String>(&writable_proof, 1024).is_err());
-
-        let aliased_proof = directory.join("aliased-proof.json");
-        fs::write(&aliased_proof, br#""proof""#).unwrap();
-        fs::set_permissions(&aliased_proof, fs::Permissions::from_mode(0o600)).unwrap();
-        let second_alias = directory.join("aliased-proof-copy.json");
-        fs::hard_link(&aliased_proof, &second_alias).unwrap();
-        assert!(deserialize_proof_bounded::<String>(&aliased_proof, 1024).is_err());
+        fs::set_permissions(&writable_proof, fs::Permissions::from_mode(0o600)).unwrap();
+        let proof_alias = directory.join("proof-alias.json");
+        fs::hard_link(&writable_proof, &proof_alias).unwrap();
+        assert_eq!(
+            deserialize_proof_bounded::<String>(&writable_proof, 1024).unwrap(),
+            "proof"
+        );
 
         // SYSCOIN: A syntactically valid prefix cannot bypass the full-file allocation cap.
         let oversized_proof = directory.join("oversized-proof.json");
         fs::write(&oversized_proof, br#""proof" trailing"#).unwrap();
         assert!(deserialize_proof_bounded::<String>(&oversized_proof, 7).is_err());
+        fs::write(&oversized_proof, b"\"proof\" ").unwrap();
+        assert!(deserialize_json_bounded::<String>(
+            File::open(&oversized_proof).unwrap(),
+            7,
+            "test proof"
+        )
+        .is_err());
 
         let oversized_job = directory.join("oversized-job.json");
         let mut reservation = ReservedJobPath::new(&oversized_job).unwrap();
@@ -1042,78 +803,35 @@ mod tests {
             .publish_json(&"decoded-job-expansion", 8)
             .is_err());
         drop(reservation);
-        assert!(!oversized_job.exists());
+        assert!(oversized_job.exists());
+        assert!(ReservedJobPath::new(&oversized_job).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
 
-    // SYSCOIN: The final name is atomically no-replace, and a crash-retained deterministic pending
-    // artifact prevents another lease-changing pick until an operator recovers it.
     #[cfg(unix)]
     #[test]
-    fn manual_publication_rejects_replacement_stale_pending_and_concurrent_owner() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let directory = private_test_directory("publication-races");
-        let path = directory.join("job.json");
-        let mut reservation = ReservedJobPath::new(&path).unwrap();
-        assert!(ReservedJobPath::new(&path).is_err());
-
-        fs::write(&path, b"existing-artifact").unwrap();
-        let error = reservation
-            .publish_json(&serde_json::json!({"authority":"new"}), 1024)
-            .unwrap_err();
-        assert!(error.to_string().contains("already exists"));
-        assert_eq!(fs::read(&path).unwrap(), b"existing-artifact");
-        drop(reservation);
-        fs::remove_file(&path).unwrap();
-
-        let pending_path = manual_control_path(&path, MANUAL_PENDING_SUFFIX).unwrap();
-        fs::write(&pending_path, b"durable-live-capability").unwrap();
-        fs::set_permissions(&pending_path, fs::Permissions::from_mode(0o600)).unwrap();
-        let error = ReservedJobPath::new(&path).unwrap_err();
-        assert!(error.to_string().contains("operator recovery"));
-        assert_eq!(fs::read(&pending_path).unwrap(), b"durable-live-capability");
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    // SYSCOIN: A second command cannot reserve another job's deterministic hidden lock/pending
-    // sibling as its final artifact under an independent lock.
-    #[cfg(unix)]
-    #[test]
-    fn manual_pick_rejects_control_namespace_as_final_artifact() {
-        let directory = private_test_directory("control-namespace");
-        let ordinary = directory.join("job.json");
-        for control_path in [
-            manual_control_path(&ordinary, MANUAL_LOCK_SUFFIX).unwrap(),
-            manual_control_path(&ordinary, MANUAL_PENDING_SUFFIX).unwrap(),
-            // SYSCOIN: ASCII case variants alias the same entries on default macOS/APFS volumes.
-            directory.join(".job.json.manual-pick.LOCK"),
-            directory.join(".job.json.manual-pick.PENDING"),
-        ] {
-            let error = ReservedJobPath::new(&control_path).unwrap_err();
-            assert!(error.to_string().contains("reserved"));
-            assert!(!control_path.exists());
-        }
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    // SYSCOIN: Directory entry mutation is safe only in a current-user-controlled parent; refuse
-    // shared writable locations before creating a lock or changing any destination name.
-    #[cfg(unix)]
-    #[test]
-    fn manual_pick_rejects_group_or_world_writable_parent() {
-        use std::os::unix::fs::PermissionsExt as _;
+    fn reservation_rejects_unsafe_parent_and_resolves_safe_parent_alias_once() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
 
         let directory = private_test_directory("unsafe-parent");
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o770)).unwrap();
-        let path = directory.join("job.json");
-        let error = ReservedJobPath::new(&path).unwrap_err();
+        let unsafe_path = directory.join("job.json");
+        let error = ReservedJobPath::new(&unsafe_path).unwrap_err();
         assert!(error.to_string().contains("not group/world-writable"));
-        assert!(!path.exists());
-        assert!(!manual_control_path(&path, MANUAL_LOCK_SUFFIX)
-            .unwrap()
-            .exists());
+        assert!(!unsafe_path.exists());
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let alias = directory.with_file_name(format!(
+            "{}-alias",
+            directory.file_name().unwrap().to_string_lossy()
+        ));
+        symlink(&directory, &alias).unwrap();
+        let aliased_path = alias.join("job.json");
+        let reservation = ReservedJobPath::new(&aliased_path).unwrap();
+        assert!(directory.join("job.json").exists());
+        reservation.remove_unleased().unwrap();
+        assert!(!directory.join("job.json").exists());
+        fs::remove_file(alias).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -59,10 +59,10 @@ pub struct Args {
     /// Directory to store the output files for SNARK prover
     #[arg(long)]
     pub output_dir: String,
-    /// SYSCOIN: Owner-only durable exact proof/capability spool. Defaults below output_dir and is
+    /// SYSCOIN: Explicit absolute owner-only durable exact proof/capability spool. It is
     /// exclusively locked so two worker processes cannot replay one envelope.
     #[arg(long)]
-    pub submission_dir: Option<PathBuf>,
+    pub submission_dir: PathBuf,
     /// SYSCOIN: Explicit isolated-network escape hatch. Production remote sequencers must use HTTPS.
     #[arg(long, default_value_t = false)]
     pub allow_insecure_sequencer_http: bool,
@@ -157,6 +157,8 @@ pub fn init_tracing() {
     FmtSubscriber::builder().with_env_filter(filter).init();
 }
 
+// SYSCOIN: The combined worker retains every acquired lease through durable handoff or definitive
+// manager disposition and observes one cooperative stop signal between phases.
 pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
     // SYSCOIN: Defer semantic URL parsing until after Clap has consumed the secret-backed env
     // value, preventing malformed credentials from being echoed in a typed-parser error.
@@ -174,17 +176,13 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
         .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
-    let submission_directory = args
-        .submission_dir
-        .clone()
-        .unwrap_or_else(|| Path::new(&args.output_dir).join(".pending-submissions"));
     // SYSCOIN: Combined workers share one process-locked durable submission namespace.
     let clients = SequencerProofClient::new_durable_clients(
         sequencer_urls,
         "prover_service".to_string(),
         Some(Duration::from_secs(args.request_timeout_secs)),
         supported_versions.vk_hashes(),
-        submission_directory,
+        args.submission_dir.clone(),
         stop_receiver.clone(),
         args.allow_insecure_sequencer_http,
     )
@@ -223,7 +221,7 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
         .context("initialize combined-service app-bound SNARK wrapper before queue polling")?,
     );
 
-    // The FRI-proof combiner likewise caches its setup data (and, on `gpu` builds, the
+    // SYSCOIN: The FRI-proof combiner likewise caches its setup data (and, on `gpu` builds, the
     // GPU prover's host state — pinned host RAM only, no VRAM) across jobs and across
     // the FRI/SNARK phase alternation. Its caches build lazily on the first multi-proof
     // SNARK job rather than at startup, so a service that never sees multi-proof jobs
@@ -237,6 +235,7 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
 
     // SYSCOIN: Schedule each phase independently across every configured sequencer.
     loop {
+        // SYSCOIN: Honor shutdown before either phase can acquire a new lease.
         if shutdown_requested(&stop_receiver) {
             tracing::info!("Shutdown requested before acquiring another prover job");
             return Ok(());
@@ -319,9 +318,11 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
                 return Ok(());
             }
         }
-        // Release the FRI prover's airbender GPU resources (as now SNARKing will be taking them).
+        // SYSCOIN: Release only FRI GPU state at the phase boundary; retained host caches let the
+        // sequential SNARK phase reuse setup without concurrent VRAM ownership.
         drop(fri_prover);
 
+        // SYSCOIN: Never re-enter FRI acquisition after an in-flight SNARK attempt if shutdown won.
         if shutdown_requested(&stop_receiver) {
             return Ok(());
         }
@@ -389,6 +390,8 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
             snark_latency = Instant::now();
         }
 
+        // SYSCOIN: After the acquired SNARK attempt resolves, honor shutdown before any new FRI
+        // lease can be claimed by the next phase.
         if shutdown_requested(&stop_receiver) {
             tracing::info!("Shutdown requested after completing the in-flight SNARK attempt");
             return Ok(());
@@ -575,6 +578,8 @@ mod tests {
             "out",
             "--trusted-setup-file",
             "setup.key",
+            "--submission-dir",
+            "/tmp/combined-prover-limit-test-submissions",
             "--max-snark-latency",
             "3600",
             "--max-fris-per-snark",
@@ -596,6 +601,8 @@ mod tests {
             "out",
             "--trusted-setup-file",
             "setup.key",
+            "--submission-dir",
+            "/tmp/combined-prover-test-submissions",
             "--sequencer-urls",
             &format!("https://:{secret}@sequencer.example/"),
         ])

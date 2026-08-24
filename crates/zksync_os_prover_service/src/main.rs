@@ -11,6 +11,7 @@ pub async fn main() -> anyhow::Result<()> {
     init_tracing();
     let args = zksync_os_prover_service::Args::parse();
 
+    // SYSCOIN: One cooperative stop signal owns the service and metrics tasks through shutdown.
     let (stop_sender, stop_receiver) = watch::channel(false);
     let service_stop_receiver = stop_receiver.clone();
 

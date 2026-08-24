@@ -93,7 +93,8 @@ impl SequencerProofClient {
     /// # Arguments
     /// * `endpoint` - The sequencer endpoint (URL + optional credentials)
     /// * `prover_name` - The name of the prover (used for identification in sequencer prover api)
-    /// * `timeout` - Optional total request backstop (None defaults to 600 seconds).
+    /// * `timeout` - SYSCOIN: Optional total request backstop (None defaults to 600 seconds so a
+    ///   valid large proof response is not truncated by the old two-second client default).
     ///   Connect timeout is 5 seconds and read-inactivity timeout is 10 seconds.
     /// * `supported_vk_hashes` - VK hashes this prover supports; sent on pick requests so the
     ///   sequencer only assigns jobs of these versions. Empty means no declaration - the
@@ -240,12 +241,13 @@ impl SequencerProofClient {
         })
     }
 
-    /// Create multiple sequencer proof clients from a list of endpoints.
+    /// SYSCOIN: Create multiple sequencer proof clients with a proof-sized request backstop.
     ///
     /// # Arguments
     /// * `endpoints` - A vector of sequencer endpoints
     /// * `prover_name` - The name of the prover (used for identification in sequencer prover api)
-    /// * `timeout` - Optional total request backstop (None defaults to 600 seconds).
+    /// * `timeout` - Optional total request backstop (None defaults to 600 seconds, replacing the
+    ///   upstream two-second default that can truncate a valid large proof response).
     /// * `supported_vk_hashes` - VK hashes this prover supports; sent on pick requests so the
     ///   sequencer only assigns jobs of these versions. Empty means no declaration - the
     ///   sequencer will offer jobs of any version.
@@ -1613,7 +1615,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_str()
-                        .is_some_and(|name| name.starts_with("pending-"))
+                        .is_some_and(|name| name == "pending.json")
                 })
                 .count(),
             1
@@ -1646,7 +1648,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_str()
-                        .is_some_and(|name| name.starts_with("pending-"))
+                        .is_some_and(|name| name == "pending.json")
                 })
                 .count(),
             0
@@ -1733,7 +1735,7 @@ mod tests {
                 std::fs::read_dir(&submission_directory)
                     .unwrap()
                     .filter_map(Result::ok)
-                    .filter(|entry| entry.file_name().to_string_lossy().starts_with("pending-"))
+                    .filter(|entry| entry.file_name().to_string_lossy() == "pending.json")
                     .count(),
                 1,
                 "unmarked {status} retired an expensive proof"
@@ -1770,7 +1772,7 @@ mod tests {
             std::fs::read_dir(&submission_directory)
                 .unwrap()
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("pending-"))
+                .filter(|entry| entry.file_name().to_string_lossy() == "pending.json")
                 .count(),
             0
         );
@@ -1802,7 +1804,7 @@ mod tests {
             std::fs::read_dir(wrong_directory)
                 .unwrap()
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("pending-"))
+                .filter(|entry| entry.file_name().to_string_lossy() == "pending.json")
                 .count(),
             1
         );
@@ -1864,7 +1866,7 @@ mod tests {
             std::fs::read_dir(submission_directory)
                 .unwrap()
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("pending-"))
+                .filter(|entry| entry.file_name().to_string_lossy() == "pending.json")
                 .count(),
             0,
             "terminal replay rejection must retire exactly once"

@@ -18,6 +18,18 @@ inputs:
     description: 'Shared key for cache.'
     required: false
     default: 'dev'
+  # SYSCOIN: Production callers can disable the shared compiler-cache trust boundary entirely.
+  enable_sccache:
+    type: string
+    description: 'Whether to install and enable the shared compiler cache.'
+    required: false
+    default: 'true'
+  # SYSCOIN: Production callers can exclude unrelated mutable developer-tool downloads.
+  minimal_rust:
+    type: string
+    description: 'Whether to install only the pinned workspace Rust toolchain.'
+    required: false
+    default: 'false'
 
 
 outputs:
@@ -52,30 +64,38 @@ runs:
       env:
         CMAKE_VERSION: '4.1.1'
         CMAKE_URL: 'https://github.com/Kitware/CMake/releases/download/'
+        # SYSCOIN: Verify the production build tool archive before executing it.
+        CMAKE_SHA256: '5a6c61cb62b38e153148a2c8d4af7b3d387f0c8c32b6dbceb5eb4af113efd65a'
       run: |
         CMAKE_FILENAME="cmake-${CMAKE_VERSION}-linux-x86_64"
         wget --no-verbose "${CMAKE_URL}/v${CMAKE_VERSION}/${CMAKE_FILENAME}.tar.gz"
+        echo "${CMAKE_SHA256}  ${CMAKE_FILENAME}.tar.gz" | sha256sum --check --strict
         tar xzf "${CMAKE_FILENAME}.tar.gz"
         echo "${PWD}/${CMAKE_FILENAME}/bin" >> "${GITHUB_PATH}"
         export PATH="${PWD}/${CMAKE_FILENAME}/bin:${PATH}"
         which cmake
         cmake --version
 
+    # SYSCOIN: Never install the shared cache client when a production caller disables it.
     - name: Install sccache
-      if: ${{ contains(runner.name, 'matterlabs') }}
+      if: ${{ contains(runner.name, 'matterlabs') && inputs.enable_sccache == 'true' }}
       shell: 'bash -ex {0}'
       env:
         SCCACHE_VERSION: 'v0.10.0'
         SCCACHE_URL: "https://github.com/mozilla/sccache/releases/download/"
+        # SYSCOIN: Verify the optional shared-cache client before executing it.
+        SCCACHE_SHA256: '1fbb35e135660d04a2d5e42b59c7874d39b3deb17de56330b25b713ec59f849b'
       run: |
         SCCACHE_FILENAME="sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl"
         wget --no-verbose "${SCCACHE_URL}/${SCCACHE_VERSION}/${SCCACHE_FILENAME}.tar.gz"
+        echo "${SCCACHE_SHA256}  ${SCCACHE_FILENAME}.tar.gz" | sha256sum --check --strict
         tar xzf "${SCCACHE_FILENAME}.tar.gz"
         echo "${PWD}/${SCCACHE_FILENAME}" >> "${GITHUB_PATH}"
         export PATH="${PWD}/${SCCACHE_FILENAME}:${PATH}"
 
+    # SYSCOIN: Never expose shared cache credentials or RUSTC_WRAPPER to a disabled caller.
     - name: Setup sccache
-      if: ${{ contains(runner.name, 'matterlabs') }}
+      if: ${{ contains(runner.name, 'matterlabs') && inputs.enable_sccache == 'true' }}
       shell: 'bash -ex {0}'
       run: |
         echo SCCACHE_CACHE_SIZE=50G >> "${GITHUB_ENV}"
@@ -87,7 +107,9 @@ runs:
         echo SCCACHE_SERVER_PORT=4225 >> "${GITHUB_ENV}"
         sccache --start-server
 
-    - name: Install Rust toolchain
+    # SYSCOIN: Keep the broader upstream developer setup only for non-minimal callers.
+    - name: Install Rust development toolchain
+      if: ${{ inputs.minimal_rust != 'true' }}
       uses: moonrepo/setup-rust@ede6de059f8046a5e236c94046823e2af11ca670 # v1.2.2
       env:
         # To fix rate limiting issues with GitHub API
@@ -96,6 +118,17 @@ runs:
         inherit-toolchain: true
         components: 'rustfmt,clippy'
         bins: 'cargo-nextest,cargo-llvm-cov'
+        cache: false
+
+    # SYSCOIN: Production releases install only the rust-toolchain.toml selection; unrelated
+    # mutable developer binaries are neither downloaded nor placed on the builder PATH.
+    - name: Install minimal Rust toolchain
+      if: ${{ inputs.minimal_rust == 'true' }}
+      uses: moonrepo/setup-rust@ede6de059f8046a5e236c94046823e2af11ca670 # v1.2.2
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      with:
+        inherit-toolchain: true
         cache: false
 
     - name: Rust cache

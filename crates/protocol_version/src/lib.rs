@@ -27,8 +27,8 @@ struct ProtocolVersion {
     /// is the plaintext of that binding, used to reject wrong-program FRI proofs up front
     /// and to re-derive/verify the VK.
     program_commitment: ProgramCommitment,
-    /// FRI proving security level the version's constants were generated at (see
-    /// [`SecurityLevel`]).
+    /// SYSCOIN: Required FRI proving security level at which this canonical lane's constants were
+    /// generated (see [`SecurityLevel`]); it cannot fall back to an implicit upstream default.
     security_level: SecurityLevel,
 }
 
@@ -80,8 +80,9 @@ struct ZkOsWrapperVersion(&'static str);
 #[allow(dead_code)]
 struct BinMd5Sum(&'static str);
 
+// SYSCOIN: The zero VK is a fail-closed release sentinel; bind the sole supported lane to the
+// reproducible compact-Bitcoin-DA guest only after V32 key generation replaces it.
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-// SYSCOIN: Bind the sole supported lane to the reproducible compact-Bitcoin-DA guest.
 const SYSCOIN_APP_MD5: &str = "5117d5dac6dbd34b93fef54e04d0b41c";
 const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
     0x0d2bc42e, 0xeea78bfb, 0x08553eb9, 0xe18ee1ef, 0xa4a97e19, 0x9b5db62d, 0x9972e789, 0x24d28425,
@@ -162,7 +163,7 @@ impl SupportedProtocolVersions {
             .collect()
     }
 
-    /// The app-program commitment recorded for the version with this VK hash;
+    /// SYSCOIN: The app-program commitment recorded for the version with this VK hash;
     /// `None` if the VK hash is unsupported.
     pub fn program_commitment_for(&self, vk_hash: &str) -> Option<ProgramCommitment> {
         self.versions
@@ -171,14 +172,14 @@ impl SupportedProtocolVersions {
             .map(|v| v.program_commitment)
     }
 
-    /// Checks whether some supported version proves the app program with this commitment.
+    /// SYSCOIN: Checks the canonical lane's required app commitment without an unbound fallback.
     pub fn supports_program(&self, commitment: &ProgramCommitment) -> bool {
         self.versions
             .iter()
             .any(|v| &v.program_commitment == commitment)
     }
 
-    /// The sole canonical lane's fixed proving security level.
+    /// SYSCOIN: Returns the sole canonical lane's required fixed proving security level.
     pub fn proving_security_level(&self) -> SecurityLevel {
         self.versions
             .first()

@@ -1,16 +1,12 @@
-//! SYSCOIN: Crash-durable, owner-only ownership of one exact proof/capability submission.
+//! SYSCOIN: Crash-durable ownership of one exact proof/capability submission.
 
 use std::{
     collections::HashSet,
     fmt,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
 
 use anyhow::Context as _;
@@ -25,7 +21,9 @@ const ENVELOPE_VERSION: u32 = 1;
 // SYSCOIN: The endpoint/version wrapper is bounded separately, while `wire_body` enforces the
 // server's exact 10 MiB body contract before publication and again on recovery.
 const MAX_ENVELOPE_BYTES: u64 = (MAX_PROOF_SUBMISSION_BODY_BYTES + 64 * 1024) as u64;
-static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
+const LOCK_FILE_NAME: &str = ".spool.lock";
+const TEMPORARY_FILE_NAME: &str = "pending.tmp";
+const PENDING_FILE_NAME: &str = "pending.json";
 
 /// SYSCOIN: Versioned owner-only record coupling one proof to the exact capability and endpoint
 /// that own it. Its Debug implementation deliberately exposes neither proof nor token.
@@ -38,7 +36,7 @@ pub(crate) struct DurableSubmissionEnvelope {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "stage", rename_all = "snake_case")]
+#[serde(tag = "stage", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum DurableSubmission {
     Fri {
         batch_number: u64,
@@ -224,13 +222,13 @@ impl fmt::Debug for DurableSubmissionEnvelope {
     }
 }
 
-/// SYSCOIN: One process owns a spool lock for its lifetime. All configured endpoint clients share
-/// this object, so a second worker cannot replay or retire the same capability concurrently.
+/// SYSCOIN: One process owns a private, absolute spool for its lifetime. Other configured
+/// endpoint clients share this object, so only one unresolved exact capability exists globally.
 pub(crate) struct DurableSubmissionStore {
     directory: PathBuf,
     // SYSCOIN: Keep the validated directory inode open for identity checks and fsync. Path-based
-    // operations are permitted only because the complete canonical ancestry is non-replaceable by
-    // another uid; every operation also revalidates that this configured name still reaches it.
+    // operations are permitted only because canonical ancestry is non-replaceable by another uid;
+    // every operation also revalidates that the configured name still reaches this inode.
     directory_handle: File,
     _lock: File,
     operation_lock: tokio::sync::Mutex<()>,
@@ -254,20 +252,22 @@ pub(crate) struct PendingSubmission {
 impl DurableSubmissionStore {
     pub(crate) fn open(directory: PathBuf) -> anyhow::Result<Arc<Self>> {
         let (directory, directory_handle) = prepare_owner_only_directory(&directory)?;
-        let lock_path = directory.join(".spool.lock");
-        let lock = owner_only_open(&lock_path, false).with_context(|| {
-            format!("failed to open prover submission spool lock {lock_path:?}")
-        })?;
+        let lock_path = directory.join(LOCK_FILE_NAME);
+        let lock = owner_only_open(&lock_path, false)
+            .with_context(|| format!("open prover submission spool lock {lock_path:?}"))?;
+        ensure_open_file_identity(&lock_path, &lock, None)?;
         try_lock_exclusive(&lock).with_context(|| {
             format!("prover submission spool {directory:?} is already owned by another process")
         })?;
-        ensure_owner_only_file(&lock_path, &lock.metadata()?)?;
         lock.sync_all()
             .context("fsync prover submission spool lock")?;
-        sync_directory_handle(&directory_handle, &directory)?;
-        // SYSCOIN: A crash after file fsync but before/after no-replace publication leaves a valid
-        // temporary record. Recover it while the process-wide spool lock is exclusively held.
-        recover_temporary_records(&directory, &directory_handle)?;
+        sync_directory(&directory_handle, &directory)?;
+
+        // SYSCOIN: Resolve the sole normal crash window while the lifetime lock is held. A valid,
+        // file-fsynced temporary record is atomically promoted; malformed or dual state is retained
+        // and fails startup without permitting a fresh lease.
+        recover_temporary_record(&directory, &directory_handle)?;
+
         Ok(Arc::new(Self {
             directory,
             directory_handle,
@@ -280,14 +280,7 @@ impl DurableSubmissionStore {
         &self,
         configured_endpoints: &HashSet<String>,
     ) -> anyhow::Result<()> {
-        let pending_submissions = self.load_all_sync()?;
-        // SYSCOIN: `persist()` permits exactly one global unresolved capability. More than one
-        // final record can only mean manual/corrupt state; do not choose an automatic replay order.
-        anyhow::ensure!(
-            pending_submissions.len() <= 1,
-            "durable submission spool contains multiple unresolved envelopes"
-        );
-        for pending in pending_submissions {
+        if let Some(pending) = self.load_pending_sync()? {
             anyhow::ensure!(
                 configured_endpoints.contains(pending.envelope.endpoint()),
                 "durable submission for endpoint {} has no exact configured endpoint identity",
@@ -303,12 +296,11 @@ impl DurableSubmissionStore {
     ) -> anyhow::Result<PendingSubmission> {
         envelope.validate()?;
         let _guard = self.operation_lock.lock().await;
-        // SYSCOIN: Exactly one unresolved envelope is allowed across every configured endpoint.
-        // This makes a post-proof disk/config failure globally fail closed before any fresh pick.
         anyhow::ensure!(
-            self.load_all_sync()?.is_empty(),
+            self.load_pending_sync()?.is_none(),
             "durable submission spool already has an unresolved envelope"
         );
+
         let bytes =
             serde_json::to_vec(&envelope).context("serialize durable submission envelope")?;
         anyhow::ensure!(
@@ -316,53 +308,31 @@ impl DurableSubmissionStore {
             "durable submission envelope exceeds {MAX_ENVELOPE_BYTES} bytes"
         );
 
-        let file_id = unique_file_id();
-        let temporary_path = self.directory.join(format!(".pending-{file_id}.tmp"));
-        let final_path = self.directory.join(format!("pending-{file_id}.json"));
-        let mut cleanup_is_safe = true;
-        let mut temporary_identity = None;
-        let result = (|| -> anyhow::Result<()> {
-            let mut file = owner_only_open(&temporary_path, true).with_context(|| {
-                format!("create durable submission temporary file {temporary_path:?}")
-            })?;
-            temporary_identity = Some(file.metadata()?);
-            file.write_all(&bytes)
-                .context("write durable submission envelope")?;
-            // SYSCOIN: Once complete proof/token bytes exist, even an fsync error is ambiguous.
-            // Retain this exact inode and block fresh work rather than deleting the only copy.
-            cleanup_is_safe = false;
-            file.sync_all()
-                .context("fsync durable submission envelope")?;
-            ensure_stable_directory_identity(&self.directory, &self.directory_handle)?;
-            // SYSCOIN: First make the temporary name crash-durable. It is now the recovery anchor
-            // for every subsequent publication error.
-            sync_directory_handle(&self.directory_handle, &self.directory)?;
-            // A hard link is an atomic no-replace publication on the same filesystem.
-            fs::hard_link(&temporary_path, &final_path)
-                .context("publish durable submission envelope without overwrite")?;
-            ensure_same_file(&temporary_path, &final_path, 2)?;
-            // SYSCOIN: Persist the final name while the temporary recovery anchor still exists.
-            sync_directory_handle(&self.directory_handle, &self.directory)?;
-            fs::remove_file(&temporary_path)
-                .context("remove published durable submission temporary name")?;
-            ensure_file_link_count(&final_path, 1)?;
-            // SYSCOIN: Only this final fsync makes the one-name state durable.
-            sync_directory_handle(&self.directory_handle, &self.directory)?;
-            ensure_stable_directory_identity(&self.directory, &self.directory_handle)?;
-            Ok(())
-        })();
-        if result.is_err() && cleanup_is_safe {
-            // SYSCOIN: Make failed temporary creation cleanup durable too; otherwise a partial
-            // record could be resurrected after power loss. Never unlink a replaced pathname.
-            if temporary_identity.as_ref().is_some_and(|identity| {
-                remove_file_if_same_inode(&temporary_path, identity).unwrap_or(false)
-            }) {
-                let _ = sync_directory_handle(&self.directory_handle, &self.directory);
-            }
-        }
-        result?;
+        let temporary_path = self.temporary_path();
+        let pending_path = self.pending_path();
+        // SYSCOIN: The globally locked fixed temporary name makes create-new sufficient to detect
+        // any unresolved prior write without dynamic IDs, inode policing, or hard-link recovery.
+        let mut file = owner_only_open(&temporary_path, true).with_context(|| {
+            format!("create durable submission temporary file {temporary_path:?}")
+        })?;
+        ensure_open_file_identity(&temporary_path, &file, Some(MAX_ENVELOPE_BYTES))?;
+        // Retain every created temporary file on error. Even a partial record must block fresh work
+        // until restart recovery validates it or an operator retires the expired lease explicitly.
+        file.write_all(&bytes)
+            .context("write durable submission envelope")?;
+        file.sync_all()
+            .context("fsync durable submission envelope")?;
+        ensure_stable_directory_identity(&self.directory, &self.directory_handle)?;
+        // SYSCOIN: First persist the temporary recovery anchor, then atomically rename it, then
+        // persist the final name. A crash can expose temp or final, never an accepted unfsynced body.
+        sync_directory(&self.directory_handle, &self.directory)?;
+        fs::rename(&temporary_path, &pending_path)
+            .context("atomically publish durable submission envelope")?;
+        sync_directory(&self.directory_handle, &self.directory)?;
+        ensure_stable_directory_identity(&self.directory, &self.directory_handle)?;
+
         Ok(PendingSubmission {
-            path: final_path,
+            path: pending_path,
             envelope,
         })
     }
@@ -373,241 +343,195 @@ impl DurableSubmissionStore {
     ) -> anyhow::Result<Vec<PendingSubmission>> {
         let _guard = self.operation_lock.lock().await;
         Ok(self
-            .load_all_sync()?
-            .into_iter()
+            .load_pending_sync()?
             .filter(|pending| pending.envelope.endpoint() == endpoint)
+            .into_iter()
             .collect())
     }
 
     pub(crate) async fn retire(&self, pending: &PendingSubmission) -> anyhow::Result<()> {
         let _guard = self.operation_lock.lock().await;
         ensure_stable_directory_identity(&self.directory, &self.directory_handle)?;
+        anyhow::ensure!(
+            pending.path == self.pending_path(),
+            "durable submission retirement did not target the canonical pending record"
+        );
+        // SYSCOIN: Retire only the exact envelope that received a definitive manager disposition.
+        // Disk corruption or an internal stale handle remains fail-closed for operator inspection.
+        let current = self
+            .load_pending_sync()?
+            .context("durable submission disappeared before definitive retirement")?;
+        anyhow::ensure!(
+            current.envelope == pending.envelope,
+            "durable submission changed before definitive retirement"
+        );
         fs::remove_file(&pending.path)
             .with_context(|| format!("retire durable submission envelope {:?}", pending.path))?;
-        sync_directory_handle(&self.directory_handle, &self.directory)?;
+        sync_directory(&self.directory_handle, &self.directory)?;
         ensure_stable_directory_identity(&self.directory, &self.directory_handle)
     }
 
     pub(crate) async fn ensure_empty(&self) -> anyhow::Result<()> {
         let _guard = self.operation_lock.lock().await;
         anyhow::ensure!(
-            self.load_all_sync()?.is_empty(),
+            self.load_pending_sync()?.is_none(),
             "durable submission spool has an unresolved envelope for another endpoint"
         );
         Ok(())
     }
 
-    fn load_all_sync(&self) -> anyhow::Result<Vec<PendingSubmission>> {
-        let inventory = inspect_spool_inventory(&self.directory, &self.directory_handle)?;
-        // SYSCOIN: Temporary records are reconciled only while opening the exclusively locked
-        // store. A new runtime temporary means an interrupted/corrupt write and blocks fresh work.
+    fn load_pending_sync(&self) -> anyhow::Result<Option<PendingSubmission>> {
+        let inventory = inspect_spool(&self.directory, &self.directory_handle)?;
         anyhow::ensure!(
-            inventory.temporary_paths.is_empty(),
+            !inventory.temporary,
             "durable submission spool contains an unrecovered temporary envelope"
         );
-        let pending_paths = inventory.pending_paths;
-        // SYSCOIN: Reject multiplicity before reading any proof-sized records, avoiding an
-        // attacker/corruption-controlled aggregate allocation during startup validation.
-        anyhow::ensure!(
-            pending_paths.len() <= 1,
-            "durable submission spool contains multiple unresolved envelopes"
-        );
-        pending_paths
-            .into_iter()
-            .map(|path| {
-                ensure_file_link_count(&path, 1)?;
-                load_pending_file(path)
-            })
-            .collect()
+        inventory
+            .pending
+            .then(|| load_pending_file(self.pending_path()))
+            .transpose()
+    }
+
+    fn temporary_path(&self) -> PathBuf {
+        self.directory.join(TEMPORARY_FILE_NAME)
+    }
+
+    fn pending_path(&self) -> PathBuf {
+        self.directory.join(PENDING_FILE_NAME)
     }
 }
 
+#[derive(Debug, Default)]
 struct SpoolInventory {
-    pending_paths: Vec<PathBuf>,
-    temporary_paths: Vec<PathBuf>,
+    temporary: bool,
+    pending: bool,
 }
 
-// SYSCOIN: This directory is dedicated to bearer capabilities. Reject every non-UTF8 or unknown
-// entry rather than silently orphaning a proof and later acquiring fresh work behind it. The only
-// legal names are the exact process lock and versioned temporary/final envelope forms.
-fn inspect_spool_inventory(
-    directory: &Path,
-    directory_handle: &File,
-) -> anyhow::Result<SpoolInventory> {
+// SYSCOIN: This is a dedicated capability directory. The lifetime lock and at most one fixed
+// temporary/final record are its complete state machine; every other entry is ambiguous and blocks.
+fn inspect_spool(directory: &Path, directory_handle: &File) -> anyhow::Result<SpoolInventory> {
     ensure_stable_directory_identity(directory, directory_handle)?;
-    let mut paths = fs::read_dir(directory)
-        .with_context(|| format!("read durable submission spool {directory:?}"))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()?;
-    paths.sort();
-
+    let mut inventory = SpoolInventory::default();
     let mut lock_seen = false;
-    let mut pending_paths = Vec::new();
-    let mut temporary_paths = Vec::new();
-    for path in paths {
-        let name = path
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("read durable submission spool {directory:?}"))?
+    {
+        let entry = entry?;
+        let name = entry
             .file_name()
-            .and_then(|name| name.to_str())
-            .with_context(|| format!("non-UTF8 entry in dedicated submission spool: {path:?}"))?;
-        if name == ".spool.lock" {
-            anyhow::ensure!(!lock_seen, "duplicate durable submission spool lock entry");
-            lock_seen = true;
-            let metadata = fs::symlink_metadata(&path)?;
-            ensure_owner_only_file(&path, &metadata)?;
-            ensure_file_link_count(&path, 1)?;
-            continue;
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("non-UTF8 entry in dedicated submission spool"))?;
+        match name.as_str() {
+            LOCK_FILE_NAME => {
+                lock_seen = true;
+                ensure_private_file(&entry.path(), &fs::symlink_metadata(entry.path())?, None)?;
+            }
+            TEMPORARY_FILE_NAME => {
+                inventory.temporary = true;
+                ensure_private_file(
+                    &entry.path(),
+                    &fs::symlink_metadata(entry.path())?,
+                    Some(MAX_ENVELOPE_BYTES),
+                )?;
+            }
+            PENDING_FILE_NAME => {
+                inventory.pending = true;
+                ensure_private_file(
+                    &entry.path(),
+                    &fs::symlink_metadata(entry.path())?,
+                    Some(MAX_ENVELOPE_BYTES),
+                )?;
+            }
+            _ => anyhow::bail!("unknown entry in dedicated submission spool: {name:?}"),
         }
-        if let Some(file_id) = name
-            .strip_prefix(".pending-")
-            .and_then(|name| name.strip_suffix(".tmp"))
-        {
-            anyhow::ensure!(
-                !file_id.is_empty(),
-                "empty durable submission file identifier"
-            );
-            temporary_paths.push(path);
-            continue;
-        }
-        if let Some(file_id) = name
-            .strip_prefix("pending-")
-            .and_then(|name| name.strip_suffix(".json"))
-        {
-            anyhow::ensure!(
-                !file_id.is_empty(),
-                "empty durable submission file identifier"
-            );
-            pending_paths.push(path);
-            continue;
-        }
-        anyhow::bail!("unknown entry in dedicated submission spool: {path:?}");
     }
     anyhow::ensure!(lock_seen, "durable submission spool lock entry is missing");
     ensure_stable_directory_identity(directory, directory_handle)?;
-    Ok(SpoolInventory {
-        pending_paths,
-        temporary_paths,
-    })
+    Ok(inventory)
 }
 
-// SYSCOIN: Reconcile every fsynced `.pending-*.tmp` under the exclusive spool lock. Equivalent
-// published records are idempotent; malformed or conflicting records stop startup for inspection.
-fn recover_temporary_records(directory: &Path, directory_handle: &File) -> anyhow::Result<()> {
-    let inventory = inspect_spool_inventory(directory, directory_handle)?;
-    let mut record_ids = HashSet::new();
-    for path in inventory
-        .temporary_paths
-        .iter()
-        .chain(&inventory.pending_paths)
-    {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("validated spool filename became non-UTF8")?;
-        let file_id = name
-            .strip_prefix(".pending-")
-            .and_then(|name| name.strip_suffix(".tmp"))
-            .or_else(|| {
-                name.strip_prefix("pending-")
-                    .and_then(|name| name.strip_suffix(".json"))
-            })
-            .context("validated spool filename has an invalid form")?;
-        record_ids.insert(file_id.to_owned());
-    }
-    // SYSCOIN: One crash window may leave two names for the same inode/record ID. Distinct IDs
-    // violate the global single-envelope invariant, so reject before publishing or deleting any.
+fn recover_temporary_record(directory: &Path, directory_handle: &File) -> anyhow::Result<()> {
+    let inventory = inspect_spool(directory, directory_handle)?;
     anyhow::ensure!(
-        record_ids.len() <= 1,
-        "durable submission spool contains multiple unresolved record identifiers"
+        !(inventory.temporary && inventory.pending),
+        "durable submission spool contains ambiguous temporary and pending envelopes"
     );
-    for temporary_path in inventory.temporary_paths {
-        let name = temporary_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("non-UTF8 durable submission temporary filename")?;
-        let file_id = name
-            .strip_prefix(".pending-")
-            .and_then(|name| name.strip_suffix(".tmp"))
-            .context("invalid durable submission temporary filename")?;
-        anyhow::ensure!(
-            !file_id.is_empty(),
-            "empty durable submission file identifier"
-        );
-        let temporary = load_pending_file(temporary_path.clone())?;
-        let final_path = directory.join(format!("pending-{file_id}.json"));
-        if final_path.exists() {
-            let published = load_pending_file(final_path.clone())?;
-            anyhow::ensure!(
-                published.envelope == temporary.envelope,
-                "conflicting durable submission temporary and published records for {file_id}"
-            );
-            // SYSCOIN: The writer can create two names only by hard-linking one inode. Separate
-            // equal files are manual/corrupt state and must never authorize automatic deletion.
-            ensure_same_file(&temporary_path, &final_path, 2)?;
-        } else {
-            fs::hard_link(&temporary_path, &final_path).with_context(|| {
-                format!("recover durable submission temporary record {temporary_path:?}")
-            })?;
-            ensure_same_file(&temporary_path, &final_path, 2)?;
+    if !inventory.temporary {
+        if inventory.pending {
+            load_pending_file(directory.join(PENDING_FILE_NAME))?;
         }
-        // SYSCOIN: Whether the final name was found or recreated, anchor it while the temporary
-        // name still survives. Removing first can lose both names under crash/writeback ordering.
-        sync_directory_handle(directory_handle, directory)?;
-        fs::remove_file(&temporary_path).with_context(|| {
-            format!("remove recovered durable submission temporary record {temporary_path:?}")
-        })?;
-        ensure_file_link_count(&final_path, 1)?;
-        sync_directory_handle(directory_handle, directory)?;
+        return Ok(());
     }
+
+    let temporary_path = directory.join(TEMPORARY_FILE_NAME);
+    let pending_path = directory.join(PENDING_FILE_NAME);
+    // SYSCOIN: A normal process kill may expose a complete page-cache-visible temporary record
+    // before its data or name reached stable storage. Hold the exact validated inode, fsync its
+    // body, parse that same inode, and anchor the temporary name before the atomic promotion.
+    let mut temporary_file = owner_only_read_write(&temporary_path)
+        .with_context(|| format!("open crash-retained temporary record {temporary_path:?}"))?;
+    ensure_open_file_identity(&temporary_path, &temporary_file, Some(MAX_ENVELOPE_BYTES))?;
+    temporary_file
+        .sync_all()
+        .context("fsync crash-retained durable submission temporary record")?;
+    ensure_open_file_identity(&temporary_path, &temporary_file, Some(MAX_ENVELOPE_BYTES))?;
+    read_pending_envelope(&temporary_path, &mut temporary_file)?;
+    ensure_open_file_identity(&temporary_path, &temporary_file, Some(MAX_ENVELOPE_BYTES))?;
+    sync_directory(directory_handle, directory)?;
     ensure_stable_directory_identity(directory, directory_handle)?;
-    Ok(())
+    ensure_open_file_identity(&temporary_path, &temporary_file, Some(MAX_ENVELOPE_BYTES))?;
+    fs::rename(&temporary_path, &pending_path)
+        .context("promote crash-retained durable submission temporary record")?;
+    ensure_open_file_identity(&pending_path, &temporary_file, Some(MAX_ENVELOPE_BYTES))?;
+    sync_directory(directory_handle, directory)?;
+    ensure_stable_directory_identity(directory, directory_handle)?;
+    ensure_open_file_identity(&pending_path, &temporary_file, Some(MAX_ENVELOPE_BYTES))
 }
 
 fn load_pending_file(path: PathBuf) -> anyhow::Result<PendingSubmission> {
-    let metadata = fs::symlink_metadata(&path)
+    let before = fs::symlink_metadata(&path)
         .with_context(|| format!("inspect durable submission envelope {path:?}"))?;
-    anyhow::ensure!(
-        metadata.file_type().is_file(),
-        "submission envelope is not a file: {path:?}"
-    );
-    anyhow::ensure!(
-        metadata.len() <= MAX_ENVELOPE_BYTES,
-        "submission envelope is oversized: {path:?}"
-    );
-    ensure_owner_only_file(&path, &metadata)?;
-    // SYSCOIN: Refuse symlink traversal and close the metadata/open replacement window before
-    // reading a bearer capability from the private spool.
-    let file = owner_only_read(&path)
+    ensure_private_file(&path, &before, Some(MAX_ENVELOPE_BYTES))?;
+    let mut file = owner_only_read(&path)
         .with_context(|| format!("open durable submission envelope {path:?}"))?;
+    ensure_open_file_identity(&path, &file, Some(MAX_ENVELOPE_BYTES))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
         let opened = file.metadata()?;
         anyhow::ensure!(
-            opened.dev() == metadata.dev() && opened.ino() == metadata.ino(),
+            before.dev() == opened.dev() && before.ino() == opened.ino(),
             "submission envelope changed while opening: {path:?}"
         );
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_ENVELOPE_BYTES + 1).read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= MAX_ENVELOPE_BYTES,
-        "submission envelope grew while reading: {path:?}"
-    );
-    let envelope: DurableSubmissionEnvelope = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse durable submission envelope {path:?}"))?;
-    envelope
-        .validate()
-        .with_context(|| format!("validate durable submission envelope {path:?}"))?;
+
+    let envelope = read_pending_envelope(&path, &mut file)?;
+    ensure_open_file_identity(&path, &file, Some(MAX_ENVELOPE_BYTES))?;
     Ok(PendingSubmission { path, envelope })
 }
 
-fn unique_file_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let counter = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{counter}", std::process::id())
+fn read_pending_envelope(
+    path: &Path,
+    file: &mut File,
+) -> anyhow::Result<DurableSubmissionEnvelope> {
+    let length = file.metadata()?.len();
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::with_capacity(length as usize);
+    file.take(MAX_ENVELOPE_BYTES + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_ENVELOPE_BYTES,
+        "submission envelope grew beyond {MAX_ENVELOPE_BYTES} bytes while reading: {path:?}"
+    );
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    let envelope = DurableSubmissionEnvelope::deserialize(&mut deserializer)
+        .with_context(|| format!("parse durable submission envelope {path:?}"))?;
+    deserializer
+        .end()
+        .with_context(|| format!("reject trailing durable submission data {path:?}"))?;
+    envelope
+        .validate()
+        .with_context(|| format!("validate durable submission envelope {path:?}"))?;
+    Ok(envelope)
 }
 
 #[cfg(unix)]
@@ -616,39 +540,37 @@ fn prepare_owner_only_directory(path: &Path) -> anyhow::Result<(PathBuf, File)> 
         DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
     };
 
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    ensure_stable_symlink_aliases(&absolute)?;
+    anyhow::ensure!(
+        path.is_absolute(),
+        "durable submission directory must be an explicit absolute path"
+    );
+    ensure_stable_symlink_aliases(path)?;
     // SYSCOIN: Record the nearest pre-existing ancestor so every newly created directory entry can
     // be fsynced before a proof/token is written below it.
-    let existing_ancestor = absolute
+    let existing_ancestor = path
         .ancestors()
         .find(|ancestor| fs::symlink_metadata(ancestor).is_ok())
         .context("submission spool has no existing ancestor")?;
     let existing_ancestor = fs::canonicalize(existing_ancestor)?;
-
-    match fs::symlink_metadata(&absolute) {
+    match fs::symlink_metadata(path) {
         Ok(metadata) => anyhow::ensure!(
             metadata.file_type().is_dir(),
-            "submission spool is not a directory: {absolute:?}"
+            "submission spool is not a directory: {path:?}"
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut builder = fs::DirBuilder::new();
-            builder.recursive(true).mode(0o700).create(&absolute)?;
+            builder.recursive(true).mode(0o700).create(path)?;
         }
         Err(error) => return Err(error.into()),
     }
 
-    let canonical = fs::canonicalize(&absolute)?;
-    ensure_stable_symlink_aliases(&absolute)?;
+    let canonical = fs::canonicalize(path)?;
+    ensure_stable_symlink_aliases(path)?;
     ensure_stable_directory_ancestry(&canonical)?;
-    let before = fs::symlink_metadata(&canonical)?;
+    let metadata = fs::symlink_metadata(&canonical)?;
     anyhow::ensure!(
-        before.file_type().is_dir() && before.uid() == unsafe { libc::geteuid() },
-        "submission spool must be a current-user-owned directory: {canonical:?}"
+        metadata.file_type().is_dir() && metadata.uid() == unsafe { libc::geteuid() },
+        "submission spool must be a current-service-user-owned directory: {canonical:?}"
     );
 
     let mut options = OpenOptions::new();
@@ -659,12 +581,13 @@ fn prepare_owner_only_directory(path: &Path) -> anyhow::Result<(PathBuf, File)> 
     let opened = directory.metadata()?;
     anyhow::ensure!(
         opened.is_dir()
-            && opened.dev() == before.dev()
-            && opened.ino() == before.ino()
-            && opened.uid() == unsafe { libc::geteuid() },
+            && opened.dev() == metadata.dev()
+            && opened.ino() == metadata.ino()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && metadata.uid() == opened.uid(),
         "submission spool changed while validating ownership: {canonical:?}"
     );
-    // SYSCOIN: Ownership is authorization to tighten only this dedicated capability namespace.
+    // SYSCOIN: Ownership authorizes tightening only this dedicated capability namespace.
     directory.set_permissions(fs::Permissions::from_mode(0o700))?;
     ensure_stable_directory_identity(&canonical, &directory)?;
     sync_created_directory_chain(&canonical, &existing_ancestor)?;
@@ -696,8 +619,7 @@ fn ensure_stable_directory_ancestry(path: &Path) -> anyhow::Result<()> {
             "submission spool ancestry contains a non-directory component: {child:?}"
         );
         // SYSCOIN: Mode bits are mutable by the owner. Trust only root or this process' uid for
-        // every ancestor, otherwise another uid could chmod and replace a checked component after
-        // startup while path-based publication still holds the old directory descriptor.
+        // every ancestor; otherwise another uid could replace a checked component after startup.
         anyhow::ensure!(
             parent_metadata.uid() == 0 || parent_metadata.uid() == effective_uid,
             "submission spool has an ancestor owned by an untrusted uid: {parent:?}"
@@ -782,25 +704,6 @@ fn ensure_stable_directory_identity(_path: &Path, _directory: &File) -> anyhow::
     anyhow::bail!("stable prover spool identity requires Unix filesystem semantics")
 }
 
-// SYSCOIN: Persist the dedicated directory and every newly created parent link before storing
-// bearer authority. Syncing a pre-existing leaf and its parent is harmless and closes a prior
-// unclean-creation window as well.
-fn sync_created_directory_chain(path: &Path, existing_ancestor: &Path) -> anyhow::Result<()> {
-    let mut current = path;
-    loop {
-        File::open(current)?.sync_all()?;
-        if let Some(parent) = current.parent() {
-            File::open(parent)?.sync_all()?;
-        }
-        if current == existing_ancestor {
-            return Ok(());
-        }
-        current = current.parent().with_context(|| {
-            format!("pre-existing directory {existing_ancestor:?} is not an ancestor of {path:?}")
-        })?;
-    }
-}
-
 fn owner_only_open(path: &Path, create_new: bool) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
@@ -828,89 +731,85 @@ fn owner_only_read(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-fn ensure_owner_only_file(path: &Path, metadata: &fs::Metadata) -> anyhow::Result<()> {
+fn owner_only_read_write(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+fn ensure_private_file(
+    path: &Path,
+    metadata: &fs::Metadata,
+    maximum_bytes: Option<u64>,
+) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         anyhow::ensure!(
             metadata.is_file()
                 && metadata.uid() == unsafe { libc::geteuid() }
-                && metadata.permissions().mode() & 0o077 == 0
-                && (1..=2).contains(&metadata.nlink()),
-            "durable submission file is not regular, current-user-owned, owner-only, and singly or recovery-linked: {path:?}"
+                && metadata.permissions().mode() & 0o777 == 0o600
+                && metadata.nlink() == 1,
+            "durable submission file must be regular, current-service-user-owned, mode 0600, and singly linked: {path:?}"
+        );
+    }
+    if let Some(maximum_bytes) = maximum_bytes {
+        anyhow::ensure!(
+            metadata.len() <= maximum_bytes,
+            "durable submission file exceeds {maximum_bytes} bytes: {path:?}"
         );
     }
     Ok(())
 }
 
-fn sync_directory_handle(directory: &File, display_path: &Path) -> anyhow::Result<()> {
+fn ensure_open_file_identity(
+    path: &Path,
+    file: &File,
+    maximum_bytes: Option<u64>,
+) -> anyhow::Result<()> {
+    let named = fs::symlink_metadata(path)?;
+    let opened = file.metadata()?;
+    ensure_private_file(path, &named, maximum_bytes)?;
+    ensure_private_file(path, &opened, maximum_bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        anyhow::ensure!(
+            named.dev() == opened.dev() && named.ino() == opened.ino(),
+            "durable submission file changed while opening: {path:?}"
+        );
+    }
+    Ok(())
+}
+
+// SYSCOIN: Persist the dedicated directory and every newly created parent link before storing
+// bearer authority. Syncing a pre-existing leaf and its parent is harmless and closes an unclean
+// creation window as well.
+fn sync_created_directory_chain(path: &Path, existing_ancestor: &Path) -> anyhow::Result<()> {
+    let mut current = path;
+    loop {
+        File::open(current)?.sync_all()?;
+        if let Some(parent) = current.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        if current == existing_ancestor {
+            return Ok(());
+        }
+        current = current.parent().with_context(|| {
+            format!("existing directory {existing_ancestor:?} is not an ancestor of {path:?}")
+        })?;
+    }
+}
+
+fn sync_directory(directory: &File, display_path: &Path) -> anyhow::Result<()> {
     directory
         .sync_all()
         .with_context(|| format!("fsync durable submission spool {display_path:?}"))
-}
-
-#[cfg(unix)]
-fn ensure_file_link_count(path: &Path, expected_links: u64) -> anyhow::Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let metadata = fs::symlink_metadata(path)?;
-    ensure_owner_only_file(path, &metadata)?;
-    anyhow::ensure!(
-        metadata.nlink() == expected_links,
-        "durable submission file has {} links, expected {expected_links}: {path:?}",
-        metadata.nlink()
-    );
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_file_link_count(_path: &Path, _expected_links: u64) -> anyhow::Result<()> {
-    anyhow::bail!("durable submission link checks require Unix filesystem semantics")
-}
-
-#[cfg(unix)]
-fn ensure_same_file(first: &Path, second: &Path, expected_links: u64) -> anyhow::Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let first_metadata = fs::symlink_metadata(first)?;
-    let second_metadata = fs::symlink_metadata(second)?;
-    ensure_owner_only_file(first, &first_metadata)?;
-    ensure_owner_only_file(second, &second_metadata)?;
-    anyhow::ensure!(
-        first_metadata.dev() == second_metadata.dev()
-            && first_metadata.ino() == second_metadata.ino()
-            && first_metadata.nlink() == expected_links
-            && second_metadata.nlink() == expected_links,
-        "durable submission publication names do not identify one {expected_links}-link inode"
-    );
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_same_file(_first: &Path, _second: &Path, _expected_links: u64) -> anyhow::Result<()> {
-    anyhow::bail!("durable submission identity checks require Unix filesystem semantics")
-}
-
-#[cfg(unix)]
-fn remove_file_if_same_inode(path: &Path, expected: &fs::Metadata) -> anyhow::Result<bool> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let current = match fs::symlink_metadata(path) {
-        Ok(current) => current,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    ensure_owner_only_file(path, &current)?;
-    if current.dev() != expected.dev() || current.ino() != expected.ino() {
-        return Ok(false);
-    }
-    fs::remove_file(path)?;
-    Ok(true)
-}
-
-#[cfg(not(unix))]
-fn remove_file_if_same_inode(_path: &Path, _expected: &fs::Metadata) -> anyhow::Result<bool> {
-    anyhow::bail!("durable submission identity checks require Unix filesystem semantics")
 }
 
 #[cfg(unix)]
@@ -937,13 +836,19 @@ fn try_lock_exclusive(_file: &File) -> std::io::Result<()> {
 mod tests {
     use std::{
         collections::HashSet,
-        fs,
+        fs::{self, File},
         path::{Path, PathBuf},
-        sync::Arc,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{DurableSubmissionEnvelope, DurableSubmissionStore};
+    use super::{
+        DurableSubmissionEnvelope, DurableSubmissionStore, ENVELOPE_VERSION, MAX_ENVELOPE_BYTES,
+        PENDING_FILE_NAME, TEMPORARY_FILE_NAME,
+    };
     use crate::ProverLeaseToken;
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     fn b256(byte: u8) -> String {
         format!("0x{}", format!("{byte:02x}").repeat(32))
@@ -953,20 +858,44 @@ mod tests {
         ProverLeaseToken::from(b256(byte))
     }
 
+    fn envelope(endpoint: &str) -> DurableSubmissionEnvelope {
+        DurableSubmissionEnvelope::fri(
+            endpoint.to_owned(),
+            7,
+            b256(0x11),
+            "proof-secret".to_owned(),
+            lease(0x22),
+        )
+    }
+
     struct TestDirectory(PathBuf);
 
     impl TestDirectory {
         fn new() -> Self {
+            let unique = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "zksync-prover-submission-test-{}",
-                super::unique_file_id()
+                "zksync-prover-submission-test-{}-{nanos}-{unique}",
+                std::process::id()
             ));
             fs::create_dir(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
             Self(path)
         }
 
         fn path(&self) -> &Path {
             &self.0
+        }
+
+        fn spool(&self, name: &str) -> PathBuf {
+            self.path().join(name)
         }
     }
 
@@ -976,26 +905,108 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn durable_envelope_round_trip_is_owner_only_and_redacted() {
+    fn write_private(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        File::open(path).unwrap().sync_all().unwrap();
+    }
+
+    fn write_private_without_sync(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    #[test]
+    fn relative_spool_is_rejected() {
+        let error = DurableSubmissionStore::open(PathBuf::from("relative-spool")).unwrap_err();
+        assert!(error.to_string().contains("explicit absolute path"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaf_symlink_is_rejected_without_mutation_and_owned_directory_is_tightened() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
         let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
+        let target = temporary.spool("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = temporary.spool("linked-spool");
+        symlink(&target, &link).unwrap();
+        assert!(DurableSubmissionStore::open(link).is_err());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        let owned = temporary.spool("owned-spool");
+        fs::create_dir(&owned).unwrap();
+        fs::set_permissions(&owned, fs::Permissions::from_mode(0o777)).unwrap();
+        let store = DurableSubmissionStore::open(owned.clone()).unwrap();
+        assert_eq!(
+            fs::metadata(owned).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        drop(store);
+    }
+
+    // SYSCOIN: Path-based capability operations are safe only when another uid cannot rename a
+    // checked ancestor and redirect publication away from the directory descriptor we fsync.
+    #[cfg(unix)]
+    #[test]
+    fn group_or_world_writable_non_sticky_ancestor_is_rejected() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = TestDirectory::new();
+        let replaceable = temporary.spool("replaceable");
+        let spool = replaceable.join("spool");
+        fs::create_dir_all(&spool).unwrap();
+        fs::set_permissions(&spool, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&replaceable, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let error = DurableSubmissionStore::open(spool).unwrap_err();
+        assert!(format!("{error:#}").contains("replaceable ancestor"));
+    }
+
+    // SYSCOIN: A held descriptor must never be used to fsync one directory while path-based
+    // reads or mutations silently move to a replacement bearing the configured name.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_directory_replacement_fails_closed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = TestDirectory::new();
+        let directory = temporary.spool("spool");
+        let detached = temporary.spool("detached-spool");
         let store = DurableSubmissionStore::open(directory.clone()).unwrap();
-        let vk_hash = b256(0x11);
-        let lease_token = b256(0x22);
+        fs::rename(&directory, &detached).unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = store.ensure_empty().await.unwrap_err();
+        assert!(format!("{error:#}").contains("path changed"));
+    }
+
+    #[tokio::test]
+    async fn durable_envelope_round_trip_is_private_redacted_and_exactly_retired() {
+        let temporary = TestDirectory::new();
+        let directory = temporary.spool("spool");
+        let store = DurableSubmissionStore::open(directory.clone()).unwrap();
         let pending = store
-            .persist(DurableSubmissionEnvelope::fri(
-                "https://sequencer.example/".to_owned(),
-                7,
-                vk_hash,
-                "proof-secret".to_owned(),
-                ProverLeaseToken::from(lease_token.clone()),
-            ))
+            .persist(envelope("https://sequencer.example/"))
             .await
             .unwrap();
         let debug = format!("{:?}", pending.envelope);
         assert!(!debug.contains("proof-secret"));
-        assert!(!debug.contains(&lease_token));
+        assert!(!debug.contains(&b256(0x22)));
 
         #[cfg(unix)]
         {
@@ -1009,297 +1020,80 @@ mod tests {
                 0o600
             );
         }
-        drop(pending);
-        let loaded = store
-            .load_for_endpoint("https://sequencer.example/")
-            .await
-            .unwrap();
-        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            store
+                .load_for_endpoint("https://sequencer.example/")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        store.retire(&pending).await.unwrap();
+        store.ensure_empty().await.unwrap();
+        assert!(!directory.join(PENDING_FILE_NAME).exists());
     }
 
     #[test]
     fn spool_rejects_second_live_owner() {
         let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
+        let directory = temporary.spool("spool");
         let first = DurableSubmissionStore::open(directory.clone()).unwrap();
         let error = DurableSubmissionStore::open(directory).unwrap_err();
         assert!(error.to_string().contains("already owned"));
         drop(first);
     }
 
-    // SYSCOIN: The spool is a dedicated capability namespace. Unknown and non-UTF8 names must
-    // block startup instead of being ignored and allowing a fresh lease behind an orphaned proof.
-    #[cfg(unix)]
-    #[test]
-    fn startup_inventory_rejects_unknown_and_non_utf8_entries() {
-        let temporary = TestDirectory::new();
-        let unknown_directory = temporary.path().join("unknown-spool");
-        fs::create_dir(&unknown_directory).unwrap();
-        fs::write(unknown_directory.join("operator-note"), b"unexpected").unwrap();
-        let error = DurableSubmissionStore::open(unknown_directory).unwrap_err();
-        assert!(error.to_string().contains("unknown entry"));
-
-        // SYSCOIN: APFS rejects arbitrary non-UTF8 names in this sandbox; Linux CI exercises the
-        // raw-byte filename branch that production Linux filesystems permit.
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::ffi::OsStringExt as _;
-
-            let non_utf8_directory = temporary.path().join("non-utf8-spool");
-            fs::create_dir(&non_utf8_directory).unwrap();
-            let non_utf8 = std::ffi::OsString::from_vec(vec![b'p', b'e', b'n', b'd', 0xff]);
-            fs::write(non_utf8_directory.join(non_utf8), b"unexpected").unwrap();
-            let error = DurableSubmissionStore::open(non_utf8_directory).unwrap_err();
-            assert!(format!("{error:#}").contains("non-UTF8 entry"));
-        }
-    }
-
-    // SYSCOIN: Runtime inventory is held to the same closed namespace, and a temporary envelope
-    // that appears after startup is never silently skipped or recovered behind active work.
-    #[cfg(unix)]
     #[tokio::test]
-    async fn runtime_inventory_rejects_unknown_non_utf8_and_temporary_entries() {
+    async fn valid_fsynced_temporary_record_is_promoted_on_restart() {
         let temporary = TestDirectory::new();
-        let directory = temporary.path().join("runtime-spool");
-        let store = DurableSubmissionStore::open(directory.clone()).unwrap();
-
-        let unknown = directory.join("operator-note");
-        fs::write(&unknown, b"unexpected").unwrap();
-        assert!(store
-            .ensure_empty()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("unknown entry"));
-        fs::remove_file(unknown).unwrap();
-
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::ffi::OsStringExt as _;
-
-            let non_utf8 = directory.join(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
-            fs::write(&non_utf8, b"unexpected").unwrap();
-            assert!(format!("{:#}", store.ensure_empty().await.unwrap_err()).contains("non-UTF8"));
-            fs::remove_file(non_utf8).unwrap();
-        }
-
-        let runtime_temporary = directory.join(".pending-runtime.tmp");
-        fs::write(&runtime_temporary, b"incomplete").unwrap();
-        assert!(store
-            .ensure_empty()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("unrecovered temporary"));
-    }
-
-    // SYSCOIN: Directory ownership is checked through a no-follow descriptor before chmod. A
-    // symlink target is rejected without mutation, while a current-user directory is tightened.
-    #[cfg(unix)]
-    #[test]
-    fn spool_directory_is_tightened_only_after_safe_identity_validation() {
-        use std::os::unix::fs::{symlink, PermissionsExt as _};
-
-        let temporary = TestDirectory::new();
-        let target = temporary.path().join("target");
-        fs::create_dir(&target).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
-        let link = temporary.path().join("linked-spool");
-        symlink(&target, &link).unwrap();
-        assert!(DurableSubmissionStore::open(link).is_err());
-        assert_eq!(
-            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-
-        let owned = temporary.path().join("owned-spool");
-        fs::create_dir(&owned).unwrap();
-        fs::set_permissions(&owned, fs::Permissions::from_mode(0o777)).unwrap();
-        let store = DurableSubmissionStore::open(owned.clone()).unwrap();
-        assert_eq!(
-            fs::metadata(&owned).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        drop(store);
-    }
-
-    #[tokio::test]
-    async fn malformed_truncated_and_unknown_endpoint_records_fail_closed() {
-        let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
-        let store = DurableSubmissionStore::open(directory.clone()).unwrap();
-        let malformed = directory.join("pending-bad.json");
-        fs::write(&malformed, b"{\"version\":1").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&malformed, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        assert!(store
-            .load_for_endpoint("https://sequencer.example/")
-            .await
-            .is_err());
-        fs::remove_file(malformed).unwrap();
-
-        store
-            .persist(DurableSubmissionEnvelope::fri(
-                "https://other.example/".to_owned(),
-                1,
-                b256(0x11),
-                "proof".to_owned(),
-                lease(0x22),
-            ))
-            .await
-            .unwrap();
-        let configured = HashSet::from(["https://sequencer.example/".to_owned()]);
-        assert!(store.validate_configured_endpoints(&configured).is_err());
-    }
-
-    #[tokio::test]
-    async fn unknown_envelope_version_fails_closed() {
-        let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
-        let store = DurableSubmissionStore::open(directory.clone()).unwrap();
-        let path = directory.join("pending-future.json");
-        fs::write(
-            &path,
-            format!(
-                r#"{{"version":99,"endpoint":"https://sequencer.example/","stage":"fri","batch_number":1,"vk_hash":"{}","proof":"proof","lease_token":"{}"}}"#,
-                b256(0x11),
-                b256(0x22)
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let error = store
-            .load_for_endpoint("https://sequencer.example/")
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("validate durable submission"));
-    }
-
-    // SYSCOIN: A recovered or manual envelope must satisfy the same V32 scalar and aggregate
-    // shape contract as a freshly decoded sequencer job before any network byte can leave.
-    #[test]
-    fn invalid_envelope_scalars_and_ranges_fail_closed() {
-        let oversized_fri = DurableSubmissionEnvelope::fri(
-            "https://sequencer.example/".to_owned(),
-            u64::from(u32::MAX) + 1,
-            b256(0x11),
-            "proof".to_owned(),
-            lease(0x22),
-        );
-        assert!(oversized_fri
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("fit u32"));
-
-        let malformed_authority = DurableSubmissionEnvelope::fri(
-            "https://sequencer.example/".to_owned(),
-            1,
-            b256(0x11),
-            "proof".to_owned(),
-            ProverLeaseToken::from("not-a-token".to_owned()),
-        );
-        assert!(malformed_authority
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("lease token"));
-
-        let malformed_vk = DurableSubmissionEnvelope::fri(
-            "https://sequencer.example/".to_owned(),
-            1,
-            "not-a-vk".to_owned(),
-            "proof".to_owned(),
-            lease(0x22),
-        );
-        assert!(malformed_vk
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("verification-key hash"));
-
-        for (from, to) in [(7, 7), (7, 107), (8, 7)] {
-            let malformed_range = DurableSubmissionEnvelope::snark(
-                "https://sequencer.example/".to_owned(),
-                from,
-                to,
-                b256(0x11),
-                "proof".to_owned(),
-                lease(0x22),
-            );
-            assert!(
-                malformed_range.validate().is_err(),
-                "accepted {from}..={to}"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn group_readable_envelope_is_rejected() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
-        let store = DurableSubmissionStore::open(directory.clone()).unwrap();
-        let path = directory.join("pending-insecure.json");
-        fs::write(
-            &path,
-            format!(
-                r#"{{"version":1,"endpoint":"https://sequencer.example/","stage":"fri","batch_number":1,"vk_hash":"{}","proof":"proof","lease_token":"{}"}}"#,
-                b256(0x11),
-                b256(0x22)
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-        let error = store
-            .load_for_endpoint("https://sequencer.example/")
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("current-user-owned"));
-    }
-
-    #[test]
-    fn store_is_shared_inside_one_process() {
-        let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
-        let store = DurableSubmissionStore::open(directory).unwrap();
-        let clone = Arc::clone(&store);
-        assert!(Arc::ptr_eq(&store, &clone));
-    }
-
-    // SYSCOIN: Recover the exact crash window between temporary-file fsync and publication.
-    #[tokio::test]
-    async fn valid_fsynced_temporary_record_is_published_on_open() {
-        let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
+        let directory = temporary.spool("recover");
         fs::create_dir(&directory).unwrap();
-        let envelope = DurableSubmissionEnvelope::fri(
-            "https://sequencer.example/".to_owned(),
-            7,
-            b256(0x11),
-            "proof".to_owned(),
-            lease(0x22),
-        );
-        let path = directory.join(".pending-crash.tmp");
-        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         }
+        let temporary_path = directory.join(TEMPORARY_FILE_NAME);
+        write_private(
+            &temporary_path,
+            &serde_json::to_vec(&envelope("https://sequencer.example/")).unwrap(),
+        );
+        File::open(&directory).unwrap().sync_all().unwrap();
 
         let store = DurableSubmissionStore::open(directory.clone()).unwrap();
-        assert!(!path.exists());
-        assert!(directory.join("pending-crash.json").is_file());
+        assert!(!temporary_path.exists());
+        assert!(directory.join(PENDING_FILE_NAME).is_file());
+        assert_eq!(
+            store
+                .load_for_endpoint("https://sequencer.example/")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    // SYSCOIN: A process may die after writing a complete temporary record but before either the
+    // file or its directory entry is fsynced. Recovery must durably anchor both before replay.
+    #[tokio::test]
+    async fn complete_unfsynced_temporary_record_is_durably_promoted_on_restart() {
+        let temporary = TestDirectory::new();
+        let directory = temporary.spool("recover-unsynced");
+        fs::create_dir(&directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let temporary_path = directory.join(TEMPORARY_FILE_NAME);
+        write_private_without_sync(
+            &temporary_path,
+            &serde_json::to_vec(&envelope("https://sequencer.example/")).unwrap(),
+        );
+
+        let store = DurableSubmissionStore::open(directory.clone()).unwrap();
+        assert!(!temporary_path.exists());
+        assert!(directory.join(PENDING_FILE_NAME).is_file());
         assert_eq!(
             store
                 .load_for_endpoint("https://sequencer.example/")
@@ -1311,161 +1105,167 @@ mod tests {
     }
 
     #[test]
-    fn malformed_temporary_record_fails_closed_on_open() {
+    fn ambiguous_temporary_and_pending_records_fail_without_mutation() {
         let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
+        let directory = temporary.spool("ambiguous");
         fs::create_dir(&directory).unwrap();
-        let path = directory.join(".pending-malformed.tmp");
-        fs::write(&path, b"{truncated").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let error = DurableSubmissionStore::open(directory).unwrap_err();
-        assert!(format!("{error:#}").contains("parse durable submission envelope"));
+        let bytes = serde_json::to_vec(&envelope("https://sequencer.example/")).unwrap();
+        write_private(&directory.join(TEMPORARY_FILE_NAME), &bytes);
+        write_private(&directory.join(PENDING_FILE_NAME), &bytes);
+
+        let error = DurableSubmissionStore::open(directory.clone()).unwrap_err();
+        assert!(format!("{error:#}").contains("ambiguous temporary and pending"));
+        assert!(directory.join(TEMPORARY_FILE_NAME).exists());
+        assert!(directory.join(PENDING_FILE_NAME).exists());
     }
 
     #[test]
-    fn multiple_temporary_record_ids_fail_before_publication() {
+    fn malformed_temporary_or_unknown_pending_record_fails_closed() {
         let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
-        fs::create_dir(&directory).unwrap();
-        let envelope = DurableSubmissionEnvelope::fri(
-            "https://sequencer.example/".to_owned(),
-            7,
-            b256(0x11),
-            "proof".to_owned(),
-            lease(0x22),
-        );
-        let serialized = serde_json::to_vec(&envelope).unwrap();
-        for id in ["first", "second"] {
-            let path = directory.join(format!(".pending-{id}.tmp"));
-            fs::write(&path, &serialized).unwrap();
+        for (name, record_name, bytes) in [
+            ("malformed", TEMPORARY_FILE_NAME, b"{truncated".to_vec()),
+            (
+                "unknown-field",
+                PENDING_FILE_NAME,
+                format!(
+                    r#"{{"version":1,"endpoint":"https://sequencer.example/","stage":"fri","batch_number":7,"vk_hash":"{}","proof":"proof","lease_token":"{}","unexpected":true}}"#,
+                    b256(0x11),
+                    b256(0x22)
+                )
+                .into_bytes(),
+            ),
+        ] {
+            let directory = temporary.spool(name);
+            fs::create_dir(&directory).unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
             }
+            let record = directory.join(record_name);
+            write_private(&record, &bytes);
+            assert!(DurableSubmissionStore::open(directory.clone()).is_err());
+            assert!(record.exists());
         }
-
-        let error = DurableSubmissionStore::open(directory.clone()).unwrap_err();
-        assert!(format!("{error:#}").contains("multiple unresolved record identifiers"));
-        assert!(!directory.join("pending-first.json").exists());
-        assert!(!directory.join("pending-second.json").exists());
     }
 
-    // SYSCOIN: Only the writer's two hard links authorize recovery cleanup. Equal JSON copied into
-    // separate inodes is ambiguous/manual state and must remain untouched for operator inspection.
-    #[cfg(unix)]
     #[test]
-    fn equal_temporary_and_final_records_on_distinct_inodes_fail_without_mutation() {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
+    fn unsupported_version_and_group_readable_pending_record_fail_closed() {
         let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
-        fs::create_dir(&directory).unwrap();
-        let envelope = DurableSubmissionEnvelope::fri(
-            "https://sequencer.example/".to_owned(),
-            7,
-            b256(0x11),
-            "proof".to_owned(),
-            lease(0x22),
-        );
-        let serialized = serde_json::to_vec(&envelope).unwrap();
-        let temporary_path = directory.join(".pending-crash.tmp");
-        let final_path = directory.join("pending-crash.json");
-        fs::write(&temporary_path, &serialized).unwrap();
-        fs::write(&final_path, &serialized).unwrap();
-        fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o600)).unwrap();
-        fs::set_permissions(&final_path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_ne!(
-            fs::metadata(&temporary_path).unwrap().ino(),
-            fs::metadata(&final_path).unwrap().ino()
-        );
 
-        let error = DurableSubmissionStore::open(directory).unwrap_err();
-        assert!(format!("{error:#}").contains("do not identify one 2-link inode"));
-        assert_eq!(fs::read(&temporary_path).unwrap(), serialized);
-        assert_eq!(fs::read(&final_path).unwrap(), serialized);
+        let future_directory = temporary.spool("future");
+        fs::create_dir(&future_directory).unwrap();
+        let mut future = envelope("https://sequencer.example/");
+        future.version = ENVELOPE_VERSION + 1;
+        let future_path = future_directory.join(PENDING_FILE_NAME);
+        write_private(&future_path, &serde_json::to_vec(&future).unwrap());
+        let error = DurableSubmissionStore::open(future_directory).unwrap_err();
+        assert!(format!("{error:#}").contains("unsupported durable submission envelope version"));
+        assert!(future_path.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let broad_directory = temporary.spool("broad-mode");
+            fs::create_dir(&broad_directory).unwrap();
+            let broad_path = broad_directory.join(PENDING_FILE_NAME);
+            write_private(
+                &broad_path,
+                &serde_json::to_vec(&envelope("https://sequencer.example/")).unwrap(),
+            );
+            fs::set_permissions(&broad_path, fs::Permissions::from_mode(0o640)).unwrap();
+            let error = DurableSubmissionStore::open(broad_directory).unwrap_err();
+            assert!(format!("{error:#}").contains("mode 0600"));
+            assert!(broad_path.exists());
+        }
     }
 
     #[tokio::test]
-    async fn spool_allows_only_one_unresolved_envelope_globally() {
+    async fn runtime_temporary_record_blocks_fresh_work() {
         let temporary = TestDirectory::new();
-        let store = DurableSubmissionStore::open(temporary.path().join("spool")).unwrap();
-        store
-            .persist(DurableSubmissionEnvelope::fri(
-                "https://a.example/".to_owned(),
-                1,
-                b256(0x11),
-                "proof-a".to_owned(),
-                lease(0xaa),
-            ))
-            .await
-            .unwrap();
-        let error = store
-            .persist(DurableSubmissionEnvelope::fri(
-                "https://b.example/".to_owned(),
-                2,
-                b256(0x11),
-                "proof-b".to_owned(),
-                lease(0xbb),
-            ))
-            .await
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("already has an unresolved envelope"));
-    }
-
-    #[tokio::test]
-    async fn startup_rejects_multiple_final_envelopes_instead_of_ordering_them() {
-        let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
+        let directory = temporary.spool("runtime-temporary");
         let store = DurableSubmissionStore::open(directory.clone()).unwrap();
-        let pending = store
-            .persist(DurableSubmissionEnvelope::fri(
-                "https://sequencer.example/".to_owned(),
-                1,
-                b256(0x11),
-                "proof".to_owned(),
-                lease(0x22),
-            ))
-            .await
-            .unwrap();
-        fs::copy(&pending.path, directory.join("pending-duplicate.json")).unwrap();
+        let temporary_path = directory.join(TEMPORARY_FILE_NAME);
+        write_private(&temporary_path, b"{partial");
+        let error = store.ensure_empty().await.unwrap_err();
+        assert!(error.to_string().contains("unrecovered temporary"));
+        assert!(temporary_path.exists());
+    }
 
-        let configured = HashSet::from(["https://sequencer.example/".to_owned()]);
-        let error = store
-            .validate_configured_endpoints(&configured)
-            .unwrap_err();
-        assert!(error.to_string().contains("multiple unresolved envelopes"));
+    #[test]
+    fn oversized_record_and_unknown_inventory_entry_fail_closed() {
+        let temporary = TestDirectory::new();
+        let oversized_directory = temporary.spool("oversized");
+        fs::create_dir(&oversized_directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&oversized_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let oversized = oversized_directory.join(PENDING_FILE_NAME);
+        let file = File::create(&oversized).unwrap();
+        file.set_len(MAX_ENVELOPE_BYTES + 1).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(DurableSubmissionStore::open(oversized_directory).is_err());
+
+        let unknown_directory = temporary.spool("unknown");
+        fs::create_dir(&unknown_directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&unknown_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(unknown_directory.join("operator-note"), b"unexpected").unwrap();
+        assert!(DurableSubmissionStore::open(unknown_directory).is_err());
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let non_utf8_directory = temporary.spool("non-utf8");
+            fs::create_dir(&non_utf8_directory).unwrap();
+            let name = std::ffi::OsString::from_vec(vec![b'p', b'e', b'n', b'd', 0xff]);
+            fs::write(non_utf8_directory.join(name), b"unexpected").unwrap();
+            let error = DurableSubmissionStore::open(non_utf8_directory).unwrap_err();
+            assert!(format!("{error:#}").contains("non-UTF8 entry"));
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_binding_and_single_global_pending_record_are_enforced() {
+        let temporary = TestDirectory::new();
+        let store = DurableSubmissionStore::open(temporary.spool("spool")).unwrap();
+        store.persist(envelope("https://a.example/")).await.unwrap();
+        let configured = HashSet::from(["https://b.example/".to_owned()]);
+        assert!(store.validate_configured_endpoints(&configured).is_err());
+        assert!(store.persist(envelope("https://b.example/")).await.is_err());
     }
 
     #[tokio::test]
     async fn exact_wire_body_limit_is_enforced_before_publication() {
         let temporary = TestDirectory::new();
-        let directory = temporary.path().join("spool");
+        let directory = temporary.spool("spool");
         let store = DurableSubmissionStore::open(directory.clone()).unwrap();
-        let error = store
-            .persist(DurableSubmissionEnvelope::fri(
-                "https://sequencer.example/".to_owned(),
-                1,
-                b256(0x11),
-                "x".repeat(crate::MAX_PROOF_SUBMISSION_BODY_BYTES),
-                lease(0x22),
-            ))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("server maximum"));
-        assert_eq!(
-            fs::read_dir(directory)
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("pending-"))
-                .count(),
-            0
+        let oversized = DurableSubmissionEnvelope::fri(
+            "https://sequencer.example/".to_owned(),
+            1,
+            b256(0x11),
+            "x".repeat(crate::MAX_PROOF_SUBMISSION_BODY_BYTES),
+            lease(0x22),
         );
+        let error = store.persist(oversized).await.unwrap_err();
+        assert!(error.to_string().contains("server maximum"));
+        assert!(!directory.join(TEMPORARY_FILE_NAME).exists());
+        assert!(!directory.join(PENDING_FILE_NAME).exists());
     }
 }
