@@ -39,7 +39,7 @@ jobs:
     uses: ./.github/workflows/release-bins.yml
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
-      # SYSCOIN: release-please creates the tag at this caller commit; pass that source identity
-      # explicitly so the reusable builder does not infer it from its event context.
-      source_sha: ${{ github.sha }}
+      # SYSCOIN: Use release-please's exact root-release `sha` output rather than assuming its tag
+      # targets the workflow event commit. The pinned reusable wrapper exposes all action outputs.
+      source_sha: ${{ fromJSON(needs.release-please.outputs.all).sha }}
     secrets: inherit
