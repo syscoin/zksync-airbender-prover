@@ -555,10 +555,11 @@ pub async fn run_inner(
             return Ok(ProofRunOutcome::NoJob);
         }
         Err(e) => {
-            // SYSCOIN: HTTP 200 transfers the range lease before bounded payload decoding.
+            // SYSCOIN: The pick acquired or may have acquired a range lease; endpoint fallback
+            // could create two live assignments for this worker.
             if error_follows_job_acquisition(&e) {
                 return Err(e).context(
-                    "SNARK lease was acquired but its response was invalid; no endpoint fallback is allowed",
+                    "SNARK pick may have acquired a lease; no endpoint fallback is allowed",
                 );
             }
             // Check if the error is a timeout error

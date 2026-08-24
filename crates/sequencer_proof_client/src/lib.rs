@@ -24,13 +24,19 @@ pub use sequencer_proof_client::SequencerProofClient;
 pub const PROVER_DISPOSITION_HEADER: &str = "x-syscoin-prover-disposition";
 pub const PROVER_DISPOSITION_ACCEPTED: &str = "accepted";
 pub const PROVER_DISPOSITION_REJECTED: &str = "rejected";
+/// SYSCOIN: A trusted sequencer marks only enumerated failures known to precede pick assignment.
+/// Missing, duplicated, or rewritten markers remain acquisition-ambiguous at the client.
+pub const PROVER_PICK_OUTCOME_HEADER: &str = "x-syscoin-prover-pick-outcome";
+pub const PROVER_PICK_OUTCOME_UNLEASED: &str = "unleased";
 
 /// SYSCOIN: Match the server's exact decompressed request-body ceiling before publishing a
 /// durable envelope. A proof that cannot fit is fatal and must not be followed by a fresh pick.
 pub const MAX_PROOF_SUBMISSION_BODY_BYTES: usize = 10 * 1024 * 1024;
-/// SYSCOIN: Bound every decompressed response class independently of Content-Length. SNARK picks
-/// carry many FRI proofs, while status and single-FRI diagnostics have much smaller honest bounds.
-pub const MAX_FRI_JOB_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+/// SYSCOIN: Advertise and enforce the current production host/proxy response budget. This is not
+/// a canonical V8 witness bound: a larger job stays unleased until fleet capacity is raised.
+pub const MAX_FRI_PICK_RESPONSE_BYTES: usize = 384 * 1024 * 1024;
+/// SYSCOIN: Authority-free diagnostics retain their smaller independent defensive ceiling.
+pub const MAX_FRI_PEEK_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SNARK_JOB_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_STATUS_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_FRI_DIAGNOSTIC_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -363,14 +369,14 @@ pub enum ProofRunOutcome {
     ProofSubmitted,
 }
 
-/// SYSCOIN: Marks failures after an HTTP 200 pick has already transferred lease ownership. Worker
-/// loops must terminate rather than treating malformed/oversize job material as endpoint absence.
+/// SYSCOIN: Marks failures for which a state-changing pick is known or may have transferred lease
+/// ownership. Worker loops must terminate rather than treating an ambiguous outcome as absence.
 #[derive(Debug)]
 pub struct LeasedJobResponseError(anyhow::Error);
 
 impl fmt::Display for LeasedJobResponseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "invalid leased job response: {}", self.0)
+        write!(formatter, "pick may have acquired a lease: {}", self.0)
     }
 }
 
@@ -380,10 +386,12 @@ impl std::error::Error for LeasedJobResponseError {
     }
 }
 
-pub(crate) fn leased_job_response_error(error: anyhow::Error) -> anyhow::Error {
+pub(crate) fn job_acquisition_error(error: anyhow::Error) -> anyhow::Error {
     LeasedJobResponseError(error).into()
 }
 
+/// SYSCOIN: `true` means a lease is known or conservatively presumed to exist, so workers must
+/// fail closed instead of trying another endpoint.
 pub fn error_follows_job_acquisition(error: &anyhow::Error) -> bool {
     error.downcast_ref::<LeasedJobResponseError>().is_some()
 }

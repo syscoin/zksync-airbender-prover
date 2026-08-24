@@ -1,5 +1,5 @@
-// SYSCOIN: Extend the upstream HTTP client with bounded transport, durable exact-capability
-// replay, and cooperative shutdown primitives used by production FRI and SNARK workers.
+// SYSCOIN: Extend the upstream HTTP client with bounded diagnostic transport, durable exact-
+// capability replay, and cooperative shutdown primitives used by production FRI and SNARK workers.
 use std::{
     collections::HashSet,
     future::pending,
@@ -17,9 +17,10 @@ use crate::{
     FailedFriProofPayload, FriJobInputs, GetSnarkProofPayload, JobQueueStage, JobStatusPayload,
     NextFriProverJobPayload, PeekFriProverJobPayload, PeekSnarkProofInputs, PeekSnarkProofPayload,
     PeekableProofClient, ProofClient, ProverLeaseToken, QueueJobStatus, SnarkProofInputs,
-    MAX_FRI_DIAGNOSTIC_RESPONSE_BYTES, MAX_FRI_JOB_RESPONSE_BYTES, MAX_PROOF_SUBMISSION_BODY_BYTES,
-    MAX_SNARK_JOB_RESPONSE_BYTES, MAX_STATUS_RESPONSE_BYTES, PROVER_DISPOSITION_ACCEPTED,
-    PROVER_DISPOSITION_HEADER, PROVER_DISPOSITION_REJECTED,
+    MAX_FRI_DIAGNOSTIC_RESPONSE_BYTES, MAX_FRI_PEEK_RESPONSE_BYTES, MAX_FRI_PICK_RESPONSE_BYTES,
+    MAX_PROOF_SUBMISSION_BODY_BYTES, MAX_SNARK_JOB_RESPONSE_BYTES, MAX_STATUS_RESPONSE_BYTES,
+    PROVER_DISPOSITION_ACCEPTED, PROVER_DISPOSITION_HEADER, PROVER_DISPOSITION_REJECTED,
+    PROVER_PICK_OUTCOME_HEADER, PROVER_PICK_OUTCOME_UNLEASED,
 };
 use crate::{L2BatchNumber, SEQUENCER_CLIENT_METRICS};
 use anyhow::{anyhow, Context};
@@ -81,6 +82,8 @@ pub struct SequencerProofClient {
     endpoint: Url,
     prover_name: String,
     supported_vk_hashes: Vec<String>,
+    // SYSCOIN: Sent before assignment and reused as the exact decompressed critical-read bound.
+    max_fri_pick_response_bytes: usize,
     // SYSCOIN: Production clients durably own exact proof/capability envelopes across crashes.
     submission_store: Option<Arc<DurableSubmissionStore>>,
     // SYSCOIN: Submission retries observe the process stop signal without discarding the envelope.
@@ -236,6 +239,7 @@ impl SequencerProofClient {
             endpoint: endpoint_identity,
             prover_name,
             supported_vk_hashes,
+            max_fri_pick_response_bytes: MAX_FRI_PICK_RESPONSE_BYTES,
             submission_store,
             shutdown,
         })
@@ -368,17 +372,22 @@ impl SequencerProofClient {
         Ok(url)
     }
 
-    /// Query string for pick requests: prover id plus, if declared, the supported VK hashes.
+    /// SYSCOIN: Query string for pick requests: prover id, FRI response capacity, and any
+    /// supported hashes.
     /// Sequencers aware of `supported_vk_hashes` only assign jobs of these versions;
     /// older sequencers ignore the parameter.
     fn pick_query(&self) -> String {
         if self.supported_vk_hashes.is_empty() {
-            format!("id={}", self.prover_name)
+            format!(
+                "id={}&max_fri_pick_response_bytes={}",
+                self.prover_name, self.max_fri_pick_response_bytes
+            )
         } else {
             format!(
-                "id={}&supported_vk_hashes={}",
+                "id={}&supported_vk_hashes={}&max_fri_pick_response_bytes={}",
                 self.prover_name,
-                self.supported_vk_hashes.join(",")
+                self.supported_vk_hashes.join(","),
+                self.max_fri_pick_response_bytes
             )
         }
     }
@@ -670,6 +679,43 @@ fn submission_transport_error_is_retryable(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
 }
 
+// SYSCOIN: Pick POSTs can mutate server state before response headers arrive. Only a connector
+// failure proves that request dispatch never reached the sequencer; every other send failure is
+// acquisition-ambiguous and must prevent multi-endpoint fallback.
+fn classify_pick_send_error(error: reqwest::Error, stage: &'static str) -> anyhow::Error {
+    let connection_establishment_failed = error.is_connect();
+    let error = anyhow::Error::new(error).context(format!("{stage} pick request failed"));
+    if connection_establishment_failed {
+        error
+    } else {
+        crate::job_acquisition_error(error)
+    }
+}
+
+// SYSCOIN: Trust only the exact singleton application marker on statuses emitted by explicit
+// pre-assignment branches. A stripped, duplicated, rewritten, or broadly injected marker fails
+// closed, as does every status that could have followed assignment.
+fn pick_response_is_definitively_unleased(
+    response: &reqwest::Response,
+    stage: JobQueueStage,
+) -> bool {
+    let mut outcomes = response
+        .headers()
+        .get_all(PROVER_PICK_OUTCOME_HEADER)
+        .iter();
+    let Some(outcome) = outcomes.next().and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    outcomes.next().is_none()
+        && outcome == PROVER_PICK_OUTCOME_UNLEASED
+        && matches!(
+            (stage, response.status()),
+            (JobQueueStage::Fri, StatusCode::TOO_MANY_REQUESTS)
+                | (JobQueueStage::Snark, StatusCode::TOO_MANY_REQUESTS)
+                | (JobQueueStage::Snark, StatusCode::INTERNAL_SERVER_ERROR)
+        )
+}
+
 // SYSCOIN: A status code alone can be emitted by a proxy, JSON extractor, or body limiter. Retire
 // only an exact single application marker paired with the manager's enumerated terminal status.
 fn submission_response_is_definitive(response: &reqwest::Response) -> bool {
@@ -740,20 +786,25 @@ fn validate_peek_vk(vk_hash: &str) -> anyhow::Result<()> {
     crate::validate_b256_wire_value(vk_hash, "verification-key hash")
 }
 
-// SYSCOIN: Bound decoded FRI execution input independently of JSON/base64 expansion.
-fn decode_fri_input_bounded(encoded: &str) -> anyhow::Result<Vec<u8>> {
-    anyhow::ensure!(
-        encoded.len() <= MAX_FRI_JOB_RESPONSE_BYTES,
-        "encoded FRI prover input exceeds {} bytes",
-        MAX_FRI_JOB_RESPONSE_BYTES
-    );
-    let data = STANDARD
+// SYSCOIN: Match upstream's canonical critical-pick decode without imposing a downstream byte cap.
+fn decode_fri_input(encoded: &str) -> anyhow::Result<Vec<u8>> {
+    STANDARD
         .decode(encoded)
-        .map_err(|error| anyhow!("Failed to decode batch data: {error}"))?;
+        .map_err(|error| anyhow!("Failed to decode batch data: {error}"))
+}
+
+// SYSCOIN: Authority-free FRI peeks remain bounded independently of JSON/base64 expansion.
+fn decode_fri_peek_input_bounded(encoded: &str) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(
-        data.len() <= MAX_FRI_JOB_RESPONSE_BYTES,
-        "decoded FRI prover input exceeds {} bytes",
-        MAX_FRI_JOB_RESPONSE_BYTES
+        encoded.len() <= MAX_FRI_PEEK_RESPONSE_BYTES,
+        "encoded FRI peek input exceeds {} bytes",
+        MAX_FRI_PEEK_RESPONSE_BYTES
+    );
+    let data = decode_fri_input(encoded)?;
+    anyhow::ensure!(
+        data.len() <= MAX_FRI_PEEK_RESPONSE_BYTES,
+        "decoded FRI peek input exceeds {} bytes",
+        MAX_FRI_PEEK_RESPONSE_BYTES
     );
     Ok(data)
 }
@@ -796,12 +847,13 @@ impl ProofClient for SequencerProofClient {
 
         let started_at = Instant::now();
 
+        // SYSCOIN: A post-dispatch transport failure is lease-ambiguous, not endpoint absence.
         let resp = self
             .client
             .post(url.clone())
             .send()
             .await
-            .context("Pick Fri Job request failed")?;
+            .map_err(|error| classify_pick_send_error(error, "FRI"))?;
 
         SEQUENCER_CLIENT_METRICS.time_taken[&Method::PickFri]
             .observe(started_at.elapsed().as_secs_f64());
@@ -811,15 +863,18 @@ impl ProofClient for SequencerProofClient {
                 // SYSCOIN: HTTP 200 means the server already assigned a lease. Mark every parse,
                 // authority, version, and allocation failure so worker loops cannot try endpoint B.
                 let parsed = async {
+                    // SYSCOIN: Reuse the pre-lease advertised scalar as a streaming decompressed
+                    // read bound. A compromised endpoint cannot exceed the capacity it was told.
                     let body: NextFriProverJobPayload =
-                        read_json_bounded(resp, MAX_FRI_JOB_RESPONSE_BYTES, "FRI pick").await?;
+                        read_json_bounded(resp, self.max_fri_pick_response_bytes, "FRI pick")
+                            .await?;
                     validate_pick_authority(&body.vk_hash, &body.lease_token)?;
                     anyhow::ensure!(
                         self.supported_vk_hashes.is_empty()
                             || self.supported_vk_hashes.contains(&body.vk_hash),
                         "FRI pick returned a VK hash this prover did not advertise"
                     );
-                    let data = decode_fri_input_bounded(&body.prover_input)?;
+                    let data = decode_fri_input(&body.prover_input)?;
                     Ok::<_, anyhow::Error>(FriJobInputs {
                         batch_number: body.batch_number,
                         vk_hash: body.vk_hash,
@@ -828,12 +883,19 @@ impl ProofClient for SequencerProofClient {
                     })
                 }
                 .await;
-                parsed.map(Some).map_err(crate::leased_job_response_error)
+                parsed.map(Some).map_err(crate::job_acquisition_error)
             }
             StatusCode::NO_CONTENT => Ok(None),
-            s => Err(anyhow!(
-                "Unexpected status {s} when fetching next batch at address {url}"
+            // SYSCOIN: Only an exact application marker can establish that an allowlisted error
+            // preceded assignment. Old servers and proxy-generated responses remain fail-closed.
+            s if pick_response_is_definitively_unleased(&resp, JobQueueStage::Fri) => Err(anyhow!(
+                "sequencer returned pre-assignment FRI pick status {s} at address {url}"
             )),
+            // SYSCOIN: A proxy or later handler may replace the response after assignment. Any
+            // unmarked or malformed outcome remains acquisition-ambiguous.
+            s => Err(crate::job_acquisition_error(anyhow!(
+                "unexpected status {s} when fetching next FRI batch at address {url}"
+            ))),
         }
     }
 
@@ -924,12 +986,13 @@ impl ProofClient for SequencerProofClient {
 
         let started_at = Instant::now();
 
+        // SYSCOIN: Apply the identical fail-closed pick boundary to aggregate-range assignment.
         let resp = self
             .client
             .post(url.clone())
             .send()
             .await
-            .context("Pick Snark Job request failed")?;
+            .map_err(|error| classify_pick_send_error(error, "SNARK"))?;
 
         SEQUENCER_CLIENT_METRICS.time_taken[&Method::PickSnark]
             .observe(started_at.elapsed().as_secs_f64());
@@ -955,10 +1018,19 @@ impl ProofClient for SequencerProofClient {
                         .context("failed to parse SnarkProofPayload")
                 }
                 .await;
-                parsed.map(Some).map_err(crate::leased_job_response_error)
+                parsed.map(Some).map_err(crate::job_acquisition_error)
             }
             StatusCode::NO_CONTENT => Ok(None),
-            s => Err(anyhow!("Failed to pick SNARK job: status {s} from {url}")),
+            // SYSCOIN: Preserve multi-endpoint liveness only for the sequencer's exact singleton
+            // pre-assignment marker on an allowlisted status.
+            s if pick_response_is_definitively_unleased(&resp, JobQueueStage::Snark) => Err(
+                anyhow!("sequencer returned pre-assignment SNARK pick status {s} at {url}"),
+            ),
+            // SYSCOIN: As for FRI, an unrecognized response cannot prove that the range remained
+            // unassigned; keep the worker on this endpoint's recovery path.
+            s => Err(crate::job_acquisition_error(anyhow!(
+                "unexpected status {s} when fetching next SNARK range from {url}"
+            ))),
         }
     }
 
@@ -1017,14 +1089,14 @@ impl PeekableProofClient for SequencerProofClient {
         match resp.status() {
             StatusCode::OK => {
                 let body: PeekFriProverJobPayload =
-                    read_json_bounded(resp, MAX_FRI_JOB_RESPONSE_BYTES, "FRI peek").await?;
+                    read_json_bounded(resp, MAX_FRI_PEEK_RESPONSE_BYTES, "FRI peek").await?;
                 validate_peek_vk(&body.vk_hash)?;
                 anyhow::ensure!(
                     body.batch_number == batch_number,
                     "FRI peek returned batch {}, expected {batch_number}",
                     body.batch_number
                 );
-                let data = decode_fri_input_bounded(&body.prover_input)?;
+                let data = decode_fri_peek_input_bounded(&body.prover_input)?;
                 Ok(Some((body.batch_number, data)))
             }
             StatusCode::NO_CONTENT => Ok(None),
@@ -1160,10 +1232,18 @@ mod tests {
 
     enum ScriptedHttpReply {
         DropConnection,
+        // SYSCOIN: Simulate assignment before a response-header timeout closes the connection.
+        DelayedDropConnection(Duration),
         Status(&'static str),
+        // SYSCOIN: Exercise exact, duplicated, malformed, and status-mismatched pick outcomes.
+        PickOutcome(&'static str, &'static [&'static str]),
         Disposition(&'static str, &'static str),
         DelayedDisposition(Duration, &'static str, &'static str),
         DeclaredBody(&'static str, usize),
+        // SYSCOIN: Exercise a complete critical-pick JSON response, not only declared lengths.
+        Body(&'static str, Vec<u8>),
+        // SYSCOIN: Exercise the streaming bound when no trustworthy Content-Length exists.
+        ChunkedBody(&'static str, Vec<Vec<u8>>),
         Redirect(String),
     }
 
@@ -1213,9 +1293,24 @@ mod tests {
                     ScriptedHttpReply::DropConnection => {
                         stream.shutdown(Shutdown::Both).unwrap();
                     }
+                    ScriptedHttpReply::DelayedDropConnection(delay) => {
+                        std::thread::sleep(delay);
+                        let _ = stream.shutdown(Shutdown::Both);
+                    }
                     ScriptedHttpReply::Status(status) => {
                         let response = format!(
                             "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        stream.write_all(response.as_bytes()).unwrap();
+                        stream.flush().unwrap();
+                    }
+                    ScriptedHttpReply::PickOutcome(status, outcomes) => {
+                        let headers = outcomes
+                            .iter()
+                            .map(|outcome| format!("{PROVER_PICK_OUTCOME_HEADER}: {outcome}\r\n"))
+                            .collect::<String>();
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\n{headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
                         );
                         stream.write_all(response.as_bytes()).unwrap();
                         stream.flush().unwrap();
@@ -1240,6 +1335,28 @@ mod tests {
                             "HTTP/1.1 {status}\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
                         );
                         stream.write_all(response.as_bytes()).unwrap();
+                        stream.flush().unwrap();
+                    }
+                    ScriptedHttpReply::Body(status, body) => {
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        stream.write_all(response.as_bytes()).unwrap();
+                        stream.write_all(&body).unwrap();
+                        stream.flush().unwrap();
+                    }
+                    ScriptedHttpReply::ChunkedBody(status, chunks) => {
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                        );
+                        stream.write_all(response.as_bytes()).unwrap();
+                        for chunk in chunks {
+                            write!(stream, "{:x}\r\n", chunk.len()).unwrap();
+                            stream.write_all(&chunk).unwrap();
+                            stream.write_all(b"\r\n").unwrap();
+                        }
+                        stream.write_all(b"0\r\n\r\n").unwrap();
                         stream.flush().unwrap();
                     }
                     ScriptedHttpReply::Redirect(location) => {
@@ -1269,6 +1386,132 @@ mod tests {
         assert_eq!(url.username(), "");
         assert_eq!(url.password(), None);
         assert_eq!(url.as_str(), "http://localhost:3124/");
+    }
+
+    // SYSCOIN: Receiving the complete POST is the simulated assignment boundary. A later read
+    // timeout/drop is ambiguous for both state-changing pick APIs and must block endpoint fallback.
+    #[tokio::test]
+    async fn fri_and_snark_post_dispatch_pick_failures_are_marked() {
+        let (endpoint, request_bodies, server) = scripted_http_server(vec![
+            ScriptedHttpReply::DelayedDropConnection(Duration::from_millis(75)),
+            ScriptedHttpReply::DelayedDropConnection(Duration::from_millis(75)),
+        ]);
+        let client = SequencerProofClient::new_with_timeouts(
+            endpoint,
+            "test-prover".to_owned(),
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+            vec![],
+        )
+        .unwrap();
+
+        let fri_error = client.pick_fri_job().await.unwrap_err();
+        assert!(crate::error_follows_job_acquisition(&fri_error));
+        assert!(format!("{fri_error:#}").contains("pick may have acquired a lease"));
+
+        let snark_error = client.pick_snark_job().await.unwrap_err();
+        assert!(crate::error_follows_job_acquisition(&snark_error));
+        assert!(format!("{snark_error:#}").contains("pick may have acquired a lease"));
+
+        server.join().unwrap();
+        assert_eq!(
+            request_bodies.lock().unwrap().len(),
+            2,
+            "both picks must have crossed the server-side assignment boundary"
+        );
+    }
+
+    // SYSCOIN: An exact connection refusal occurs before request dispatch, so workers may still
+    // try another configured endpoint without risking an abandoned lease.
+    #[tokio::test]
+    async fn fri_and_snark_connection_refusal_remains_fallback_eligible() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let endpoint = SequencerEndpoint::parse(&format!("http://{address}")).unwrap();
+        let client = SequencerProofClient::new_with_timeouts(
+            endpoint,
+            "test-prover".to_owned(),
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            vec![],
+        )
+        .unwrap();
+
+        let fri_error = client.pick_fri_job().await.unwrap_err();
+        assert!(!crate::error_follows_job_acquisition(&fri_error));
+        assert!(fri_error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_connect));
+
+        let snark_error = client.pick_snark_job().await.unwrap_err();
+        assert!(!crate::error_follows_job_acquisition(&snark_error));
+        assert!(snark_error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_connect));
+    }
+
+    // SYSCOIN: Any response outside the pick protocol's exact 200/204 contract is ambiguous: an
+    // intermediary or late handler failure does not prove that the sequencer skipped assignment.
+    #[tokio::test]
+    async fn fri_and_snark_unexpected_pick_statuses_are_marked() {
+        let (endpoint, request_bodies, server) = scripted_http_server(vec![
+            ScriptedHttpReply::Status("429 Too Many Requests"),
+            ScriptedHttpReply::Status("500 Internal Server Error"),
+        ]);
+        let client =
+            SequencerProofClient::new(endpoint, "test-prover".to_owned(), None, vec![]).unwrap();
+
+        let fri_error = client.pick_fri_job().await.unwrap_err();
+        assert!(crate::error_follows_job_acquisition(&fri_error));
+        assert!(format!("{fri_error:#}").contains("unexpected status 429"));
+
+        let snark_error = client.pick_snark_job().await.unwrap_err();
+        assert!(crate::error_follows_job_acquisition(&snark_error));
+        assert!(format!("{snark_error:#}").contains("unexpected status 500"));
+
+        server.join().unwrap();
+        assert_eq!(request_bodies.lock().unwrap().len(), 2);
+    }
+
+    // SYSCOIN: Only one exact application marker on an allowlisted pre-assignment status permits
+    // fallback. Duplicate, wrong-value, and status-mismatched markers remain lease-ambiguous.
+    #[tokio::test]
+    async fn exact_unleased_pick_outcome_is_narrowly_accepted() {
+        const UNLEASED: &[&str] = &[PROVER_PICK_OUTCOME_UNLEASED];
+        const DUPLICATE: &[&str] = &[PROVER_PICK_OUTCOME_UNLEASED, PROVER_PICK_OUTCOME_UNLEASED];
+        const WRONG: &[&str] = &["unknown"];
+        let (endpoint, request_bodies, server) = scripted_http_server(vec![
+            ScriptedHttpReply::PickOutcome("429 Too Many Requests", UNLEASED),
+            ScriptedHttpReply::PickOutcome("429 Too Many Requests", UNLEASED),
+            ScriptedHttpReply::PickOutcome("500 Internal Server Error", UNLEASED),
+            ScriptedHttpReply::PickOutcome("500 Internal Server Error", UNLEASED),
+            ScriptedHttpReply::PickOutcome("429 Too Many Requests", DUPLICATE),
+            ScriptedHttpReply::PickOutcome("500 Internal Server Error", WRONG),
+            ScriptedHttpReply::PickOutcome("503 Service Unavailable", UNLEASED),
+        ]);
+        let client =
+            SequencerProofClient::new(endpoint, "test-prover".to_owned(), None, vec![]).unwrap();
+
+        for error in [
+            client.pick_fri_job().await.unwrap_err(),
+            client.pick_snark_job().await.unwrap_err(),
+            client.pick_snark_job().await.unwrap_err(),
+        ] {
+            assert!(!crate::error_follows_job_acquisition(&error));
+            assert!(format!("{error:#}").contains("pre-assignment"));
+        }
+        for error in [
+            client.pick_fri_job().await.unwrap_err(),
+            client.pick_fri_job().await.unwrap_err(),
+            client.pick_snark_job().await.unwrap_err(),
+            client.pick_fri_job().await.unwrap_err(),
+        ] {
+            assert!(crate::error_follows_job_acquisition(&error));
+        }
+
+        server.join().unwrap();
+        assert_eq!(request_bodies.lock().unwrap().len(), 7);
     }
 
     #[test]
@@ -1387,7 +1630,10 @@ mod tests {
         let client = SequencerProofClient::new(endpoint, "test_prover".to_string(), None, vec![])
             .expect("failed to create client");
 
-        assert_eq!(client.pick_query(), "id=test_prover");
+        assert_eq!(
+            client.pick_query(),
+            format!("id=test_prover&max_fri_pick_response_bytes={MAX_FRI_PICK_RESPONSE_BYTES}")
+        );
     }
 
     #[test]
@@ -1405,7 +1651,9 @@ mod tests {
 
         assert_eq!(
             client.pick_query(),
-            format!("id=test_prover&supported_vk_hashes={first},{second}")
+            format!(
+                "id=test_prover&supported_vk_hashes={first},{second}&max_fri_pick_response_bytes={MAX_FRI_PICK_RESPONSE_BYTES}"
+            )
         );
     }
 
@@ -1873,17 +2121,79 @@ mod tests {
         );
     }
 
+    // SYSCOIN: Lock the production/diagnostic split without allocating a 64 MiB fixture in every
+    // unit-test run. The critical pick accepts a valid body above this scaled former ceiling.
     #[tokio::test]
-    async fn oversized_decompressed_pick_is_marked_as_post_acquisition_failure() {
+    async fn fri_pick_accepts_payload_above_scaled_former_ceiling() {
+        const SCALED_FORMER_CEILING: usize = 1024;
+        let expected_input = vec![0xa5; SCALED_FORMER_CEILING];
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "batch_number": 41,
+            "vk_hash": valid_vk_hash(),
+            "prover_input": STANDARD.encode(&expected_input),
+            "lease_token": valid_lease_token(),
+        }))
+        .unwrap();
+        assert!(payload.len() > SCALED_FORMER_CEILING);
+
+        let (endpoint, _request_bodies, server) =
+            scripted_http_server(vec![ScriptedHttpReply::Body("200 OK", payload)]);
+        let client =
+            SequencerProofClient::new(endpoint, "fri-prover".to_owned(), None, vec![]).unwrap();
+        let job = client.pick_fri_job().await.unwrap().unwrap();
+        assert_eq!(job.batch_number, 41);
+        assert_eq!(job.prover_input, expected_input);
+        server.join().unwrap();
+    }
+
+    // SYSCOIN: A compromised endpoint cannot exceed the exact capacity advertised before lease.
+    // Content-Length rejects without allocating the declared body; the HTTP 200 remains marked as
+    // post-acquisition so a worker never falls through to another endpoint.
+    #[tokio::test]
+    async fn fri_pick_enforces_advertised_decompressed_capacity() {
         let (endpoint, _request_bodies, server) =
             scripted_http_server(vec![ScriptedHttpReply::DeclaredBody(
                 "200 OK",
-                MAX_FRI_JOB_RESPONSE_BYTES + 1,
+                MAX_FRI_PICK_RESPONSE_BYTES + 1,
             )]);
         let client =
             SequencerProofClient::new(endpoint, "fri-prover".to_owned(), None, vec![]).unwrap();
         let error = client.pick_fri_job().await.unwrap_err();
         assert!(crate::error_follows_job_acquisition(&error));
+        assert!(format!("{error:#}").contains("exceeds"));
+        server.join().unwrap();
+    }
+
+    // SYSCOIN: A missing Content-Length cannot bypass the same advertised streaming budget.
+    #[tokio::test]
+    async fn fri_pick_rejects_chunked_body_above_advertised_capacity() {
+        const TEST_CAPACITY: usize = 1_024;
+        let chunks = vec![vec![b'a'; 600], vec![b'b'; 600]];
+        let (endpoint, _request_bodies, server) =
+            scripted_http_server(vec![ScriptedHttpReply::ChunkedBody("200 OK", chunks)]);
+        let mut client =
+            SequencerProofClient::new(endpoint, "fri-prover".to_owned(), None, vec![]).unwrap();
+        client.max_fri_pick_response_bytes = TEST_CAPACITY;
+
+        let error = client.pick_fri_job().await.unwrap_err();
+        assert!(crate::error_follows_job_acquisition(&error));
+        assert!(format!("{error:#}").contains(&format!("exceeds {TEST_CAPACITY} bytes")));
+        server.join().unwrap();
+    }
+
+    // SYSCOIN: The authority-free peek path still rejects before reading an advertised body above
+    // its defensive cap; removing the critical-pick ceiling must not unbound diagnostics.
+    #[tokio::test]
+    async fn oversized_decompressed_peek_remains_bounded() {
+        let (endpoint, _request_bodies, server) =
+            scripted_http_server(vec![ScriptedHttpReply::DeclaredBody(
+                "200 OK",
+                MAX_FRI_PEEK_RESPONSE_BYTES + 1,
+            )]);
+        let client =
+            SequencerProofClient::new(endpoint, "fri-prover".to_owned(), None, vec![]).unwrap();
+        let error = client.peek_fri_job(41).await.unwrap_err();
+        assert!(!crate::error_follows_job_acquisition(&error));
         assert!(format!("{error:#}").contains("exceeds"));
         server.join().unwrap();
     }

@@ -58,6 +58,13 @@ Specify optional `--path` argument if you want to serialize FRI proof to file.
 `--request-timeout-secs` controls the 600s total request backstop. Connect timeout is
 5s and read inactivity timeout is 10s. Large compressed sequencer responses are decoded
 automatically.
+**SYSCOIN:** The worker advertises its current 384 MiB complete decompressed FRI-pick capacity;
+the sequencer conservatively filters complete base64/JSON size before leasing, and the client
+reuses the advertised scalar as its streaming read bound. This is a deployment capacity gate, not
+a canonical V8 input bound. Raising it requires raising the worker, sequencer clamp, and
+trusted-proxy spool together.
+Authority-free FRI peeks remain independently capped at 64 MiB, while queue/failed-proof
+diagnostics and SNARK aggregate responses retain their class-specific defensive bounds.
 Specify `--sequencer-urls` to provide a comma-separated list. Status is probed concurrently
 with a bounded fan-out and a two-second hint deadline; the oldest unassigned head is tried
 first, and every client remains in the pick fallback if status is empty, slow, unavailable,

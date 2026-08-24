@@ -12,12 +12,40 @@ use zkos_wrapper::SnarkWrapperProof;
 use zksync_sequencer_proof_client::{
     validate_canonical_endpoint_identity, FriJobInputs, L2BatchNumber, OpaqueSequencerEndpoint,
     ProofClient, ProverLeaseToken, SequencerProofClient, SnarkProofInputs,
-    MAX_FRI_JOB_RESPONSE_BYTES, MAX_PROOF_SUBMISSION_BODY_BYTES, MAX_SNARK_JOB_RESPONSE_BYTES,
+    MAX_CANONICAL_ENDPOINT_IDENTITY_BYTES, MAX_FRI_PICK_RESPONSE_BYTES,
+    MAX_PROOF_SUBMISSION_BODY_BYTES, MAX_SNARK_JOB_RESPONSE_BYTES,
 };
 
-// SYSCOIN: Decoded proof/job structs expand when represented as JSON arrays and objects. Keep the
-// manual format bounded, but allow a conservative fixed expansion over each authenticated wire cap.
-const MAX_MANUAL_FRI_JOB_ARTIFACT_BYTES: usize = MAX_FRI_JOB_RESPONSE_BYTES * 8;
+// SYSCOIN: These wire maxima make the manual FRI artifact bound auditable without changing its
+// existing flattened JSON representation.
+const MAX_JSON_STRING_EXPANSION_PER_BYTE: usize = 6;
+const MAX_B256_WIRE_BYTES: usize = 66;
+const MAX_U32_DECIMAL_BYTES: usize = 10;
+// SYSCOIN: Fixed compact-JSON syntax plus the maximum u32 and two exact B256 wire values in a
+// `SavedFriJob`. The endpoint and decoded prover input are accounted for separately below.
+const MAX_MANUAL_FRI_JOB_FIXED_JSON_BYTES: usize = b"{\"sequencer_endpoint\":\"".len()
+    + b"\",\"batch_number\":".len()
+    + MAX_U32_DECIMAL_BYTES
+    + b",\"vk_hash\":\"".len()
+    + MAX_B256_WIRE_BYTES
+    + b"\",\"prover_input\":[".len()
+    + b"],\"lease_token\":\"".len()
+    + MAX_B256_WIRE_BYTES
+    + b"\"}".len();
+
+// SYSCOIN: A valid base64 field occupying at most R response bytes decodes to at most 3R/4
+// bytes, and compact JSON needs at most four bytes (`255,`) per decoded byte. Thus the byte-array
+// representation is bounded by 3R. Add the six-byte worst-case JSON escape for every byte of the
+// already-bounded canonical endpoint and the exact fixed object overhead without changing the
+// historical manual artifact format.
+const fn max_manual_fri_job_artifact_bytes(max_pick_response_bytes: usize) -> usize {
+    max_pick_response_bytes * 3
+        + MAX_CANONICAL_ENDPOINT_IDENTITY_BYTES * MAX_JSON_STRING_EXPANSION_PER_BYTE
+        + MAX_MANUAL_FRI_JOB_FIXED_JSON_BYTES
+}
+
+const MAX_MANUAL_FRI_JOB_ARTIFACT_BYTES: usize =
+    max_manual_fri_job_artifact_bytes(MAX_FRI_PICK_RESPONSE_BYTES);
 const MAX_MANUAL_SNARK_JOB_ARTIFACT_BYTES: usize = MAX_SNARK_JOB_RESPONSE_BYTES * 8;
 
 struct BoundedWriter<W> {
@@ -244,7 +272,8 @@ fn open_private_job_file(path: impl AsRef<Path>, maximum_bytes: usize) -> Result
     Ok(file)
 }
 
-/// SYSCOIN: Read local manual artifacts under the same explicit caps used by the network client.
+/// SYSCOIN: Read local manual artifacts under explicit CLI-only caps; production critical FRI
+/// transport instead uses its advertised deployment-capacity ceiling before acquiring a lease.
 fn deserialize_json_bounded<T: serde::de::DeserializeOwned>(
     file: File,
     maximum_bytes: usize,
@@ -806,6 +835,59 @@ mod tests {
         assert!(oversized_job.exists());
         assert!(ReservedJobPath::new(&oversized_job).is_err());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    // SYSCOIN: Exercise a strict superset of every accepted FRI pick at a scaled response cap:
+    // every response byte is treated as base64 payload, every decoded byte takes its widest JSON
+    // representation, and every endpoint byte takes its widest JSON escape. The derived cap must
+    // admit this representation while the immediately smaller writer bound still rejects it.
+    #[test]
+    fn fri_job_artifact_cap_covers_worst_case_decoded_json_expansion() {
+        const SCALED_PICK_RESPONSE_BYTES: usize = 4 * 1024;
+        const MAX_SCALED_DECODED_BYTES: usize = SCALED_PICK_RESPONSE_BYTES * 3 / 4;
+
+        let endpoint = "\0".repeat(MAX_CANONICAL_ENDPOINT_IDENTITY_BYTES);
+        let job = FriJobInputs {
+            batch_number: u32::MAX,
+            vk_hash: format!("0x{}", "f".repeat(64)),
+            prover_input: vec![u8::MAX; MAX_SCALED_DECODED_BYTES],
+            lease_token: ProverLeaseToken::from(format!("0x{}", "f".repeat(64))),
+        };
+        let saved = SavedFriJob {
+            sequencer_endpoint: &endpoint,
+            job: &job,
+        };
+        let serialized = serde_json::to_vec(&saved).unwrap();
+        let derived_cap = max_manual_fri_job_artifact_bytes(SCALED_PICK_RESPONSE_BYTES);
+
+        // Each 255 contributes `255,` except the final byte, so the constructed strict upper-bound
+        // representation is exactly one byte below the inclusive mathematical cap.
+        assert_eq!(serialized.len() + 1, derived_cap);
+
+        let mut rejected = Vec::new();
+        assert!(serde_json::to_writer(
+            &mut BoundedWriter {
+                inner: &mut rejected,
+                remaining: serialized.len() - 1,
+            },
+            &saved,
+        )
+        .is_err());
+
+        let mut accepted = Vec::new();
+        serde_json::to_writer(
+            &mut BoundedWriter {
+                inner: &mut accepted,
+                remaining: derived_cap,
+            },
+            &saved,
+        )
+        .unwrap();
+        assert_eq!(accepted, serialized);
+        assert_eq!(
+            MAX_MANUAL_FRI_JOB_ARTIFACT_BYTES,
+            max_manual_fri_job_artifact_bytes(MAX_FRI_PICK_RESPONSE_BYTES)
+        );
     }
 
     #[cfg(unix)]

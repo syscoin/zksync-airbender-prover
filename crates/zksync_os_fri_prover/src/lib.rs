@@ -324,10 +324,11 @@ pub async fn run_inner(
         lease_token,
     } = match client.pick_fri_job().await {
         Err(err) => {
-            // SYSCOIN: A malformed/oversize HTTP 200 was already leased by the sequencer.
+            // SYSCOIN: The pick acquired or may have acquired a lease; endpoint fallback could
+            // create two live assignments for this worker.
             if error_follows_job_acquisition(&err) {
                 return Err(err).context(
-                    "FRI lease was acquired but its response was invalid; no endpoint fallback is allowed",
+                    "FRI pick may have acquired a lease; no endpoint fallback is allowed",
                 );
             }
             // Check if the error is a timeout error
