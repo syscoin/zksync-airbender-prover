@@ -55,6 +55,8 @@ source ~/.bashrc
 ```bash
 # needed for SNARKing
 git clone https://github.com/matter-labs/era-bellman-cuda.git
+# SYSCOIN: Match the immutable CUDA source used by production release artifacts.
+git -C era-bellman-cuda checkout --detach d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206
 cmake -Bera-bellman-cuda/build -Sera-bellman-cuda/ -DCMAKE_BUILD_TYPE=Release
 cmake --build era-bellman-cuda/build/
 # and the following in your ~/.bashrc
@@ -97,7 +99,7 @@ prover_api_fake_fri_provers_enabled=false prover_api_fake_snark_provers_enabled=
 ```bash
 # in a new terminal/session
 cd zksync-airbender-prover
-cargo run --release --features gpu --bin zksync_os_fri_prover
+cargo run --release --features gpu --bin zksync_os_fri_prover -- --submission-dir "$PWD/output/fri-submissions"
 ```
 
 ### 11. (OPTIONAL) Generate load
@@ -117,7 +119,7 @@ cargo run --release -- --rpc-url 'http://127.0.0.1:3050' --rich-privkey 0x772682
 ```bash
 # in same terminal session as the FRI prover, but first cancel FRI prover
 ulimit -s 300000
-RUST_BACKTRACE=full RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-url http://localhost:3124 --binary-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs
+RUST_BACKTRACE=full RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-url http://localhost:3124 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 ```
 
 > NOTE: Even if you have enough VRAM to run both processes, by default, the provers will simply consume all the VRAM available. You can either run SNARK or FRI at any one given time. There's also the intermitent (that runs some FRIs, then a SNARK, etc.), you can read more in the main [README](https://github.com/matter-labs/zksync-airbender-prover), under [Usage section](https://github.com/matter-labs/zksync-airbender-prover?tab=readme-ov-file#usage). Look for `ZKsync OS Prover Service`.

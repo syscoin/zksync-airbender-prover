@@ -10,3 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+# SYSCOIN: Hash-lock the canonical compact-DA guest artifacts in unit tests.
+sha2.workspace = true

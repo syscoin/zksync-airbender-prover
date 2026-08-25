@@ -1,92 +1,43 @@
-#[cfg(feature = "gpu")]
-use proof_compression::serialization::PlonkSnarkVerifierCircuitDeviceSetupWrapper;
-use protocol_version::SupportedProtocolVersions;
-use std::path::Path;
+use anyhow::Context as _;
+use protocol_version::{ProgramCommitment, SupportedProtocolVersions};
 use std::time::{Duration, Instant};
+use std::{
+    fs::File,
+    io::Write as _,
+    path::{Path, PathBuf},
+};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
-#[cfg(feature = "gpu")]
 use zkos_wrapper::{
-    generate_risk_wrapper_vk,
-    gpu::{compression::get_compression_setup, snark::gpu_create_snark_setup_data},
-    BoojumWorker, CompressionVK, SnarkWrapperVK,
+    calculate_verification_key_hash, CompressionProof, SnarkWrapper, SnarkWrapperConfig,
+    SnarkWrapperHostCache, SnarkWrapperProof,
 };
-use zkos_wrapper::{prove, serialize_to_file, SnarkWrapperProof};
+#[cfg(not(feature = "gpu"))]
+use zksync_airbender_cli::prover_utils::CpuConfig;
+#[cfg(feature = "gpu")]
+use zksync_airbender_cli::prover_utils::GpuConfig;
 use zksync_airbender_cli::prover_utils::{
-    create_final_proofs_from_program_proof, create_proofs_internal, GpuSharedState,
+    CarriedChainCombiner, ProgramSource, ProofArtifact, ProofCounts, ProofTarget, ProofTimingsMs,
+    ProverBackend, SecurityLevel,
 };
-use zksync_airbender_execution_utils::{
-    generate_oracle_data_for_universal_verifier, generate_oracle_data_from_metadata_and_proof_list,
-    get_padded_binary, Machine, ProgramProof, RecursionStrategy, VerifierCircuitsIdentifiers,
-    UNIVERSAL_CIRCUIT_VERIFIER,
+use zksync_airbender_execution_utils::unrolled::UnrolledProgramProof;
+use zksync_sequencer_proof_client::{
+    error_follows_job_acquisition, ordered_client_indices, JobQueueStage, ProofClient,
+    ProofRunOutcome, SnarkProofInputs, MAX_FRIS_PER_SNARK_JOB, STATUS_PROBE_CONCURRENCY,
 };
-use zksync_sequencer_proof_client::JobQueueStage;
-use zksync_sequencer_proof_client::{ProofClient, QueueJobStatus, SnarkProofInputs};
 
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
 pub mod metrics;
-// SYSCOIN
-fn configured_snark_thread_stack_size() -> Option<usize> {
-    let raw = std::env::var("RUST_MIN_STACK").ok()?;
-    match raw.parse::<usize>() {
-        Ok(0) => {
-            tracing::warn!("RUST_MIN_STACK is set to 0, ignoring dedicated SNARK thread stack");
-            None
-        }
-        Ok(size) => Some(size),
-        Err(error) => {
-            tracing::warn!(
-                "failed to parse RUST_MIN_STACK='{}' for dedicated SNARK thread stack: {}",
-                raw,
-                error
-            );
-            None
-        }
-    }
-}
 
-fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
-    match payload.downcast::<String>() {
-        Ok(message) => *message,
-        Err(payload) => match payload.downcast::<&'static str>() {
-            Ok(message) => (*message).to_owned(),
-            Err(_) => "unknown panic payload".to_owned(),
-        },
-    }
-}
-// SYSCOIN
-fn head_queue_job(statuses: &[QueueJobStatus]) -> Option<(u64, u32)> {
-    statuses
-        .iter()
-        .filter(|s| s.assigned_seconds_ago.is_none())
-        .min_by_key(|s| s.batch_number)
-        .map(|s| (s.added_seconds_ago, s.batch_number))
-}
+// SYSCOIN: Stock Airbender's canonical combine/wrap path requires a real multi-proof range.
+const MIN_FRIS_PER_REAL_SNARK: usize = 2;
 
-async fn order_clients_by_oldest_unassigned(
-    clients: &[Box<dyn ProofClient + Send + Sync>],
-    stage: JobQueueStage,
-) -> Vec<usize> {
-    let mut scored: Vec<(usize, u64, u32)> = Vec::new();
-    for (idx, client) in clients.iter().enumerate() {
-        let best = client
-            .status(stage)
-            .await
-            .ok()
-            .and_then(|statuses| head_queue_job(&statuses))
-            .unwrap_or((0, u32::MAX));
-        scored.push((idx, best.0, best.1));
-    }
-
-    // Oldest first. Tie-break by lower batch number, then index for deterministic order.
-    scored.sort_by_key(|(idx, age, batch)| {
-        (
-            std::cmp::Reverse(*age),
-            *batch,
-            *idx, // deterministic stable tie-break
-        )
-    });
-    scored.into_iter().map(|(idx, _, _)| idx).collect()
+fn ensure_real_snark_proof_count(proof_count: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (MIN_FRIS_PER_REAL_SNARK..=MAX_FRIS_PER_SNARK_JOB).contains(&proof_count),
+        "real SNARK jobs require {MIN_FRIS_PER_REAL_SNARK}..={MAX_FRIS_PER_SNARK_JOB} FRI proofs; got {proof_count}"
+    );
+    Ok(())
 }
 
 pub fn init_tracing() {
@@ -94,136 +45,346 @@ pub fn init_tracing() {
     FmtSubscriber::builder().with_env_filter(filter).init();
 }
 
-pub fn generate_verification_key(
-    binary_path: String,
-    output_dir: String,
+/// SYSCOIN: Lazily materialized SNARK wrapper state shared by standalone and combined services.
+///
+/// The FRI-proof combiner sizes its GPU pool from essentially all free VRAM. The wrapper
+/// therefore must not be resident while a range is merged, even in the standalone SNARK
+/// process. Each job constructs the wrapper after merging, then retires it back into the
+/// host-only cache below. This is the single canonical lifecycle for every deployment.
+pub struct WrapperSource {
     trusted_setup_file: String,
-    vk_verification_key_file: Option<String>,
-) {
-    match zkos_wrapper::generate_vk(
-        Some(binary_path),
-        output_dir,
-        Some(trusted_setup_file),
-        true,
-        zksync_airbender_execution_utils::RecursionStrategy::UseReducedLog23Machine,
-    ) {
-        Ok(key) => {
-            if let Some(vk_file) = vk_verification_key_file {
-                std::fs::write(vk_file, format!("{key:?}"))
-                    .expect("Failed to write verification key to file");
-            } else {
-                tracing::info!("Verification key generated successfully: {:#?}", key);
-            }
-        }
-        Err(e) => {
-            tracing::error!("Error generating keys: {e}");
-        }
+    /// App binary whose commitment is bound into the wrapper VK via `check_aux_params`.
+    app_bin_path: PathBuf,
+    /// Setup caches carried between jobs. Validated construction populates this before polling;
+    /// it is temporarily `None` only while one job owns the materialized wrapper.
+    /// The cache holds no GPU memory (see [`SnarkWrapperHostCache`]).
+    host_cache: Option<Box<SnarkWrapperHostCache>>,
+}
+
+impl WrapperSource {
+    /// SYSCOIN: Initialize and authenticate a worker's app-bound wrapper before its
+    /// first queue claim. The final VK commits to `app_bin_path` through `check_aux_params`, so an
+    /// exact supported-VK match proves that the configured program commitment is registered by
+    /// [`SupportedProtocolVersions`]. Retiring the initialized wrapper into its host-only cache
+    /// prevents this pre-lease gate from repeating the expensive setup on the first job.
+    pub fn new_validated(
+        trusted_setup_file: String,
+        app_bin_path: PathBuf,
+        supported_versions: &SupportedProtocolVersions,
+    ) -> anyhow::Result<Self> {
+        let mut wrapper = create_snark_wrapper(trusted_setup_file.clone(), &app_bin_path)
+            .context("initialize app-bound SNARK wrapper before queue polling")?;
+        let vk_hash = format!(
+            "{:?}",
+            calculate_verification_key_hash(
+                wrapper
+                    .snark_vk()
+                    .context("derive app-bound SNARK VK before queue polling")?
+                    .clone(),
+            )
+        );
+        ensure_supported_wrapper_vk(&vk_hash, &app_bin_path, supported_versions)?;
+
+        Ok(Self {
+            trusted_setup_file,
+            app_bin_path,
+            host_cache: Some(Box::new(wrapper.into_host_cache())),
+        })
     }
 }
 
+// SYSCOIN: Keep the actual wrapper VK (and therefore its `check_aux_params` app commitment) in
+// lockstep with the exact versions advertised to the sequencer before a lease can be acquired.
+fn ensure_supported_wrapper_vk(
+    vk_hash: &str,
+    app_bin_path: &Path,
+    supported_versions: &SupportedProtocolVersions,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        supported_versions.contains(vk_hash),
+        "configured app {app_bin_path:?} produces SNARK VK hash {vk_hash}, which is not registered by any supported protocol version"
+    );
+    Ok(())
+}
+
+/// SYSCOIN: Build the app-bound SNARK wrapper session used for proving and VK generation.
+///
+/// The wrapper runs with `check_aux_params` enabled, which binds the app program into the
+/// verification key: the RISC-wrapper circuit constrains the FRI proof's final registers
+/// 18..=25 (the blake2s recursion-chain commitment of the app binary) to the `aux_params`
+/// derived from `app_bin_path`, and takes the settlement public input directly from
+/// registers 10..=16. A FRI proof of any other program then fails the in-circuit check
+/// instead of producing a wrappable proof, so a wrong-program proof can no longer be
+/// wrapped into a valid SNARK.
+///
+/// Because the commitment is a circuit constant, the VK is app-specific: it must be
+/// regenerated — and the new hash re-registered on L1 and re-published by the sequencer —
+/// whenever the app binary changes.
+pub fn create_snark_wrapper(
+    trusted_setup_file: String,
+    app_bin_path: &Path,
+) -> anyhow::Result<SnarkWrapper> {
+    create_snark_wrapper_with_cache(trusted_setup_file, app_bin_path, None)
+}
+
+/// Like [`create_snark_wrapper`], but adopt the setup caches of a retired wrapper
+/// (see [`SnarkWrapper::into_host_cache`]) so the chain derivation is skipped.
+///
+/// The cache carries the retired session's whole configuration, including its trusted
+/// setup path and bound app binary, so `trusted_setup_file` and `app_bin_path` only apply
+/// to cache-less (first) builds.
+pub fn create_snark_wrapper_with_cache(
+    trusted_setup_file: String,
+    app_bin_path: &Path,
+    host_cache: Option<SnarkWrapperHostCache>,
+) -> anyhow::Result<SnarkWrapper> {
+    #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
+    let mut wrapper = match host_cache {
+        Some(cache) => SnarkWrapper::from_host_cache(cache)?,
+        None => SnarkWrapper::new(build_wrapper_config(trusted_setup_file, app_bin_path)?)?,
+    };
+
+    // Mirror the old eager GPU precomputation: derive the full VK/setup chain up front so
+    // that setup problems surface at startup rather than on the first picked job (and the
+    // startup-time metric keeps its meaning). Skipped on CPU, as before. With a warm
+    // host cache this returns the cached VK and derives nothing.
+    #[cfg(feature = "gpu")]
+    {
+        tracing::info!("Computing SNARK precomputations");
+        wrapper.snark_vk()?;
+        tracing::info!("Finished computing SNARK precomputations");
+    }
+
+    Ok(wrapper)
+}
+
+/// SYSCOIN: Build the wrapper config that binds the app program at `app_bin_path` into the VK via
+/// `check_aux_params`.
+///
+/// The `.text` section path is derived from the `.bin` path exactly as the FRI prover does
+/// ([`ProgramSource::from_paths`]), so the `aux_params` the wrapper bakes in are computed
+/// over the same binary the FRI proof executed and match the commitment it carries in
+/// registers 18..=25.
+fn build_wrapper_config(
+    trusted_setup_file: String,
+    app_bin_path: &Path,
+) -> anyhow::Result<SnarkWrapperConfig> {
+    let bin_path = app_bin_path
+        .to_str()
+        .with_context(|| format!("non-UTF8 app binary path {app_bin_path:?}"))?
+        .to_string();
+    let source = ProgramSource::from_paths(bin_path, None);
+    // Fail fast on a missing binary/text instead of erroring deep in VK derivation.
+    for path in [&source.bin_path, &source.text_path] {
+        anyhow::ensure!(Path::new(path).is_file(), "program file not found: {path}");
+    }
+    Ok(SnarkWrapperConfig {
+        trusted_setup: Some(trusted_setup_file.into()),
+        bin: Some(source.bin_path.into()),
+        text: Some(source.text_path.into()),
+        check_aux_params: true,
+        ..Default::default()
+    })
+}
+
+/// SYSCOIN: The app-program chain commitment a FRI proof (combined multi-batch ones included)
+/// carries in its final registers 18..=25 — the value the settlement side checks the
+/// SNARK public input against. NOT the proof's `recursion_chain_hash`, which is the
+/// prover-internal layer chain and varies with the number of unified passes.
+fn carried_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment {
+    let mut words = [0u32; 8];
+    for (i, word) in words.iter_mut().enumerate() {
+        *word = proof.register_final_values[18 + i].value;
+    }
+    ProgramCommitment(words)
+}
+
+/// SYSCOIN: End params of the active security level's unified-recursion verifier binary, needed
+/// to continue a carried chain the way the next unified pass would. Derived once per
+/// process (one unified-layer setup computation on the host).
+fn unified_verifier_end_params() -> &'static [u32; 8] {
+    static EP: std::sync::OnceLock<[u32; 8]> = std::sync::OnceLock::new();
+    EP.get_or_init(|| zkos_wrapper::circuits::BinaryCommitment::default().end_params)
+}
+
+/// SYSCOIN: The program commitment this proof's verification OUTPUTS: its carried chain continued
+/// with the unified verifier's end params unless it already ends there — the same
+/// carry-or-continue rule `CarriedChainCombiner::combine` applies. A proof that converged
+/// on its first unified pass carries only the unrolled-level chain in registers 18..=25,
+/// one fold short of the recorded per-version commitment; a merged proof (or one that took
+/// a second unified pass) carries the full chain. Falls back to the raw carried value when
+/// the proof has no chain pair or it disagrees with the registers (the merge validates and
+/// rejects such proofs properly).
+fn output_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment {
+    let carried = carried_program_commitment(proof);
+    let (Some(hash), Some(preimage)) = (proof.recursion_chain_hash, proof.recursion_chain_preimage)
+    else {
+        return carried;
+    };
+    if hash != carried.0 {
+        return carried;
+    }
+    let (continued, _) =
+        zksync_airbender_execution_utils::unrolled::UnrolledProgramSetup::continue_recursion_chain(
+            unified_verifier_end_params(),
+            &hash,
+            &preimage,
+        );
+    ProgramCommitment(continued)
+}
+
+/// SYSCOIN: Build the FRI-proof combiner used by [`merge_fris`] for multi-proof jobs.
+///
+/// The combiner caches everything that survives across jobs — the unified recursion
+/// program's setup data and, on `gpu` builds, the GPU prover's host state (pinned host
+/// memory pools and circuit precomputations). Construct it once per process next to the
+/// SNARK wrapper; per job only the CUDA contexts and device memory pool are created and
+/// they are released when the merge finishes, so the GPU is free for the wrap phases.
+///
+/// The caches build lazily on the first multi-proof job; call
+/// [`CarriedChainCombiner::warm_up`] to pay that cost at startup instead. Note the GPU
+/// host state pins tens of gigabytes of host RAM for the lifetime of the combiner.
+pub fn create_combiner() -> CarriedChainCombiner {
+    // Must match the level the FRI prover proves at - the level selects the recursion
+    // verifier binaries, so a mismatch produces proofs the combine cannot verify. Both
+    // map the same per-version record, so they cannot drift apart.
+    let security_level = proving_security_level();
+    #[cfg(feature = "gpu")]
+    {
+        CarriedChainCombiner::new_gpu(security_level, GpuConfig::default())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        CarriedChainCombiner::new_cpu(security_level, CpuConfig::default())
+    }
+}
+
+/// The level this process proves at, from the supported protocol versions' record,
+/// mapped to airbender's type — the same mapping `zksync_os_fri_prover` applies (kept
+/// as two four-line matches rather than a crate dependency between the two provers).
+/// Errors if no supported version records a level.
+// SYSCOIN: A fresh V32 deployment supports exactly one Security100 proving lane.
+fn proving_security_level() -> SecurityLevel {
+    match SupportedProtocolVersions::default().proving_security_level() {
+        protocol_version::SecurityLevel::Security100 => SecurityLevel::Security100,
+    }
+}
+
+/// SYSCOIN: Merge the job's FRI proofs into the single unified-layer proof the SNARK wrapper expects.
+///
+/// Multi-proof jobs are combined via airbender's combined-recursion-layers flow:
+/// every input proof is verified against the recursion chain it carries (all proofs of a
+/// job must resolve to one chain), the combined statement is proved with the unified-layer
+/// recursion
+/// program and shrunk back to a converged unified-layer proof whose output words 0..8 are
+/// the keccak rolling hash of the batch outputs (words 8..16 carry the shared recursion
+/// chain through unchanged). This keeps the SNARK prover detached from the app binary:
+/// the chain is bound to the expected program by the downstream verifier of the wrapped
+/// proof, not by local files. On `gpu` builds the unified-layer proving passes run on the
+/// GPU; verification and witness building stay on the host either way.
 pub fn merge_fris(
     snark_proof_input: SnarkProofInputs,
-    verifier_binary: &Vec<u32>,
-    gpu_state: &mut Option<&mut GpuSharedState>,
-) -> ProgramProof {
+    combiner: &mut CarriedChainCombiner,
+) -> anyhow::Result<UnrolledProgramProof> {
     SNARK_PROVER_METRICS
         .fri_proofs_merged
         .set(snark_proof_input.fri_proofs.len() as i64);
 
-    if snark_proof_input.fri_proofs.len() == 1 {
-        tracing::info!("No proof merging needed, only one proof provided");
-        return snark_proof_input.fri_proofs[0].clone();
-    }
-    tracing::info!("Starting proof merging");
+    let SnarkProofInputs {
+        from_batch_number,
+        to_batch_number,
+        fri_proofs,
+        ..
+    } = snark_proof_input;
 
-    let mut proof = snark_proof_input.fri_proofs[0].clone();
-    for i in 1..snark_proof_input.fri_proofs.len() {
-        let up_to_batch = snark_proof_input.from_batch_number.0 + i as u32 - 1;
-        let curr_batch = snark_proof_input.from_batch_number.0 + i as u32;
-        tracing::info!(
-            "Linking proofs up to {} with proof for batch {}",
-            up_to_batch,
-            curr_batch
-        );
-        let second_proof = snark_proof_input.fri_proofs[i].clone();
+    ensure_real_snark_proof_count(fri_proofs.len()).with_context(|| {
+        format!("invalid server range for batches {from_batch_number} to {to_batch_number}")
+    })?;
 
-        let (first_metadata, first_proof_list) = proof.to_metadata_and_proof_list();
-        let (second_metadata, second_proof_list) = second_proof.to_metadata_and_proof_list();
-
-        let first_oracle =
-            generate_oracle_data_from_metadata_and_proof_list(&first_metadata, &first_proof_list);
-        let second_oracle =
-            generate_oracle_data_from_metadata_and_proof_list(&second_metadata, &second_proof_list);
-
-        let mut merged_input = vec![VerifierCircuitsIdentifiers::CombinedRecursionLayers as u32];
-        merged_input.extend(first_oracle);
-        merged_input.extend(second_oracle);
-
-        let (mut current_proof_list, mut proof_metadata) = create_proofs_internal(
-            verifier_binary,
-            merged_input,
-            &zksync_airbender_execution_utils::Machine::Reduced,
-            100, // Guessing - FIXME!!
-            Some(first_metadata.create_prev_metadata()),
-            gpu_state,
-            &mut Some(0f64),
-        );
-        // Let's do recursion.
-        let mut recursion_level = 0;
-
-        while current_proof_list.reduced_proofs.len() > 2 {
-            tracing::info!("Recursion step {} after fri merging", recursion_level);
-            recursion_level += 1;
-            let non_determinism_data =
-                generate_oracle_data_for_universal_verifier(&proof_metadata, &current_proof_list);
-
-            (current_proof_list, proof_metadata) = create_proofs_internal(
-                verifier_binary,
-                non_determinism_data,
-                &Machine::Reduced,
-                proof_metadata.total_proofs(),
-                Some(proof_metadata.create_prev_metadata()),
-                gpu_state,
-                &mut Some(0f64),
-            );
-        }
-
-        proof = ProgramProof::from_proof_list_and_metadata(&current_proof_list, &proof_metadata);
-        tracing::info!("Finished linking proofs up to batch {}", up_to_batch);
-    }
-
-    // TODO: We can do a recursion step here as well, IIUC
     tracing::info!(
-        "Finishing linking all proofs from {} to {}",
-        snark_proof_input.from_batch_number,
-        snark_proof_input.to_batch_number
+        "Combining {} FRI proofs for batches {from_batch_number} to {to_batch_number} into one",
+        fri_proofs.len()
     );
-    proof
+
+    let security_level = combiner.security_level();
+
+    // The sequencer sends bare proofs; wrap them into the artifact form the combine
+    // expects. The program keccaks are informational metadata (the proofs are bound to
+    // their program by the recursion chain they carry, not by these fields), and the
+    // producing program's files are unknown here.
+    let (program_bin_keccak, program_text_keccak) = ([0u8; 32], [0u8; 32]);
+    let artifacts: Vec<ProofArtifact> = fri_proofs
+        .into_iter()
+        .enumerate()
+        .map(|(i, proof)| {
+            let (family, inits_and_teardowns, delegation) = proof.get_proof_counts();
+            ProofArtifact {
+                schema_version: 1,
+                security_level,
+                target: ProofTarget::RecursionUnified,
+                // The fields below are informational: the producing backend, cycle count
+                // and timings of a sequencer-supplied proof are unknown here.
+                backend: ProverBackend::Cpu,
+                batch_id: from_batch_number.0 as u64 + i as u64,
+                cycles: 0,
+                program_bin_keccak,
+                program_text_keccak,
+                timings_ms: ProofTimingsMs::default(),
+                proof_counts: ProofCounts {
+                    family_proof_count: family,
+                    inits_and_teardowns_proof_count: inits_and_teardowns,
+                    delegation_proof_count: delegation,
+                    delegation_proof_count_by_type: Vec::new(),
+                },
+                proof,
+            }
+        })
+        .collect();
+
+    // First multi-proof job on a cold combiner also builds its caches; measure that
+    // separately so per-job pass timings stay comparable across jobs.
+    let warm_up_started_at = Instant::now();
+    combiner.warm_up();
+    let warm_up = warm_up_started_at.elapsed();
+    if warm_up > Duration::from_millis(100) {
+        tracing::info!("Combiner warm-up took {warm_up:?}");
+        SNARK_PROVER_METRICS
+            .time_taken_merge_warm_up
+            .observe(warm_up.as_secs_f64());
+    }
+
+    let combined = combiner.combine(&artifacts).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to combine FRI proofs for batches {from_batch_number} to \
+             {to_batch_number}: {e}"
+        )
+    })?;
+
+    let pass_ms = &combined.timings_ms.unified_recursion_ms;
+    tracing::info!(
+        "Combined {} FRI proofs in {} unified proving passes ({:?} ms per pass, {} ms total)",
+        artifacts.len(),
+        pass_ms.len(),
+        pass_ms,
+        pass_ms.iter().sum::<u64>(),
+    );
+    SNARK_PROVER_METRICS
+        .merge_unified_passes
+        .set(pass_ms.len() as i64);
+
+    Ok(combined.proof)
 }
 
-#[cfg(feature = "gpu")]
-pub fn compute_compression_vk(binary_path: String) -> CompressionVK {
-    let worker = BoojumWorker::new();
-
-    let risc_wrapper_vk = generate_risk_wrapper_vk(
-        Some(binary_path),
-        true,
-        RecursionStrategy::UseReducedLog23Machine,
-        &worker,
-    )
-    .unwrap();
-
-    let (_, compression_vk, _) = get_compression_setup(&worker, risc_wrapper_vk);
-    compression_vk
-}
-
+/// SYSCOIN: Run the dedicated wrapper lane while retaining exact aggregate authority across
+/// retries and honoring cooperative shutdown only at durable ownership boundaries.
 pub async fn run_linking_fri_snark(
-    _binary_path: String,
     clients: Vec<Box<dyn ProofClient + Send + Sync>>,
     output_dir: String,
     trusted_setup_file: String,
+    app_bin_path: PathBuf,
     iterations: Option<usize>,
     disable_zk: bool,
+    mut stop_receiver: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let startup_started_at = Instant::now();
 
@@ -236,18 +397,21 @@ pub async fn run_linking_fri_snark(
     }
 
     let supported_versions = SupportedProtocolVersions::default();
+    // SYSCOIN: Refuse to prove before the generated app-bound VK replaces the sentinel.
+    supported_versions
+        .ensure_syscoin_release_constants()
+        .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
-    let verifier_binary = get_padded_binary(UNIVERSAL_CIRCUIT_VERIFIER);
+    // SYSCOIN: Authenticate the configured app-bound wrapper and retain its setup cache before
+    // the polling loop below can acquire any SNARK lease.
+    let mut wrapper_source =
+        WrapperSource::new_validated(trusted_setup_file, app_bin_path, &supported_versions)?;
 
-    #[cfg(feature = "gpu")]
-    let precomputations = {
-        tracing::info!("Computing SNARK precomputations");
-        let compression_vk = compute_compression_vk(_binary_path);
-        let precomputations = gpu_create_snark_setup_data(&compression_vk, &trusted_setup_file);
-        tracing::info!("Finished computing SNARK precomputations");
-        precomputations
-    };
+    // SYSCOIN: Warm the combiner eagerly, mirroring the SNARK precomputation above: setup
+    // problems surface at startup and the first multi-proof job doesn't pay for it.
+    let mut combiner = create_combiner();
+    combiner.warm_up();
 
     SNARK_PROVER_METRICS
         .time_taken_startup
@@ -255,30 +419,45 @@ pub async fn run_linking_fri_snark(
 
     let mut proof_count = 0;
 
-    // SYSCOIN
+    // SYSCOIN: Probe all configured sequencers while allowing cooperative shutdown between jobs.
     loop {
+        if *stop_receiver.borrow() {
+            tracing::info!("SNARK prover stop requested between jobs");
+            return Ok(());
+        }
+        // SYSCOIN: Retained auth/path/redirect/config envelopes must resolve or fail startup/run;
+        // never hide them behind continued queue polling or a newly acquired proving lease.
+        zksync_sequencer_proof_client::resume_pending_submissions(&clients)
+            .await
+            .context("durable submission replay blocks new SNARK picks")?;
+
         let mut proof_generated = false;
-        let client_order = order_clients_by_oldest_unassigned(&clients, JobQueueStage::Snark).await;
-
-        for idx in client_order {
-            let client = &clients[idx];
+        let client_order =
+            ordered_client_indices(&clients, JobQueueStage::Snark, STATUS_PROBE_CONCURRENCY).await;
+        for client_idx in client_order {
+            if *stop_receiver.borrow() {
+                tracing::info!("SNARK prover stop requested before claiming another job");
+                return Ok(());
+            }
+            let client = &clients[client_idx];
             tracing::debug!("Polling sequencer: {}", client.sequencer_url());
-
-            if run_inner(
+            // SYSCOIN: Preserve typed no-job/endpoint outcomes while propagating every acquired-
+            // lease or durable-submission error; only a submitted proof advances iterations.
+            match run_inner(
                 client.as_ref(),
-                &verifier_binary,
+                &mut wrapper_source,
+                &mut combiner,
                 output_dir.clone(),
-                trusted_setup_file.clone(),
-                #[cfg(feature = "gpu")]
-                &precomputations,
                 disable_zk,
                 &supported_versions,
             )
-            .await
-            .expect("Failed to run SNARK prover")
+            .await?
             {
-                proof_generated = true;
-                break;
+                ProofRunOutcome::ProofSubmitted => {
+                    proof_generated = true;
+                    break;
+                }
+                ProofRunOutcome::NoJob | ProofRunOutcome::EndpointUnavailable => {}
             }
         }
 
@@ -294,42 +473,77 @@ pub async fn run_linking_fri_snark(
                 }
             }
         } else {
-            tracing::info!("No pending SNARK jobs from sequencer set, retrying in 5s...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            // If no task was found, wait before trying again
+            tracing::info!("No pending SNARK jobs from sequencer, retrying in 5s...");
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                changed = stop_receiver.changed() => {
+                    if changed.is_err() || *stop_receiver.borrow() {
+                        tracing::info!("SNARK prover stop requested while polling");
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
 }
 
+/// SYSCOIN: Return a typed acquisition outcome so endpoint fallback is possible only before a
+/// lease exists; every acquired SNARK range remains bound to one combiner/disposition path.
 pub async fn run_inner(
     client: &dyn ProofClient,
-    verifier_binary: &Vec<u32>,
+    wrapper_source: &mut WrapperSource,
+    combiner: &mut CarriedChainCombiner,
     output_dir: String,
-    trusted_setup_file: String,
-    #[cfg(feature = "gpu")] precomputations: &(
-        PlonkSnarkVerifierCircuitDeviceSetupWrapper,
-        SnarkWrapperVK,
-    ),
     disable_zk: bool,
     supported_protocol_versions: &SupportedProtocolVersions,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<ProofRunOutcome> {
     tracing::debug!("Picking job from sequencer {}", client.sequencer_url());
     let snark_proof_input = match client.pick_snark_job().await {
         Ok(Some(snark_proof_input)) => {
-            if snark_proof_input.fri_proofs.is_empty() {
-                let err_msg =
-                    "No FRI proofs were sent, issue with Prover API/Sequencer, quitting...";
-                tracing::error!(err_msg);
-                return Err(anyhow::anyhow!(err_msg));
+            // SYSCOIN: Fail closed before setup if the server violates the multi-FRI contract.
+            if let Err(error) = ensure_real_snark_proof_count(snark_proof_input.fri_proofs.len()) {
+                let error = error.context(format!(
+                    "sequencer {} returned an invalid real SNARK range for batches [{} to {}]",
+                    client.sequencer_url(),
+                    snark_proof_input.from_batch_number.0,
+                    snark_proof_input.to_batch_number.0,
+                ));
+                tracing::error!("{error:#}");
+                return Err(error);
             }
             if !supported_protocol_versions.contains(&snark_proof_input.vk_hash) {
-                tracing::error!(
-                    "Received unsupported protocol version with vk_hash {} for batches between [{} and {}] from sequencer {}, skipping",
+                // SYSCOIN: A supported-version mismatch follows lease acquisition and is fatal.
+                anyhow::bail!(
+                    "received unsupported protocol version with vk_hash {} for leased batches [{} and {}] from sequencer {}",
                     snark_proof_input.vk_hash,
                     snark_proof_input.from_batch_number.0,
                     snark_proof_input.to_batch_number.0,
                     client.sequencer_url()
                 );
-                return Ok(false);
+            }
+            // SYSCOIN: Reject wrong-program proofs up front with a clear error. The wrapper VK now
+            // binds the app program (check_aux_params constrains registers 18..=25 to the
+            // version's commitment), so such a proof would otherwise fail deep in wrap
+            // proving as an unsatisfiable circuit, after the GPU time is already spent.
+            if let Some(expected) =
+                supported_protocol_versions.program_commitment_for(&snark_proof_input.vk_hash)
+            {
+                for (i, proof) in snark_proof_input.fri_proofs.iter().enumerate() {
+                    let output = output_program_commitment(proof);
+                    if output != expected {
+                        // SYSCOIN: Never abandon an exact aggregate lease after validating proofs.
+                        anyhow::bail!(
+                            "FRI proof {i} of batches [{} to {}] from sequencer {} proves \
+                             program commitment {output}, but protocol version {} proves \
+                             {expected}",
+                            snark_proof_input.from_batch_number.0,
+                            snark_proof_input.to_batch_number.0,
+                            client.sequencer_url(),
+                            snark_proof_input.vk_hash,
+                        );
+                    }
+                }
             }
             snark_proof_input
         }
@@ -338,9 +552,16 @@ pub async fn run_inner(
                 "No SNARK jobs found from sequencer {}",
                 client.sequencer_url()
             );
-            return Ok(false);
+            return Ok(ProofRunOutcome::NoJob);
         }
         Err(e) => {
+            // SYSCOIN: The pick acquired or may have acquired a range lease; endpoint fallback
+            // could create two live assignments for this worker.
+            if error_follows_job_acquisition(&e) {
+                return Err(e).context(
+                    "SNARK pick may have acquired a lease; no endpoint fallback is allowed",
+                );
+            }
             // Check if the error is a timeout error
             if e.downcast_ref::<reqwest::Error>()
                 .map(|err| err.is_timeout())
@@ -352,19 +573,20 @@ pub async fn run_inner(
                 );
                 tracing::error!("Exiting prover due to timeout");
                 SNARK_PROVER_METRICS.timeout_errors.inc();
-                return Ok(false);
+                return Ok(ProofRunOutcome::EndpointUnavailable);
             }
             tracing::error!(
                 "Failed to pick SNARK job from sequencer {}: {e:?}",
                 client.sequencer_url()
             );
-            return Ok(false);
+            return Ok(ProofRunOutcome::EndpointUnavailable);
         }
     };
     let start_batch = snark_proof_input.from_batch_number;
     let end_batch = snark_proof_input.to_batch_number;
     let vk_hash = snark_proof_input.vk_hash.clone();
-
+    // SYSCOIN: Preserve the exact-range capability before consuming the picked FRI inputs.
+    let lease_token = snark_proof_input.lease_token.clone();
     tracing::info!(
         "Finished picking job from sequencer {} with VK hash {}, will aggregate from {} to {} inclusive",
         client.sequencer_url(),
@@ -372,289 +594,178 @@ pub async fn run_inner(
         start_batch,
         end_batch,
     );
-    tracing::info!("Initializing GPU state");
-    #[cfg(feature = "gpu")]
-    let mut gpu_state_store = GpuSharedState::new(
-        verifier_binary,
-        zksync_airbender_cli::prover_utils::MainCircuitType::ReducedRiscVMachine,
-    );
-    #[cfg(feature = "gpu")]
-    let mut gpu_state = Some(&mut gpu_state_store);
-    #[cfg(not(feature = "gpu"))]
-    let mut gpu_state = None;
-    tracing::info!("Finished initializing GPU state");
 
     let mut stats = SnarkProofTimeStats::new();
 
+    // A job whose proofs fail to combine would be re-picked forever, so treat merge
+    // failures as fatal rather than skipping the job.
     let proof = stats.measure_step(SnarkStage::MergeFri, || {
-        merge_fris(snark_proof_input, verifier_binary, &mut gpu_state)
-    });
+        merge_fris(snark_proof_input, combiner)
+    })?;
 
-    // Drop GPU state to release the airbender GPU resources (as now Final Proof will be taking them).
-    #[cfg(feature = "gpu")]
-    drop(gpu_state_store);
-
-    tracing::info!("Creating final proof before SNARKification");
-
-    let final_proof = stats.measure_step(SnarkStage::FinalProof, || {
-        create_final_proofs_from_program_proof(
-            proof,
-            RecursionStrategy::UseReducedLog23Machine,
-            #[cfg(feature = "gpu")]
-            true,
-            #[cfg(not(feature = "gpu"))]
-            false,
+    // SYSCOIN: Materialize the wrapper only after the merge: the merge's GPU prover sizes its
+    // device pool to all free VRAM, so the wrapper's device-resident state must not
+    // be alive yet. With the canonical per-job lifecycle, the wrapper (and any VRAM it touches)
+    // lives exactly from here until this job's proving is done; its host-side setup caches
+    // carry over from the previous job, so only the first job of the process pays the
+    // full setup derivation in the `wrapper_setup` stage.
+    tracing::info!("Building per-job SNARK wrapper");
+    let cache = wrapper_source.host_cache.take().map(|cache| *cache);
+    let mut snark_wrapper = stats.measure_step(SnarkStage::WrapperSetup, || {
+        create_snark_wrapper_with_cache(
+            wrapper_source.trusted_setup_file.clone(),
+            &wrapper_source.app_bin_path,
+            cache,
         )
-    });
+    })?;
 
-    tracing::info!("Finished creating final proof");
-    let one_fri_path = Path::new(&output_dir).join("one_fri.tmp");
+    tracing::info!("Wrapping and compressing FRI proof");
 
-    serialize_to_file(&final_proof, &one_fri_path);
+    // Proving failures are fatal: silently skipping would re-pick the same job forever, and a
+    // failed attempt can leave the wrapper's cached GPU state unusable for the FRI phase of the
+    // zksync_os_prover_service service that runs FRI and SNARK on the same process.
+    let compression_proof: CompressionProof = stats
+        .measure_step(SnarkStage::FinalProof, || {
+            let risc_wrapper_proof = snark_wrapper.prove_risc_wrapper(proof)?;
+            snark_wrapper.prove_compression(risc_wrapper_proof)
+        })
+        .map_err(|e| anyhow::anyhow!("failed to wrap/compress FRI proof: {e:?}"))?;
 
     tracing::info!("SNARKifying proof");
-    let start = Instant::now();
-    // SYSCOIN
+    // note that the API is use_zk, so we invert the disable_zk flag
+    let snark_proof: SnarkWrapperProof = stats
+        .measure_step(SnarkStage::Snark, || {
+            snark_wrapper.prove_snark(compression_proof, !disable_zk)
+        })
+        .map_err(|e| anyhow::anyhow!("failed to SNARKify proof: {e:?}"))?;
+    stats.observe_full();
+    tracing::info!("Finished generating proof, time stats: {}", stats);
+
+    // SYSCOIN: The per-job wrapper is done with the GPU; retire it but keep its host-side setup
+    // caches so the next job's wrapper build is a cheap rehydration instead of a full
+    // re-derivation.
+    wrapper_source.host_cache = Some(Box::new(snark_wrapper.into_host_cache()));
+
+    // SYSCOIN: Retain a pure in-memory copy for the historical operator artifact; all fallible
+    // serialization and filesystem work stays after the canonical durable submission boundary.
     let snark_proof_path = Path::new(&output_dir).join("snark_proof.json");
-    // Avoid accidentally reusing an old proof artifact when SNARKification fails.
-    if snark_proof_path.exists() {
-        std::fs::remove_file(&snark_proof_path).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to remove stale snark proof artifact at {}: {e}",
-                snark_proof_path.display()
+    let snark_proof_for_artifact = snark_proof.clone();
+
+    // SYSCOIN: Return the exact aggregate capability with the wrapper generated from its picked
+    // FRI set; the client's retry loop keeps these same serialized proof bytes and token together.
+    client
+        .submit_snark_proof(
+            start_batch,
+            end_batch,
+            vk_hash.clone(),
+            snark_proof,
+            lease_token,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "generated SNARK proof for leased batches {start_batch}-{end_batch} could not reach a definitive manager disposition; no fresh pick is allowed"
             )
         })?;
-    }
-    let prove_result = {
-        let snark_input = one_fri_path.into_os_string().into_string().unwrap();
-        let snark_output_dir = output_dir.clone();
-        let snark_trusted_setup_file = trusted_setup_file.clone();
-        let use_zk = !disable_zk;
-
-        if let Some(stack_size) = configured_snark_thread_stack_size() {
-            tracing::info!(
-                "Running SNARKification on a dedicated thread with {} bytes of stack",
-                stack_size
-            );
-            std::thread::scope(|scope| {
-                let handle = std::thread::Builder::new()
-                    .name("snarkify-proof".to_owned())
-                    .stack_size(stack_size)
-                    .spawn_scoped(scope, || {
-                        prove(
-                            snark_input,
-                            snark_output_dir,
-                            Some(snark_trusted_setup_file),
-                            false,
-                            #[cfg(feature = "gpu")]
-                            Some(precomputations),
-                            use_zk,
-                        )
-                        .map_err(|error| error.to_string())
-                    })
-                    .map_err(|error| {
-                        format!("failed to spawn dedicated SNARKification thread: {error}")
-                    })?;
-                handle.join().map_err(panic_payload_to_string)?
-            })
-        } else {
-            prove(
-                snark_input,
-                snark_output_dir,
-                Some(snark_trusted_setup_file),
-                false,
-                #[cfg(feature = "gpu")]
-                Some(precomputations),
-                use_zk,
-            )
-            .map_err(|error| error.to_string())
-        }
-    };
-
-    match prove_result {
-        Ok(()) => {
-            stats.observe_step(SnarkStage::Snark, start.elapsed());
-
-            stats.observe_full();
-
-            tracing::info!("Finished generating proof, time stats: {}", stats);
-        }
-        Err(error) => {
-            tracing::error!("failed to SNARKify proof: {}, time stats: {}", error, stats);
-            // Do not submit proof when SNARKification failed.
-            return Ok(false);
-        }
-    }
-    // SYSCOIN
-    if !snark_proof_path.exists() {
-        tracing::error!(
-            "SNARKification finished but output proof file is missing at {}",
-            snark_proof_path.display()
+    // SYSCOIN: A bad output directory must not destroy a generated wrapper before the exact lease
+    // is durably resolved. Preserve the historical artifact as best-effort after submit.
+    let write_result = serde_json::to_vec_pretty(&snark_proof_for_artifact)
+        .context("serialize optional SNARK proof artifact")
+        .and_then(|bytes| {
+            let mut file = File::create(&snark_proof_path).with_context(|| {
+                format!("create optional SNARK proof artifact {snark_proof_path:?}")
+            })?;
+            file.write_all(&bytes)
+                .context("write optional SNARK proof artifact")?;
+            file.sync_all()
+                .context("fsync optional SNARK proof artifact")
+        });
+    if let Err(error) = write_result {
+        tracing::warn!(
+            output_path = ?snark_proof_path,
+            "failed to persist optional SNARK proof artifact after submission: {error:#}"
         );
-        return Ok(false);
     }
-    // SYSCOIN
-    let snark_proof: SnarkWrapperProof = deserialize_from_file(snark_proof_path.to_str().unwrap());
+    tracing::info!(
+        "Successfully submitted SNARK proof for batches {} to {} with vk hash {} to sequencer {}",
+        start_batch,
+        end_batch,
+        vk_hash,
+        client.sequencer_url()
+    );
 
-    match client
-        .submit_snark_proof(start_batch, end_batch, vk_hash.clone(), snark_proof)
-        .await
-    {
-        Ok(()) => {
-            tracing::info!(
-                "Successfully submitted SNARK proof for batches {} to {} with vk hash {} to sequencer {}",
-                start_batch,
-                end_batch,
-                vk_hash,
-                client.sequencer_url()
-            );
+    SNARK_PROVER_METRICS
+        .latest_proven_batch
+        .set(end_batch.0 as i64);
 
-            SNARK_PROVER_METRICS
-                .latest_proven_batch
-                .set(end_batch.0 as i64);
-
-            Ok(true)
-        }
-        Err(e) => {
-            // Check if the error is a timeout error
-            if e.downcast_ref::<reqwest::Error>()
-                .map(|err| err.is_timeout())
-                .unwrap_or(false)
-            {
-                tracing::error!(
-                    "Timeout submitting SNARK proof with vk hash {} for batches {} to {} to sequencer {}: {e:?}",
-                    vk_hash,
-                    start_batch,
-                    end_batch,
-                    client.sequencer_url()
-                );
-                tracing::error!("Exiting prover due to timeout");
-                SNARK_PROVER_METRICS.timeout_errors.inc();
-            } else {
-                tracing::error!(
-                    "Failed to submit SNARK job with vk hash {}, batches {} to {} to sequencer {} due to {e:?}, skipping",
-                    vk_hash,
-                    start_batch,
-                    end_batch,
-                    client.sequencer_url(),
-                );
-            }
-            // Return false so caller doesn't increment proof counter
-            Ok(false)
-        }
-    }
+    Ok(ProofRunOutcome::ProofSubmitted)
 }
 
-pub fn deserialize_from_file<T: serde::de::DeserializeOwned>(filename: &str) -> T {
-    let src = std::fs::File::open(filename).unwrap();
-    serde_json::from_reader(src).unwrap()
-}
-
+// SYSCOIN: Lock the stock-Airbender minimum-two range requirement.
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-    use url::Url;
-    use zksync_sequencer_proof_client::{
-        FriJobInputs, L2BatchNumber, QueueJobStatus, SnarkProofInputs,
-    };
+    use std::path::Path;
 
-    use super::*;
+    use protocol_version::SupportedProtocolVersions;
 
-    struct MockProofClient {
-        url: Url,
-        statuses: Vec<QueueJobStatus>,
+    use super::{ensure_real_snark_proof_count, ensure_supported_wrapper_vk};
+
+    #[test]
+    fn real_snark_range_requires_at_least_two_fris() {
+        for count in [0, 1] {
+            let error = ensure_real_snark_proof_count(count)
+                .expect_err("an empty or singleton real SNARK range must fail closed");
+            assert!(error.to_string().contains("2..=100 FRI proofs"));
+        }
+        for count in [2, 100] {
+            ensure_real_snark_proof_count(count)
+                .expect("a multi-FRI real SNARK range must be accepted");
+        }
+        assert!(ensure_real_snark_proof_count(101).is_err());
     }
 
-    impl MockProofClient {
-        fn statuses(url: &str, statuses: Vec<QueueJobStatus>) -> Self {
-            Self {
-                url: Url::parse(url).expect("valid url"),
-                statuses,
-            }
-        }
+    // SYSCOIN: Every worker may advertise only the exact app-bound wrapper VK it derived before
+    // polling; a different configured app must fail before any SNARK lease can be picked.
+    #[test]
+    fn wrapper_vk_must_match_supported_protocol_registry() {
+        let versions = SupportedProtocolVersions::default();
+        let registered = versions
+            .vk_hashes()
+            .into_iter()
+            .next()
+            .expect("one canonical protocol version");
+        let app_path = Path::new("configured-app.bin");
+
+        ensure_supported_wrapper_vk(&registered, app_path, &versions)
+            .expect("the registered app-bound wrapper VK must be accepted");
+
+        let unsupported = format!("0x{}", "ff".repeat(32));
+        let error = ensure_supported_wrapper_vk(&unsupported, app_path, &versions)
+            .expect_err("a wrapper VK for another app must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("configured-app.bin"));
+        assert!(message.contains("not registered by any supported protocol version"));
     }
 
-    #[async_trait]
-    impl ProofClient for MockProofClient {
-        fn sequencer_url(&self) -> &Url {
-            &self.url
-        }
+    // SYSCOIN: The validated constructor is the sole WrapperSource construction path, so a
+    // missing setup must fail before a worker can hold an empty cache and begin queue polling.
+    #[test]
+    fn validated_wrapper_source_rejects_missing_setup_before_polling() {
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let app_path = crate_dir.join("../../multiblock_batch.bin");
+        let missing_setup = crate_dir.join("missing-trusted-setup-for-wrapper-source-test.key");
+        assert!(!missing_setup.exists(), "test setup path must stay absent");
 
-        async fn pick_fri_job(&self) -> anyhow::Result<Option<FriJobInputs>> {
-            Ok(None)
-        }
-
-        async fn submit_fri_proof(
-            &self,
-            _batch_number: u32,
-            _vk_hash: String,
-            _proof: String,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn status(&self, _stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>> {
-            Ok(self.statuses.clone())
-        }
-
-        async fn fri_status(&self) -> anyhow::Result<Vec<QueueJobStatus>> {
-            self.status(JobQueueStage::Fri).await
-        }
-
-        async fn pick_snark_job(&self) -> anyhow::Result<Option<SnarkProofInputs>> {
-            Ok(None)
-        }
-
-        async fn submit_snark_proof(
-            &self,
-            _from_batch_number: L2BatchNumber,
-            _to_batch_number: L2BatchNumber,
-            _vk_hash: String,
-            _proof: SnarkWrapperProof,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn snark_clients_score_by_head_batch_age_not_oldest_tail() {
-        let clients: Vec<Box<dyn ProofClient + Send + Sync>> = vec![
-            Box::new(MockProofClient::statuses(
-                "http://old-tail.local",
-                vec![
-                    QueueJobStatus {
-                        batch_number: 1,
-                        vk_hash: "vk-head".to_owned(),
-                        added_seconds_ago: 10,
-                        assigned_seconds_ago: None,
-                        assigned_to_prover_id: None,
-                        current_attempt: 0,
-                    },
-                    QueueJobStatus {
-                        batch_number: 100,
-                        vk_hash: "vk-tail".to_owned(),
-                        added_seconds_ago: 10_000,
-                        assigned_seconds_ago: None,
-                        assigned_to_prover_id: None,
-                        current_attempt: 0,
-                    },
-                ],
-            )),
-            Box::new(MockProofClient::statuses(
-                "http://older-head.local",
-                vec![QueueJobStatus {
-                    batch_number: 2,
-                    vk_hash: "vk-other".to_owned(),
-                    added_seconds_ago: 20,
-                    assigned_seconds_ago: None,
-                    assigned_to_prover_id: None,
-                    current_attempt: 0,
-                }],
-            )),
-        ];
-
-        let ordered = order_clients_by_oldest_unassigned(&clients, JobQueueStage::Snark).await;
-
-        assert_eq!(ordered, vec![1, 0]);
+        let error = match super::WrapperSource::new_validated(
+            missing_setup.to_string_lossy().into_owned(),
+            app_path,
+            &SupportedProtocolVersions::default(),
+        ) {
+            Ok(_) => panic!("missing trusted setup must fail before polling"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("initialize app-bound SNARK wrapper before queue polling"));
+        assert!(message.contains("trusted setup metadata"));
     }
 }

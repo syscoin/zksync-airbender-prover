@@ -7,10 +7,10 @@ use vise::{EncodeLabelSet, EncodeLabelValue, Family, Histogram, Metrics};
 pub(crate) enum Method {
     PickFri,
     SubmitFri,
-    // SYSCOIN
-    StatusQueue,
     PickSnark,
     SubmitSnark,
+    // SYSCOIN: Observe read-only scheduling hints separately from job claims.
+    StatusQueue,
 }
 
 #[derive(Debug, Clone, Metrics)]

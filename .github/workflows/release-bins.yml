@@ -1,9 +1,9 @@
 name: Release binaries
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  # SYSCOIN: Default every job to read-only source access; the two narrowly scoped
+  # job-level grants below authorize provenance generation and publication separately.
+  contents: read
 
 on:
   workflow_dispatch:
@@ -12,15 +12,31 @@ on:
         description: "Tag to use for the release."
         type: string
         required: true
+      source_sha:
+        description: "Exact 40-character commit SHA peeled from the release tag."
+        type: string
+        required: true
   workflow_call:
     inputs:
       tag:
         description: "Tag to use for the release."
         type: string
         required: true
+      source_sha:
+        description: "Expected release source commit supplied by the trusted caller."
+        type: string
+        required: true
 
 env:
+  # SYSCOIN: Validate this untrusted dispatch/caller input before using it in any shell or path.
+  RELEASE_TAG: ${{ inputs.tag }}
+  # SYSCOIN: A manual dispatch may originate on any branch. Bind the requested tag to an
+  # explicit source commit instead of incorrectly treating the workflow's GITHUB_SHA as it.
+  RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+  # SYSCOIN: Release the optional combined worker and the independently scalable FRI/SNARK workers.
   ZKSYNC_OS_PROVER_BIN: 'zksync-os-prover-service'
+  ZKSYNC_OS_FRI_PROVER_BIN: 'zksync_os_fri_prover'
+  ZKSYNC_OS_SNARK_PROVER_BIN: 'zksync_os_snark_prover'
   RELEASE_PROFILE: 'release'
   CUDAARCHS: '80;89;90'
 
@@ -32,41 +48,82 @@ jobs:
   # Build prover binary for all target platforms
   build-bins:
     runs-on: ${{ matrix.runner }}
+    # SYSCOIN: Grant OIDC/attestation writes only to the job that builds the three
+    # subjects; it returns the resulting provenance URL to the publication job.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      attestation-url: ${{ steps.attestation.outputs.attestation-url }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu-22.04 based high performance runner, CPU prover
-          - runner: matterlabs-ci-runner-high-performance
-            target: x86_64-unknown-linux-gnu
+          # SYSCOIN: The combined service always runs the FRI phase, whose program
+          # commitment and proving backend require the gpu feature. CPU wrapping is
+          # provided by the separate zksync-os-snark-prover binary, never this service.
           # Ubuntu-22.04 based high performance runner, GPU prover
           - runner: matterlabs-ci-hetzner-rtx6000-gpu
             target: x86_64-unknown-linux-gnu
             gpu: true
-          # Latest x86 macos runner, CPU prover
-          - runner: macos-latest-large
-            target: x86_64-apple-darwin
-          # Latest ARM (M-series) macos runner, CPU prover
-          - runner: macos-latest-xlarge
-            target: aarch64-apple-darwin
 
     steps:
+      - name: Validate release tag
+        run: |
+          # SYSCOIN: Exclude shell metacharacters, path separators, and ambiguous ref syntax.
+          if [[ ! "${RELEASE_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "Invalid release tag: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          # SYSCOIN: Require the caller to capture the complete commit identity; abbreviated or
+          # symbolic revisions would be ambiguous if repository history changes later.
+          if [[ ! "${RELEASE_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid release source SHA: ${RELEASE_SOURCE_SHA}" >&2
+            exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: ${{ inputs.tag || '' }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          # SYSCOIN: Do not leave even a read token available to build scripts or dependencies.
+          persist-credentials: false
+
+      - name: Verify release source identity
+        run: |
+          # SYSCOIN: GITHUB_SHA identifies the workflow invocation, which can legitimately be the
+          # default branch during a manual rebuild of an older release. The explicitly captured
+          # release source instead binds both the checked-out tree and the tag's peeled commit.
+          checked_out=$(git rev-parse HEAD)
+          tag_commit=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")
+          if [[ "${checked_out}" != "${tag_commit}" || "${checked_out}" != "${RELEASE_SOURCE_SHA}" ]]; then
+            echo "Release source mismatch: checkout=${checked_out} tag=${tag_commit} expected=${RELEASE_SOURCE_SHA} workflow=${GITHUB_SHA}" >&2
+            exit 1
+          fi
+
+      - name: Checkout hardened release tooling
+        # SYSCOIN: Keep the setup action bound to the exact commit that supplied this
+        # workflow. Rebuilding an older source tag must not execute that tag's obsolete
+        # local action, while the source checkout remains the workspace root so its
+        # rust-toolchain.toml still selects the compiler used for the rebuild.
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .release-tooling
+          sparse-checkout: .github/actions/runner-setup
+          fetch-depth: '1'
+          persist-credentials: false
 
       - name: Setup runner
-        uses: ./.github/actions/runner-setup
-
-      - name: Install Rust toolchain
-        uses: moonrepo/setup-rust@ede6de059f8046a5e236c94046823e2af11ca670 # v1.2.2
-        env:
-          # To fix rate limiting issues with GitHub API
-          GITHUB_TOKEN: ${{ github.token }}
+        uses: ./.release-tooling/.github/actions/runner-setup
         with:
-          inherit-toolchain: true
-          cache: false
+          # SYSCOIN: Production builds never consume shared compiler/workspace caches or install
+          # unrelated mutable development binaries.
+          enable_cache: 'false'
+          enable_sccache: 'false'
+          minimal_rust: 'true'
 
       - name: Check CUDA version
         if: matrix.gpu
@@ -78,22 +135,19 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: matter-labs/era-bellman-cuda
-          ref: main
+          # SYSCOIN: Production prover artifacts must not compile a mutable CUDA branch.
+          ref: d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206
           path: bellman-cuda
           fetch-depth: '1'
-
-      - name: Cache bellman-cuda
-        if: matrix.gpu
-        id: bellman-cuda-cache
-        uses: actions/cache@v4
-        with:
-          path: 'bellman-cuda/build'
-          key: bellman-cuda-${{ hashFiles('bellman-cuda/**') }}
+          # SYSCOIN: External build-source checkout must not retain the workflow token.
+          persist-credentials: false
 
       - name: Build bellman-cuda
         shell: 'bash -ex {0}'
-        if: steps.bellman-cuda-cache.outputs.cache-hit != 'true' && matrix.gpu
+        if: matrix.gpu
         run: |
+          # SYSCOIN: Always compile the pinned CUDA source in this attested run. A restored build
+          # directory is not bound to nvcc/CMake/compiler versions, CUDAARCHS, or build flags.
           cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release
           cmake --build bellman-cuda/build/
 
@@ -101,92 +155,176 @@ jobs:
         env:
           BELLMAN_CUDA_DIR: ${{ github.workspace }}/bellman-cuda
         run: |
-          if [[ "${{ matrix.gpu }}" == "true" ]]; then
-              cargo build --profile "${RELEASE_PROFILE}" \
-                --target "${{ matrix.target }}" --bin "${ZKSYNC_OS_PROVER_BIN}" --features gpu
-          else
-              cargo build --profile "${RELEASE_PROFILE}" \
-                --target "${{ matrix.target }}" --bin "${ZKSYNC_OS_PROVER_BIN}"
-          fi
-          
+          # SYSCOIN: Publish the canonical production topology from the same pinned source: GPU
+          # FRI workers, a CPU-only dedicated SNARK worker, and the optional combined GPU service.
+          cargo build --locked --profile "${RELEASE_PROFILE}" \
+            --target "${{ matrix.target }}" --bin "${ZKSYNC_OS_PROVER_BIN}" --features gpu
+          cargo build --locked --profile "${RELEASE_PROFILE}" \
+            --target "${{ matrix.target }}" --bin "${ZKSYNC_OS_FRI_PROVER_BIN}" --features gpu
+          cargo build --locked --profile "${RELEASE_PROFILE}" \
+            --target "${{ matrix.target }}" --bin "${ZKSYNC_OS_SNARK_PROVER_BIN}" --no-default-features
 
       - name: Prepare tarballs
         run: |
-          mv ./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_PROVER_BIN} ./${ZKSYNC_OS_PROVER_BIN}
-          tar -czf ${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-${{ matrix.target }}-${{ matrix.gpu == true && 'gpu' || 'cpu' }}.tar.gz \
-              ${{ env.ZKSYNC_OS_PROVER_BIN }}
+          # SYSCOIN: Package all three audited deployment roles from this one checked-out tag.
+          mv "./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_PROVER_BIN}" "./${ZKSYNC_OS_PROVER_BIN}"
+          mv "./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_FRI_PROVER_BIN}" "./${ZKSYNC_OS_FRI_PROVER_BIN}"
+          mv "./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_SNARK_PROVER_BIN}" "./${ZKSYNC_OS_SNARK_PROVER_BIN}"
+          tar -czf "${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-gpu.tar.gz" \
+              "${ZKSYNC_OS_PROVER_BIN}"
+          tar -czf "${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-gpu.tar.gz" \
+              "${ZKSYNC_OS_FRI_PROVER_BIN}"
+          tar -czf "${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-cpu.tar.gz" \
+              "${ZKSYNC_OS_SNARK_PROVER_BIN}"
+
+      - name: Generate GitHub build provenance predicate
+        id: build-provenance
+        # SYSCOIN: Retain GitHub's standard SLSA predicate, then bind the separately checked-out
+        # release source below; an old-tag rebuild intentionally has a different workflow SHA.
+        uses: actions/attest-build-provenance/predicate@864457a58d4733d7f1574bd8821fa24e02cf7538 # predicate@2.0.0
+
+      - name: Bind release source into provenance
+        env:
+          BASE_PROVENANCE: ${{ steps.build-provenance.outputs.predicate }}
+          BASE_PROVENANCE_TYPE: ${{ steps.build-provenance.outputs.predicate-type }}
+          ATTEST_RELEASE_TAG: ${{ inputs.tag }}
+          ATTEST_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          # SYSCOIN: The stock predicate binds the builder invocation. Add the validated tag source
+          # as a distinct resolved dependency so a manual old-tag rebuild remains honest.
+          if [[ "${BASE_PROVENANCE_TYPE}" != "https://slsa.dev/provenance/v1" ]]; then
+            echo "Unexpected build provenance predicate type: ${BASE_PROVENANCE_TYPE}" >&2
+            exit 1
+          fi
+          jq -e \
+            --arg source_uri "git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@refs/tags/${ATTEST_RELEASE_TAG}" \
+            --arg source_sha "${ATTEST_RELEASE_SOURCE_SHA}" \
+            '
+              if .buildDefinition.buildType != "https://actions.github.io/buildtypes/workflow/v1"
+                  or (.buildDefinition.externalParameters.workflow | type) != "object"
+                  or (.buildDefinition.resolvedDependencies | type) != "array"
+                  or (.runDetails.builder.id | type) != "string"
+              then
+                error("unexpected GitHub provenance predicate shape")
+              else
+                .
+              end
+              | .buildDefinition.resolvedDependencies |=
+                  if any(.[]; .uri == $source_uri and .digest.gitCommit != $source_sha) then
+                    error("release source conflicts with the generated build provenance")
+                  elif any(.[]; .uri == $source_uri and .digest.gitCommit == $source_sha) then
+                    .
+                  else
+                    . + [{uri: $source_uri, digest: {gitCommit: $source_sha}}]
+                  end
+            ' <<< "${BASE_PROVENANCE}" > "${RUNNER_TEMP}/release-provenance.json"
+
+      - name: Binaries attestation
+        id: attestation
+        # SYSCOIN: Sign the exact three artifacts with both builder and release-source identities.
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        env:
+          NODE_OPTIONS: "--max-http-header-size=32768"
+        with:
+          subject-path: |
+            ${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
+            ${{ env.ZKSYNC_OS_FRI_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
+            ${{ env.ZKSYNC_OS_SNARK_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-cpu.tar.gz
+          predicate-type: 'https://slsa.dev/provenance/v1'
+          predicate-path: ${{ runner.temp }}/release-provenance.json
 
       - name: Upload binaries
+        # SYSCOIN: Keep the three role-specific archives together for one release attestation.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-${{ matrix.target }}-${{ matrix.gpu == true && 'gpu' || 'cpu' }}.tar.gz
-          path: ${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-${{ matrix.target }}-${{ matrix.gpu == true && 'gpu' || 'cpu' }}.tar.gz
+          name: zksync-os-provers-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz
+          path: |
+            ${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
+            ${{ env.ZKSYNC_OS_FRI_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
+            ${{ env.ZKSYNC_OS_SNARK_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-cpu.tar.gz
+          if-no-files-found: error
           retention-days: 1
 
   # Attach binaries to the GitHub release
   release-bins:
     needs: [build-bins]
-    # Run on macOS to combine binaries into a single one for macOS
-    runs-on: macos-latest-xlarge
+    # SYSCOIN: Publish the dedicated FRI/CPU-SNARK topology plus the optional combined service.
+    runs-on: ubuntu-latest
+    # SYSCOIN: Publication can write release contents but receives no OIDC or
+    # attestation authority; provenance was already created by the builder.
+    permissions:
+      contents: write
     steps:
 
-      - name: Checkout code
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: ${{ inputs.tag || '' }}
+      - name: Validate release tag
+        run: |
+          # SYSCOIN: Revalidate at the publication trust boundary; jobs do not share shell state.
+          if [[ ! "${RELEASE_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "Invalid release tag: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid release source SHA: ${RELEASE_SOURCE_SHA}" >&2
+            exit 1
+          fi
 
       - name: Download binaries
+        # SYSCOIN: Collect the complete role-specific artifact set produced above.
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          pattern: ${{ env.ZKSYNC_OS_PROVER_BIN }}-*.tar.gz
+          pattern: zksync-os-provers-${{ env.RELEASE_TAG }}-*.tar.gz
           path: dist
           merge-multiple: true
-
-      - name: Create universal macOS binary
-        run: |
-          find .
-          for TARGET in x86_64-apple-darwin aarch64-apple-darwin; do
-            tar xzf dist/${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-${TARGET}-cpu.tar.gz
-            mv ${{ env.ZKSYNC_OS_PROVER_BIN }} ${{ env.ZKSYNC_OS_PROVER_BIN }}-${TARGET}-cpu
-            rm -f dist/${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-${TARGET}-cpu.tar.gz
-          done
-          lipo -create -o "${{ env.ZKSYNC_OS_PROVER_BIN }}" \
-            ${{ env.ZKSYNC_OS_PROVER_BIN }}-x86_64-apple-darwin-cpu ${{ env.ZKSYNC_OS_PROVER_BIN }}-aarch64-apple-darwin-cpu
-          tar -czf dist/${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-universal-apple-darwin-cpu.tar.gz \
-            ${{ env.ZKSYNC_OS_PROVER_BIN }}
-
-      - name: Upload binaries
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-universal-apple-darwin-cpu.tar.gz
-          path: dist/${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-universal-apple-darwin-cpu.tar.gz
-          retention-days: 1
-
-      - name: Binaries attestation
-        id: attestation
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
-        with:
-          subject-path: 'dist/**'
 
       - name: Upload artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ inputs.tag }}" dist/* --clobber
+          GH_REPO: ${{ github.repository }}
+        # SYSCOIN: Release assets are immutable; an existing filename aborts instead of overwriting.
+        run: gh release upload "${RELEASE_TAG}" dist/*
 
       - name: Update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPOSITORY: ${{ github.repository }}
+          ATTESTATION_URL: ${{ needs.build-bins.outputs.attestation-url }}
         run: |
-          REALASE_BODY=$(gh release view "${{ inputs.tag }}" --json body -q '.body')
-          BINARIES_SECTION=$(cat <<- "ENDBODY"
+          # SYSCOIN: Publish explicit links for the supported combined, FRI, and CPU-SNARK roles.
+          RELEASE_BODY=$(gh release view "${RELEASE_TAG}" --json body -q '.body')
+          BINARIES_SECTION=$(cat <<- ENDBODY
+          <!-- syscoin-prover-binaries:start -->
           ## Binaries
 
           | System | Architecture | Binary | Attestation |
           |:---:|:---:|:---:|:---|
-          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU) | [${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${{ steps.attestation.outputs.attestation-url }}) |
-          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (CPU) | [${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-x86_64-unknown-linux-gnu-cpu.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-x86_64-unknown-linux-gnu-cpu.tar.gz) | [Attestation](${{ steps.attestation.outputs.attestation-url }}) |
-          | <img src="https://www.svgrepo.com/download/475429/apple.svg" width="50"/> | universal (CPU) | [${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-universal-apple-darwin-cpu.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ inputs.tag }}-universal-apple-darwin-cpu.tar.gz) | [Attestation](${{ steps.attestation.outputs.attestation-url }}) |
+          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU) | [${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${ATTESTATION_URL}) |
+          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU FRI) | [${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${ATTESTATION_URL}) |
+          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (CPU SNARK) | [${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-cpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-cpu.tar.gz) | [Attestation](${ATTESTATION_URL}) |
+          <!-- syscoin-prover-binaries:end -->
           ENDBODY
           )
-          echo -e "${REALASE_BODY}\n\n${BINARIES_SECTION}" > updated_body.md
-          gh release edit "${{ inputs.tag }}" --notes-file updated_body.md
+          printf '%s' "${RELEASE_BODY}" > release_body.md
+          printf '%s\n' "${BINARIES_SECTION}" > binaries_section.md
+          # SYSCOIN: Replace one owned notes section or append it once; malformed/duplicate markers
+          # fail closed instead of accumulating ambiguous artifact tables on a rerun.
+          python3 <<'PY'
+          from pathlib import Path
+
+          start = "<!-- syscoin-prover-binaries:start -->"
+          end = "<!-- syscoin-prover-binaries:end -->"
+          body = Path("release_body.md").read_text()
+          section = Path("binaries_section.md").read_text().rstrip()
+          if body.count(start) != body.count(end) or body.count(start) > 1:
+              raise SystemExit("release notes contain malformed or duplicate Syscoin binary markers")
+          if start in body:
+              prefix, remainder = body.split(start, 1)
+              _, suffix = remainder.split(end, 1)
+              updated = f"{prefix.rstrip()}\n\n{section}{suffix}"
+          elif body.strip():
+              updated = f"{body.rstrip()}\n\n{section}\n"
+          else:
+              updated = f"{section}\n"
+          Path("updated_body.md").write_text(updated)
+          PY
+          gh release edit "${RELEASE_TAG}" --notes-file updated_body.md

@@ -22,14 +22,13 @@ zksync_airbender_execution_utils.workspace = true
 # zkos-wrapper dependencies
 zkos_wrapper.workspace = true
 
-# zksync-crypto-gpu dependencies
-proof-compression = { workspace = true, optional = true }
-
 # external dependencies
 anyhow.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+# SYSCOIN: Materialize the legacy operator artifact in memory before moving the wrapper proof into
+# the crash-durable submission boundary, then write it only after a definitive disposition.
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
@@ -39,7 +38,4 @@ vise-exporter.workspace = true
 url.workspace = true
 
 [features]
-gpu = ["zksync_airbender_cli/gpu", "zkos_wrapper/gpu", "proof-compression/gpu"]
-
-[dev-dependencies]
-async-trait.workspace = true
+gpu = ["zkos_wrapper/gpu", "zksync_airbender_cli/gpu"]

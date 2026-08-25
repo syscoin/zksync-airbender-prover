@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use tokio::sync::watch;
-use vise::{Counter, Gauge, Histogram, Metrics, MetricsCollection};
+use vise::MetricsCollection;
 use vise_exporter::MetricsExporter;
 
 pub async fn start_metrics_exporter(
@@ -23,21 +23,3 @@ pub async fn start_metrics_exporter(
 
     Ok(())
 }
-
-const PROVING_LATENCIES: vise::Buckets = vise::Buckets::values(&[
-    0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0,
-    2000.0, 5000.0, 10_000.0,
-]);
-
-#[derive(Debug, Clone, Metrics)]
-#[metrics(prefix = "fri_prover")]
-pub struct FriProverMetrics {
-    #[metrics(buckets = PROVING_LATENCIES, unit = vise::Unit::Seconds)]
-    pub time_taken: Histogram,
-    pub latest_proven_batch: Gauge,
-    /// Number of timeout errors when communicating with sequencer
-    pub timeout_errors: Counter,
-}
-
-#[vise::register]
-pub(crate) static FRI_PROVER_METRICS: vise::Global<FriProverMetrics> = vise::Global::new();
