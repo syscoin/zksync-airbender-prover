@@ -408,11 +408,12 @@ impl SequencerProofClient {
             // SYSCOIN: Publish and fsync the exact proof/capability record before the first byte is
             // sent. Any cancellation or process crash from this point is restart-resumable.
             let pending = store.persist(envelope).await?;
-            self.send_envelope(&pending.envelope, Some(&pending)).await
+            self.send_envelope(&pending.envelope, Some(&pending), true)
+                .await
         } else {
             // SYSCOIN: Unit/manual clients retain legacy in-memory behavior; production binaries
             // always construct durable clients through new_durable_clients.
-            self.send_envelope(&envelope, None).await
+            self.send_envelope(&envelope, None, false).await
         }
     }
 
@@ -446,6 +447,7 @@ impl SequencerProofClient {
         &self,
         envelope: &DurableSubmissionEnvelope,
         pending_submission: Option<&PendingSubmission>,
+        mut must_attempt_once_before_shutdown: bool,
     ) -> anyhow::Result<reqwest::Response> {
         anyhow::ensure!(
             envelope.endpoint() == self.endpoint.as_str(),
@@ -454,10 +456,15 @@ impl SequencerProofClient {
         let (url, body, stage) = self.envelope_url_and_body(envelope)?;
         let mut retry_count = 0_u32;
         loop {
-            if self
-                .shutdown
-                .as_ref()
-                .is_some_and(|shutdown| *shutdown.borrow())
+            // SYSCOIN: Once freshly generated leased work is fsynced, make one bounded submission
+            // attempt even if shutdown arrived during proving. Replays and every later retry remain
+            // promptly cancellable because their exact proof/capability envelope is already durable.
+            let observe_shutdown = !must_attempt_once_before_shutdown;
+            if observe_shutdown
+                && self
+                    .shutdown
+                    .as_ref()
+                    .is_some_and(|shutdown| *shutdown.borrow())
             {
                 return Err(anyhow!(
                     "{} submission deferred by shutdown; durable envelope retained",
@@ -470,15 +477,20 @@ impl SequencerProofClient {
                 .header(CONTENT_TYPE, "application/json")
                 .body(body.clone())
                 .send();
-            let response = tokio::select! {
-                response = request => response,
-                _ = wait_for_shutdown(self.shutdown.clone()) => {
-                    return Err(anyhow!(
-                        "{} submission deferred by shutdown; durable envelope retained",
-                        stage.label()
-                    ));
+            let response = if observe_shutdown {
+                tokio::select! {
+                    response = request => response,
+                    _ = wait_for_shutdown(self.shutdown.clone()) => {
+                        return Err(anyhow!(
+                            "{} submission deferred by shutdown; durable envelope retained",
+                            stage.label()
+                        ));
+                    }
                 }
+            } else {
+                request.await
             };
+            must_attempt_once_before_shutdown = false;
             let retry_reason = match response {
                 Ok(response) if stage.should_retry_same_submission(response.status()) => {
                     format!("HTTP {}", response.status())
@@ -543,7 +555,7 @@ impl SequencerProofClient {
             let stage = submission.envelope.stage();
             let (from, to) = submission.envelope.range();
             let response = self
-                .send_envelope(&submission.envelope, Some(&submission))
+                .send_envelope(&submission.envelope, Some(&submission), false)
                 .await
                 .with_context(|| {
                     format!(
@@ -1821,17 +1833,17 @@ mod tests {
         ));
     }
 
-    // SYSCOIN: A generated proof is fsynced before shutdown wins and is replayed after the next
-    // process exclusively acquires the same owner-only spool.
+    // SYSCOIN: Shutdown cannot suppress the first bounded send of newly generated leased work.
+    // After an ambiguous attempt, later replay remains cancellable and the exact envelope survives
+    // until a restarted process exclusively acquires the spool and reaches a definitive outcome.
     #[tokio::test]
-    async fn shutdown_retains_envelope_and_restart_replays_before_new_work() {
+    async fn shutdown_submits_owned_proof_once_then_defers_replay() {
         let temporary = TestDirectory::new();
         let submission_directory = temporary.path().join("submissions");
-        let (endpoint, request_bodies, server) =
-            scripted_http_server(vec![ScriptedHttpReply::Disposition(
-                "204 No Content",
-                PROVER_DISPOSITION_ACCEPTED,
-            )]);
+        let (endpoint, request_bodies, server) = scripted_http_server(vec![
+            ScriptedHttpReply::DropConnection,
+            ScriptedHttpReply::Disposition("204 No Content", PROVER_DISPOSITION_ACCEPTED),
+        ]);
         let (stop_sender, stop_receiver) = watch::channel(false);
         stop_sender.send_replace(true);
         let clients = SequencerProofClient::new_durable_clients(
@@ -1854,7 +1866,12 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(format!("{error:#}").contains("deferred by shutdown"));
+        assert!(format!("{error:#}").contains("retry deferred by shutdown"));
+        assert_eq!(
+            request_bodies.lock().unwrap().len(),
+            1,
+            "freshly generated leased work must make one send attempt"
+        );
         assert_eq!(
             std::fs::read_dir(&submission_directory)
                 .unwrap()
@@ -1867,6 +1884,13 @@ mod tests {
                 })
                 .count(),
             1
+        );
+        let replay_error = resume_pending_submissions(&clients).await.unwrap_err();
+        assert!(format!("{replay_error:#}").contains("deferred by shutdown"));
+        assert_eq!(
+            request_bodies.lock().unwrap().len(),
+            1,
+            "shutdown must still defer restart-style replay before another send"
         );
         drop(clients);
 
@@ -1884,7 +1908,8 @@ mod tests {
         assert_eq!(resume_pending_submissions(&clients).await.unwrap(), 1);
         server.join().unwrap();
         let bodies = request_bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
         let submitted: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
         assert_eq!(submitted["lease_token"], token);
         assert_eq!(submitted["proof"], "restart-proof");
@@ -1898,6 +1923,56 @@ mod tests {
                         .to_str()
                         .is_some_and(|name| name == "pending.json")
                 })
+                .count(),
+            0
+        );
+    }
+
+    // SYSCOIN: A stop arriving after the first fresh submission starts must not cancel that
+    // bounded request. A definitive manager response still retires the fsynced envelope before
+    // the worker exits, avoiding an unnecessary restart replay of already accepted work.
+    #[tokio::test]
+    async fn shutdown_during_owned_first_send_waits_for_disposition() {
+        let temporary = TestDirectory::new();
+        let submission_directory = temporary.path().join("submissions");
+        let (endpoint, request_bodies, server) =
+            scripted_http_server(vec![ScriptedHttpReply::DelayedDisposition(
+                Duration::from_millis(75),
+                "204 No Content",
+                PROVER_DISPOSITION_ACCEPTED,
+            )]);
+        let (stop_sender, stop_receiver) = watch::channel(false);
+        let clients = SequencerProofClient::new_durable_clients(
+            vec![endpoint],
+            "fri-prover".to_owned(),
+            None,
+            vec![],
+            submission_directory.clone(),
+            stop_receiver,
+            false,
+        )
+        .unwrap();
+
+        let submit = clients[0].submit_fri_proof(
+            10,
+            valid_vk_hash(),
+            "accepted-proof".to_owned(),
+            valid_lease_token(),
+        );
+        let signal = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            stop_sender.send_replace(true);
+        };
+        let (result, ()) = tokio::join!(submit, signal);
+        result.unwrap();
+
+        server.join().unwrap();
+        assert_eq!(request_bodies.lock().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_dir(submission_directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy() == "pending.json")
                 .count(),
             0
         );
@@ -2064,11 +2139,10 @@ mod tests {
     async fn replayed_terminal_rejection_is_retired_and_returned_as_error() {
         let temporary = TestDirectory::new();
         let submission_directory = temporary.path().join("replayed-rejection");
-        let (endpoint, request_bodies, server) =
-            scripted_http_server(vec![ScriptedHttpReply::Disposition(
-                "400 Bad Request",
-                PROVER_DISPOSITION_REJECTED,
-            )]);
+        let (endpoint, request_bodies, server) = scripted_http_server(vec![
+            ScriptedHttpReply::DropConnection,
+            ScriptedHttpReply::Disposition("400 Bad Request", PROVER_DISPOSITION_REJECTED),
+        ]);
 
         let (stop_sender, stop_receiver) = watch::channel(false);
         stop_sender.send_replace(true);
@@ -2090,7 +2164,7 @@ mod tests {
                 valid_lease_token(),
             )
             .await
-            .expect_err("shutdown must retain the exact envelope without sending");
+            .expect_err("shutdown must retain the exact envelope after the ambiguous first send");
         drop(clients);
 
         let (_stop_sender, stop_receiver) = watch::channel(false);
@@ -2109,7 +2183,9 @@ mod tests {
             .expect_err("replayed marked rejection must remain visible");
         assert!(format!("{error:#}").contains("definitive HTTP 400"));
         server.join().unwrap();
-        assert_eq!(request_bodies.lock().unwrap().len(), 1);
+        let bodies = request_bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
         assert_eq!(
             std::fs::read_dir(submission_directory)
                 .unwrap()
