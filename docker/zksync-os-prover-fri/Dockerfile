@@ -1,55 +1,36 @@
-FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04 AS chef
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-COPY rust-toolchain.toml rust-toolchain.toml
+# SYSCOIN: Immutable base identity; build and runtime share CUDA 12.9 / Ubuntu 24.04.
+FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04@sha256:a2e1e2360c85298ac47ec2543b406ab1e8cec42e31ee47e4d32140ebc82e1067 AS builder
 
-ARG DEBIAN_FRONTEND=noninteractive
-
-# set of args for use of sccache
-ARG SCCACHE_GCS_BUCKET
-ARG SCCACHE_GCS_SERVICE_ACCOUNT
-ARG SCCACHE_GCS_RW_MODE
-ARG RUSTC_WRAPPER
-
-ARG CUDA_ARCH=89;100
-ENV CUDAARCHS=${CUDA_ARCH}
-
-RUN apt-get update && apt-get install -y curl clang openssl libssl-dev gcc g++ git \
-    pkg-config build-essential libclang-dev cmake sccache && \
-    rm -rf /var/lib/apt/lists/*
-
-ENV RUSTUP_HOME=/usr/local/rustup \
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDAARCHS=80;89;90 \
+    RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:${PATH}
-
-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
-
-# We only pay the installation cost once,
-# it will be cached from the second build onwards
-RUN cargo install cargo-chef --version 0.1.72
+    PATH=/opt/cmake/bin:/usr/local/cargo/bin:${PATH}
 
 WORKDIR /usr/src/zksync
+COPY rust-toolchain.toml ./
+COPY docker/prover-build-pins.json ./docker/prover-build-pins.json
+COPY docker/install-build-toolchain.sh /usr/local/bin/install-build-toolchain
+RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --bin zksync_os_fri_prover --recipe-path recipe.json
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY multiblock_batch.bin multiblock_batch.text ./
 
+# SYSCOIN: Match the locked Security100 GPU FRI build published by release-bins.yml.
+RUN cargo build --locked --profile release --target x86_64-unknown-linux-gnu \
+    --bin zksync_os_fri_prover --features gpu
 
-FROM chef AS builder
+FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04@sha256:1287141d283b8f06f45681b56a48a85791398c615888b1f96bfb9fc981392d98
 
-COPY --from=planner /usr/src/zksync/recipe.json recipe.json
-# Build dependencies
-RUN cargo chef cook -p zksync_os_fri_prover --release --features gpu --recipe-path recipe.json
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl libpq5 && \
+    rm -rf /var/lib/apt/lists/*
 
-# Build application
-COPY . .
-RUN cargo build -p zksync_os_fri_prover --release --features gpu
-
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
-
-RUN apt-get update && apt-get install -y curl libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
-
-COPY multiblock_batch.bin /multiblock_batch.bin
-COPY multiblock_batch.text /multiblock_batch.text
-COPY --from=builder /usr/src/zksync/target/release/zksync_os_fri_prover /usr/bin/
+COPY --from=builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
+COPY --from=builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
+COPY --from=builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync_os_fri_prover /usr/bin/zksync_os_fri_prover
 
 ENTRYPOINT ["zksync_os_fri_prover"]

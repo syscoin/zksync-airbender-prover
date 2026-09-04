@@ -1,68 +1,43 @@
-FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04 AS chef
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-COPY rust-toolchain.toml rust-toolchain.toml
+# SYSCOIN: The independently scalable SNARK worker is the release-bins CPU lane; GPU FRI and
+# combined roles retain CUDA separately. Both stages use the same immutable glibc base.
+FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc AS builder
 
-ARG DEBIAN_FRONTEND=noninteractive
-
-# set of args for use of sccache
-ARG SCCACHE_GCS_BUCKET
-ARG SCCACHE_GCS_SERVICE_ACCOUNT
-ARG SCCACHE_GCS_RW_MODE
-ARG RUSTC_WRAPPER
-
-ARG CUDA_ARCH=89;100
-ENV CUDAARCHS=${CUDA_ARCH}
-
-RUN apt-get update && apt-get install -y curl clang openssl libssl-dev gcc g++ git \
-    pkg-config build-essential libclang-dev cmake sccache && \
-    rm -rf /var/lib/apt/lists/*
-
-ENV RUSTUP_HOME=/usr/local/rustup \
+ENV DEBIAN_FRONTEND=noninteractive \
+    RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
-
-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
-
-# We only pay the installation cost once,
-# it will be cached from the second build onwards
-RUN cargo install cargo-chef --version 0.1.72
+    PATH=/opt/cmake/bin:/usr/local/cargo/bin:${PATH}
 
 WORKDIR /usr/src/zksync
+COPY rust-toolchain.toml ./
+COPY docker/prover-build-pins.json ./docker/prover-build-pins.json
+COPY docker/install-build-toolchain.sh /usr/local/bin/install-build-toolchain
+RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --bin zksync_os_snark_prover --recipe-path recipe.json
+COPY docker/fetch-verified-crs.sh /usr/local/bin/fetch-verified-crs
+RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs /setup_compact.key
 
-FROM chef AS builder
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY multiblock_batch.bin multiblock_batch.text ./
 
-RUN curl -Lo /setup_compact.key https://storage.googleapis.com/matterlabs-setup-keys-europe/setup-keys/setup_compact.key
+# SYSCOIN: Match the hardened release topology: CPU-only wrapping, without the GPU feature.
+RUN cargo build --locked --profile release --target x86_64-unknown-linux-gnu \
+    --bin zksync_os_snark_prover --no-default-features
 
-# Bellman-cuda is needed during compilation.
-RUN git clone --depth 1 https://github.com/matter-labs/era-bellman-cuda.git --branch main bellman-cuda && \
-    cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build bellman-cuda/build/
+FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
 
-COPY --from=planner /usr/src/zksync/recipe.json recipe.json
-# Build dependencies
-RUN BELLMAN_CUDA_DIR=$PWD/bellman-cuda cargo chef cook -p zksync_os_snark_prover --release --features gpu --recipe-path recipe.json
-
-# Build application
-COPY . .
-RUN BELLMAN_CUDA_DIR=$PWD/bellman-cuda cargo build -p zksync_os_snark_prover --release --features gpu
-
-###############
-
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl libpq5 && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY docker/zksync-os-prover-snark/entrypoint.sh /entrypoint.sh
-
-# HACK copying to root is the only way to make Docker layer caching work for these files for some reason
 COPY --from=builder /setup_compact.key /setup_compact.key
+COPY --from=builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
+COPY --from=builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
+COPY --from=builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync_os_snark_prover /usr/bin/zksync_os_snark_prover
 
-RUN apt-get update && apt-get install -y curl libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
-
-COPY multiblock_batch.bin /multiblock_batch.bin
-COPY multiblock_batch.text /multiblock_batch.text
-COPY --from=builder /usr/src/zksync/target/release/zksync_os_snark_prover /usr/bin/
+RUN chmod 0755 /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

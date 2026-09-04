@@ -33,6 +33,10 @@ on:
         description: Version string to sync (e.g. 1.2.3)
         required: true
         type: string
+      source_sha:
+        description: Exact source commit represented by the image and code SBOM
+        required: true
+        type: string
 
 jobs:
   create-parent-project:
@@ -43,6 +47,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # SYSCOIN: A manual image rebuild can target a tag other than the workflow ref.
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
 
       - name: Create or verify Dependency Track collection project
         shell: bash
@@ -65,6 +73,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # SYSCOIN: Scan the exact source material recorded by the image attestation.
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
 
       - name: Generate CycloneDX file on code analysis
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0

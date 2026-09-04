@@ -1,11 +1,14 @@
 name: Docker build and release
 
 on:
-  # Manual trigger with a tag name input
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Tag of an image to build."
+        description: "Existing Git tag whose exact source should be built."
+        type: string
+        required: true
+      source_sha:
+        description: "Exact 40-character commit SHA peeled from tag_name."
         type: string
         required: true
   push:
@@ -14,39 +17,91 @@ on:
     tags:
       - v**
 
-# Cancel only jobs in PRs
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
-# Use bash with more verbose commands output
 defaults:
   run:
     shell: 'bash -ex {0}'
 
-# Set workflow permissions
+# SYSCOIN: Jobs opt into only the additional publication or attestation permissions they need.
 permissions:
-  packages: write
   contents: read
 
 jobs:
-
   setup:
-    name: Compute shared image tag
+    name: Resolve and bind image source
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.image-tag.outputs.version }}
+      source_ref: ${{ steps.source.outputs.source_ref }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
-      # The timestamp is computed once here so that all matrix legs (and the SBOM
-      # jobs pulling the images back) agree on a single `<sha7>-<unix-ms>` tag.
+      - name: Validate requested source identity
+        env:
+          REQUESTED_TAG: ${{ inputs.tag_name }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ ! "${REQUESTED_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+              echo "Invalid image source tag: ${REQUESTED_TAG}" >&2
+              exit 1
+            fi
+            if [[ "${REQUESTED_TAG}" == "latest" ]]; then
+              echo "The mutable latest label is reserved for main-branch pushes" >&2
+              exit 1
+            fi
+            if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Invalid image source SHA: ${REQUESTED_SOURCE_SHA}" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Checkout exact requested source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag_name) || github.sha }}
+          fetch-depth: '1'
+          persist-credentials: false
+
+      - name: Verify source identity
+        id: source
+        env:
+          REQUESTED_TAG: ${{ inputs.tag_name }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse HEAD)"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag_commit="$(git rev-parse "refs/tags/${REQUESTED_TAG}^{commit}")"
+            if [[ "${checked_out}" != "${tag_commit}" || "${checked_out}" != "${REQUESTED_SOURCE_SHA}" ]]; then
+              echo "Image source mismatch: checkout=${checked_out} tag=${tag_commit} expected=${REQUESTED_SOURCE_SHA}" >&2
+              exit 1
+            fi
+            source_ref="refs/tags/${REQUESTED_TAG}"
+          else
+            if [[ "${checked_out}" != "${GITHUB_SHA}" ]]; then
+              echo "Image source mismatch: checkout=${checked_out} event=${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+              [[ "${checked_out}" == "${tag_commit}" ]]
+            fi
+            source_ref="${GITHUB_REF}"
+          fi
+
+          echo "source_ref=${source_ref}" >> "${GITHUB_OUTPUT}"
+          echo "source_sha=${checked_out}" >> "${GITHUB_OUTPUT}"
+
       - name: Compute SHA tag
         id: sha-tag
         run: echo "tag=${GITHUB_SHA::7}-$(date +%s%3N)" >> "${GITHUB_OUTPUT}"
 
       - name: Normalize shared image tag
         id: image-tag
-        # SYSCOIN: Normalize the one tag consumed by both the image builders and SBOM jobs
-        # with Docker's own metadata action, so Git-ref sanitization cannot make them diverge.
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/zksync-airbender-prover
@@ -54,9 +109,15 @@ jobs:
             type=raw,value=${{ inputs.tag_name || (github.ref_type == 'tag' && github.ref_name) || steps.sha-tag.outputs.tag }}
 
   build-images:
-    name: Build and Push Docker Images
-    needs: [ 'setup' ]
+    name: Build, push, and attest Docker images
+    needs: [setup]
     runs-on: matterlabs-ci-runner-high-performance
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix:
@@ -65,15 +126,52 @@ jobs:
           - zksync-os-prover-fri
           - zksync-os-prover-snark
     steps:
-      - name: Checkout
+      - name: Checkout bound source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          submodules: "recursive"
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: '1'
+          persist-credentials: false
 
-      - name: login to Docker registries
+      - name: Record bound source and app artifacts
+        id: source
+        env:
+          SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
         run: |
-          docker login -u ${{ secrets.DOCKERHUB_USER }} -p ${{ secrets.DOCKERHUB_TOKEN }}
-          gcloud auth configure-docker us-docker.pkg.dev -q
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          build_pins="$(jq -ce '
+            if .schema != "syscoin-prover-image-build-pins-v1"
+                or (.rust_toolchain | type) != "string"
+                or (.rustup_init.version | type) != "string"
+                or ((.rustup_init.sha256 | type) != "string" or (.rustup_init.sha256 | test("^[0-9a-f]{64}$") | not))
+                or (.cmake.version | type) != "string"
+                or ((.cmake.sha256 | type) != "string" or (.cmake.sha256 | test("^[0-9a-f]{64}$") | not))
+                or (.cuda_architectures | type) != "string"
+                or ((.bellman_cuda.repository | type) != "string" or (.bellman_cuda.repository | startswith("https://") | not))
+                or ((.bellman_cuda.commit | type) != "string" or (.bellman_cuda.commit | test("^[0-9a-f]{40}$") | not))
+                or ((.crs.url | type) != "string" or (.crs.url | startswith("https://") | not))
+                or ((.crs.size | type) != "number" or .crs.size <= 0)
+                or ((.crs.sha256 | type) != "string" or (.crs.sha256 | test("^[0-9a-f]{64}$") | not))
+            then error("invalid prover image build pins") else . end
+          ' docker/prover-build-pins.json)"
+          rust_toolchain="$(jq -r '.rust_toolchain' <<< "${build_pins}")"
+          [[ "$(sed -nE 's/^channel = \"([^\"]+)\"$/\1/p' rust-toolchain.toml)" == "${rust_toolchain}" ]]
+          echo "build_pins=${build_pins}" >> "${GITHUB_OUTPUT}"
+          echo "app_bin_sha256=$(sha256sum multiblock_batch.bin | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
+          echo "app_bin_size=$(wc -c < multiblock_batch.bin | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
+          echo "app_text_sha256=$(sha256sum multiblock_batch.text | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
+          echo "app_text_size=$(wc -c < multiblock_batch.text | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
+
+      - name: Login to Docker Hub for pinned base images
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Configure Google Artifact Registry
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -89,47 +187,149 @@ jobs:
           images: |
             ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}
             us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ matrix.component }}
-          # SYSCOIN: Publish the exact normalized tag handed to the SBOM workflow.
           tags: |
-            type=raw,value=${{ needs.setup.outputs.image_tag }},enable=${{ github.event_name != 'pull_request' }}
+            type=raw,value=${{ needs.setup.outputs.image_tag }}
             type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            type=ref,event=pr
-
-      - name: Define whether to save cache
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        id: set-cache-to
-        run: echo "cache-to=type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:buildcache,mode=max" >> "${GITHUB_OUTPUT}"
+          labels: |
+            org.opencontainers.image.revision=${{ needs.setup.outputs.source_sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            io.syscoin.prover.source-ref=${{ needs.setup.outputs.source_ref }}
+            io.syscoin.prover.app-bin-sha256=${{ steps.source.outputs.app_bin_sha256 }}
+            io.syscoin.prover.app-text-sha256=${{ steps.source.outputs.app_text_sha256 }}
+            io.syscoin.prover.security-level=100
+            io.syscoin.prover.protocol=v32-proving-v8
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
-      - name: Build and push
+      - name: Build and push exact image
+        id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
-          load: true
-          build-args: |
-            SCCACHE_GCS_BUCKET=matterlabs-infra-sccache-storage
-            SCCACHE_GCS_SERVICE_ACCOUNT=gha-ci-runners@matterlabs-infra.iam.gserviceaccount.com
-            SCCACHE_GCS_RW_MODE=READ_WRITE
-            RUSTC_WRAPPER=sccache
           file: docker/${{ matrix.component }}/Dockerfile
+          platforms: linux/amd64
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          push: ${{ github.event_name != 'pull_request' }}
-          cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:buildcache'
-          cache-to: ${{ steps.set-cache-to.outputs.cache-to }}
+          # SYSCOIN: Do not admit shared writable compiler or BuildKit caches into an attested build.
+          no-cache: true
+          # SYSCOIN: Retain BuildKit's own material list (including digest-pinned base images)
+          # alongside the GitHub source/app/CRS attestation below.
+          provenance: mode=max
+
+      - name: Generate GitHub build provenance predicate
+        id: build-provenance
+        uses: actions/attest-build-provenance/predicate@864457a58d4733d7f1574bd8821fa24e02cf7538 # predicate@2.0.0
+
+      - name: Bind source, app, toolchain, and CRS into provenance
+        env:
+          BASE_PROVENANCE: ${{ steps.build-provenance.outputs.predicate }}
+          BASE_PROVENANCE_TYPE: ${{ steps.build-provenance.outputs.predicate-type }}
+          SOURCE_REF: ${{ needs.setup.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
+          APP_BIN_SHA256: ${{ steps.source.outputs.app_bin_sha256 }}
+          APP_BIN_SIZE: ${{ steps.source.outputs.app_bin_size }}
+          APP_TEXT_SHA256: ${{ steps.source.outputs.app_text_sha256 }}
+          APP_TEXT_SIZE: ${{ steps.source.outputs.app_text_size }}
+          BUILD_PINS: ${{ steps.source.outputs.build_pins }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -euo pipefail
+          if [[ "${BASE_PROVENANCE_TYPE}" != "https://slsa.dev/provenance/v1" ]]; then
+            echo "Unexpected build provenance predicate type: ${BASE_PROVENANCE_TYPE}" >&2
+            exit 1
+          fi
+          jq -e \
+            --arg source_uri "git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@${SOURCE_REF}" \
+            --arg source_sha "${SOURCE_SHA}" \
+            --arg app_bin_sha256 "${APP_BIN_SHA256}" \
+            --argjson app_bin_size "${APP_BIN_SIZE}" \
+            --arg app_text_sha256 "${APP_TEXT_SHA256}" \
+            --argjson app_text_size "${APP_TEXT_SIZE}" \
+            --arg component "${COMPONENT}" \
+            --argjson build_pins "${BUILD_PINS}" \
+            '
+              if .buildDefinition.buildType != "https://actions.github.io/buildtypes/workflow/v1"
+                  or (.buildDefinition.internalParameters | type) != "object"
+                  or (.buildDefinition.resolvedDependencies | type) != "array"
+                  or (.runDetails.builder.id | type) != "string"
+              then error("unexpected GitHub provenance predicate shape") else . end
+              | .buildDefinition.resolvedDependencies += [
+                  {uri: $source_uri, digest: {gitCommit: $source_sha}}
+                ]
+              | if $component == "zksync-airbender-prover" then
+                  .buildDefinition.resolvedDependencies += [
+                    {uri: ("git+" + $build_pins.bellman_cuda.repository), digest: {gitCommit: $build_pins.bellman_cuda.commit}}
+                  ]
+                else . end
+              | if $component != "zksync-os-prover-fri" then
+                  .buildDefinition.resolvedDependencies += [
+                    {uri: $build_pins.crs.url, digest: {sha256: $build_pins.crs.sha256}}
+                  ]
+                else . end
+              | .buildDefinition.internalParameters.syscoinProverImage = {
+                  component: $component,
+                  source: {ref: $source_uri, gitCommit: $source_sha},
+                  cargoLocked: true,
+                  rustToolchain: $build_pins.rust_toolchain,
+                  rustupInit: $build_pins.rustup_init,
+                  cmake: $build_pins.cmake,
+                  cudaArchitectures: (if $component == "zksync-os-prover-snark" then null else $build_pins.cuda_architectures end),
+                  bellmanCudaCommit: (if $component == "zksync-airbender-prover" then $build_pins.bellman_cuda.commit else null end),
+                  securityLevel: 100,
+                  protocolLane: "v32-proving-v8",
+                  app: {
+                    bin: {sha256: $app_bin_sha256, size: $app_bin_size},
+                    text: {sha256: $app_text_sha256, size: $app_text_size}
+                  },
+                  trustedSetup: (if $component != "zksync-os-prover-fri" then
+                    {sha256: $build_pins.crs.sha256, size: $build_pins.crs.size}
+                  else null end)
+                }
+            ' <<< "${BASE_PROVENANCE}" > "${RUNNER_TEMP}/${COMPONENT}-provenance.json"
+
+      - name: Attest GHCR image digest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        env:
+          NODE_OPTIONS: --max-http-header-size=32768
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: ${{ runner.temp }}/${{ matrix.component }}-provenance.json
+          push-to-registry: true
+
+      - name: Attest Google Artifact Registry image digest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        env:
+          NODE_OPTIONS: --max-http-header-size=32768
+        with:
+          subject-name: us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ matrix.component }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: ${{ runner.temp }}/${{ matrix.component }}-provenance.json
+          push-to-registry: true
+
+      - name: Publish deployable digest summary
+        run: |
+          {
+            echo "### ${{ matrix.component }}"
+            echo
+            echo '```text'
+            echo "ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}@${{ steps.build.outputs.digest }}"
+            echo "us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ matrix.component }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   sbom-generation:
     name: SBOM
-    needs: [ 'setup', 'build-images' ]
-    if: github.event_name != 'pull_request'
+    needs: [setup, build-images]
     permissions:
       contents: read
       packages: read
     uses: ./.github/workflows/sbom-analysis-reusable.yaml
     secrets: inherit
     with:
-      # SYSCOIN: Pull the same normalized tag that build-images publishes, including
-      # manual/tag inputs containing characters Docker metadata must sanitize.
       version: ${{ needs.setup.outputs.image_tag }}
+      source_sha: ${{ needs.setup.outputs.source_sha }}

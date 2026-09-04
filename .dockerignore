@@ -4,5 +4,8 @@
 !rust-toolchain.toml
 !multiblock_batch.bin
 !multiblock_batch.text
+!docker/install-build-toolchain.sh
+!docker/fetch-verified-crs.sh
+!docker/prover-build-pins.json
 !docker/zksync-airbender-prover/entrypoint.sh
 !docker/zksync-os-prover-snark/entrypoint.sh
