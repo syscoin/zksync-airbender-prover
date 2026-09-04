@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Existing Git tag whose exact source should be built."
+        description: "Compatible existing Git tag whose exact application source should be built."
         type: string
         required: true
       source_sha:
@@ -39,6 +39,7 @@ jobs:
       source_sha: ${{ steps.source.outputs.source_sha }}
     steps:
       - name: Validate requested source identity
+        id: requested-source
         env:
           REQUESTED_TAG: ${{ inputs.tag_name }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -57,12 +58,20 @@ jobs:
               echo "Invalid image source SHA: ${REQUESTED_SOURCE_SHA}" >&2
               exit 1
             fi
+            checkout_ref="refs/tags/${REQUESTED_TAG}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            # SYSCOIN: Fetch the pushed tag ref itself. A depth-one SHA checkout does not create
+            # refs/tags/<name>, so the identity check below could not peel the local tag.
+            checkout_ref="${GITHUB_REF}"
+          else
+            checkout_ref="${GITHUB_SHA}"
           fi
+          echo "checkout_ref=${checkout_ref}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout exact requested source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag_name) || github.sha }}
+          ref: ${{ steps.requested-source.outputs.checkout_ref }}
           fetch-depth: '1'
           persist-credentials: false
 
@@ -82,13 +91,17 @@ jobs:
             fi
             source_ref="refs/tags/${REQUESTED_TAG}"
           else
-            if [[ "${checked_out}" != "${GITHUB_SHA}" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              tag_object="$(git rev-parse "${GITHUB_REF}")"
+              tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+              if [[ "${checked_out}" != "${tag_commit}" ]] \
+                  || [[ "${GITHUB_SHA}" != "${tag_object}" && "${GITHUB_SHA}" != "${tag_commit}" ]]; then
+                echo "Image source mismatch: checkout=${checked_out} tag=${tag_commit} tag_object=${tag_object} event=${GITHUB_SHA}" >&2
+                exit 1
+              fi
+            elif [[ "${checked_out}" != "${GITHUB_SHA}" ]]; then
               echo "Image source mismatch: checkout=${checked_out} event=${GITHUB_SHA}" >&2
               exit 1
-            fi
-            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-              tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
-              [[ "${checked_out}" == "${tag_commit}" ]]
             fi
             source_ref="${GITHUB_REF}"
           fi
@@ -126,20 +139,42 @@ jobs:
           - zksync-os-prover-fri
           - zksync-os-prover-snark
     steps:
-      - name: Checkout bound source
+      - name: Checkout bound application source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: ${{ needs.setup.outputs.source_sha }}
+          path: .image-source
           fetch-depth: '1'
           persist-credentials: false
 
-      - name: Record bound source and app artifacts
+      - name: Checkout hardened image tooling
+        # SYSCOIN: A manual old-tag rebuild uses the exact commit that supplied this workflow for
+        # Dockerfiles and verified download pins, independently of the application source above.
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: .image-tooling
+          # Cone mode includes repository-root files (including .dockerignore) with this directory.
+          sparse-checkout: docker
+          fetch-depth: '1'
+          persist-credentials: false
+
+      - name: Prepare bound source and app artifacts
         id: source
         env:
           SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
+          TOOLING_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ "$(git -C .image-source rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .image-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .image-source status --porcelain --untracked-files=all)" ]]
+          [[ -z "$(git -C .image-tooling status --porcelain --untracked-files=all)" ]]
+          build_context="${RUNNER_TEMP}/prover-image-context"
+          .image-tooling/docker/prepare-prover-image-context.sh \
+            .image-source .image-tooling "${build_context}"
           build_pins="$(jq -ce '
             if .schema != "syscoin-prover-image-build-pins-v1"
                 or (.rust_toolchain | type) != "string"
@@ -154,14 +189,21 @@ jobs:
                 or ((.crs.size | type) != "number" or .crs.size <= 0)
                 or ((.crs.sha256 | type) != "string" or (.crs.sha256 | test("^[0-9a-f]{64}$") | not))
             then error("invalid prover image build pins") else . end
-          ' docker/prover-build-pins.json)"
+          ' "${build_context}/docker/prover-build-pins.json")"
           rust_toolchain="$(jq -r '.rust_toolchain' <<< "${build_pins}")"
-          [[ "$(sed -nE 's/^channel = \"([^\"]+)\"$/\1/p' rust-toolchain.toml)" == "${rust_toolchain}" ]]
+          [[ "$(sed -nE 's/^channel = \"([^\"]+)\"$/\1/p' "${build_context}/rust-toolchain.toml")" == "${rust_toolchain}" ]]
+          app_bin_sha256="$(sha256sum "${build_context}/multiblock_batch.bin" | awk '{print $1}')"
+          app_bin_size="$(wc -c < "${build_context}/multiblock_batch.bin" | awk '{print $1}')"
+          app_text_sha256="$(sha256sum "${build_context}/multiblock_batch.text" | awk '{print $1}')"
+          app_text_size="$(wc -c < "${build_context}/multiblock_batch.text" | awk '{print $1}')"
+          [[ "$(sha256sum .image-source/multiblock_batch.bin | awk '{print $1}')" == "${app_bin_sha256}" ]]
+          [[ "$(sha256sum .image-source/multiblock_batch.text | awk '{print $1}')" == "${app_text_sha256}" ]]
+          echo "build_context=${build_context}" >> "${GITHUB_OUTPUT}"
           echo "build_pins=${build_pins}" >> "${GITHUB_OUTPUT}"
-          echo "app_bin_sha256=$(sha256sum multiblock_batch.bin | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
-          echo "app_bin_size=$(wc -c < multiblock_batch.bin | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
-          echo "app_text_sha256=$(sha256sum multiblock_batch.text | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
-          echo "app_text_size=$(wc -c < multiblock_batch.text | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
+          echo "app_bin_sha256=${app_bin_sha256}" >> "${GITHUB_OUTPUT}"
+          echo "app_bin_size=${app_bin_size}" >> "${GITHUB_OUTPUT}"
+          echo "app_text_sha256=${app_text_sha256}" >> "${GITHUB_OUTPUT}"
+          echo "app_text_size=${app_text_size}" >> "${GITHUB_OUTPUT}"
 
       - name: Login to Docker Hub for pinned base images
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -194,6 +236,7 @@ jobs:
             org.opencontainers.image.revision=${{ needs.setup.outputs.source_sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             io.syscoin.prover.source-ref=${{ needs.setup.outputs.source_ref }}
+            io.syscoin.prover.tooling-revision=${{ github.workflow_sha }}
             io.syscoin.prover.app-bin-sha256=${{ steps.source.outputs.app_bin_sha256 }}
             io.syscoin.prover.app-text-sha256=${{ steps.source.outputs.app_text_sha256 }}
             io.syscoin.prover.security-level=100
@@ -206,8 +249,8 @@ jobs:
         id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
-          context: .
-          file: docker/${{ matrix.component }}/Dockerfile
+          context: ${{ steps.source.outputs.build_context }}
+          file: ${{ steps.source.outputs.build_context }}/docker/${{ matrix.component }}/Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -228,6 +271,8 @@ jobs:
           BASE_PROVENANCE_TYPE: ${{ steps.build-provenance.outputs.predicate-type }}
           SOURCE_REF: ${{ needs.setup.outputs.source_ref }}
           SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
+          TOOLING_REPOSITORY: ${{ github.repository }}
+          TOOLING_SHA: ${{ github.workflow_sha }}
           APP_BIN_SHA256: ${{ steps.source.outputs.app_bin_sha256 }}
           APP_BIN_SIZE: ${{ steps.source.outputs.app_bin_size }}
           APP_TEXT_SHA256: ${{ steps.source.outputs.app_text_sha256 }}
@@ -243,6 +288,9 @@ jobs:
           jq -e \
             --arg source_uri "git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@${SOURCE_REF}" \
             --arg source_sha "${SOURCE_SHA}" \
+            --arg tooling_uri "git+${GITHUB_SERVER_URL}/${TOOLING_REPOSITORY}@${TOOLING_SHA}" \
+            --arg tooling_repository "${TOOLING_REPOSITORY}" \
+            --arg tooling_sha "${TOOLING_SHA}" \
             --arg app_bin_sha256 "${APP_BIN_SHA256}" \
             --argjson app_bin_size "${APP_BIN_SIZE}" \
             --arg app_text_sha256 "${APP_TEXT_SHA256}" \
@@ -256,7 +304,8 @@ jobs:
                   or (.runDetails.builder.id | type) != "string"
               then error("unexpected GitHub provenance predicate shape") else . end
               | .buildDefinition.resolvedDependencies += [
-                  {uri: $source_uri, digest: {gitCommit: $source_sha}}
+                  {uri: $source_uri, digest: {gitCommit: $source_sha}},
+                  {uri: $tooling_uri, digest: {gitCommit: $tooling_sha}}
                 ]
               | if $component == "zksync-airbender-prover" then
                   .buildDefinition.resolvedDependencies += [
@@ -271,6 +320,7 @@ jobs:
               | .buildDefinition.internalParameters.syscoinProverImage = {
                   component: $component,
                   source: {ref: $source_uri, gitCommit: $source_sha},
+                  tooling: {repository: $tooling_repository, gitCommit: $tooling_sha},
                   cargoLocked: true,
                   rustToolchain: $build_pins.rust_toolchain,
                   rustupInit: $build_pins.rustup_init,
