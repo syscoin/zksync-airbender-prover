@@ -45,18 +45,28 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout code
+      - name: Checkout hardened SBOM tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # SYSCOIN: A manual image rebuild can target a tag other than the workflow ref.
-          ref: ${{ inputs.source_sha }}
+          # SYSCOIN: This helper receives the Dependency-Track credential. Keep it bound to the
+          # exact reusable-workflow revision, independently of the source commit being scanned.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .sbom-tooling
+          sparse-checkout: .github/scripts
+          fetch-depth: '1'
           persist-credentials: false
 
       - name: Create or verify Dependency Track collection project
         shell: bash
         run: |
-          bash .github/scripts/create-dtrack-collection-project.sh
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .sbom-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .sbom-tooling status --porcelain --untracked-files=all)" ]]
+          bash .sbom-tooling/.github/scripts/create-dtrack-collection-project.sh
         env:
+          TOOLING_SHA: ${{ job.workflow_sha }}
           DT_BASE_URL: https://${{ vars.DEPENDENCY_TRACK_SERVER_HOSTNAME }}
           DT_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
           PROJECT_NAME: ${{ github.event.repository.name }}
@@ -71,17 +81,28 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout code
+      - name: Checkout exact source to scan
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # SYSCOIN: Scan the exact source material recorded by the image attestation.
           ref: ${{ inputs.source_sha }}
+          path: .sbom-source
+          fetch-depth: '1'
           persist-credentials: false
+
+      - name: Verify source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .sbom-source rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ -z "$(git -C .sbom-source status --porcelain --untracked-files=all)" ]]
 
       - name: Generate CycloneDX file on code analysis
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          path: .
+          path: .sbom-source
           output-file: "bom-code.cdx.json"
           format: 'cyclonedx-json@1.6'
           upload-artifact: 'false'
