@@ -37,6 +37,15 @@ on:
         description: Exact source commit represented by the image and code SBOM
         required: true
         type: string
+      # SYSCOIN: Preserve the original build's digests and attempt across reusable/job retries.
+      image_digests:
+        description: JSON object mapping every expected image component to its immutable build digest
+        required: true
+        type: string
+      build_run_attempt:
+        description: Original build attempt associated with image_digests, preserved on SBOM-only retries
+        required: true
+        type: string
 
 jobs:
   create-parent-project:
@@ -44,6 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      image_matrix: ${{ steps.images.outputs.image_matrix }}
     steps:
       - name: Checkout hardened SBOM tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -56,6 +67,24 @@ jobs:
           sparse-checkout: .github/scripts
           fetch-depth: '1'
           persist-credentials: false
+
+      - name: Validate complete immutable image inventory
+        # SYSCOIN: Validate the reusable-workflow boundary before contacting Dependency Track
+        # or scanning images; never fill a missing build result by resolving a mutable tag.
+        id: images
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TOOLING_SHA: ${{ job.workflow_sha }}
+          VERSION: ${{ inputs.version }}
+          IMAGE_DIGESTS: ${{ inputs.image_digests }}
+          BUILD_RUN_ATTEMPT: ${{ inputs.build_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .sbom-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .sbom-tooling status --porcelain --untracked-files=all)" ]]
+          image_matrix="$(python3 .sbom-tooling/.github/scripts/image-sbom-identity.py matrix)"
+          echo "image_matrix=${image_matrix}" >> "${GITHUB_OUTPUT}"
 
       - name: Create or verify Dependency Track collection project
         shell: bash
@@ -130,22 +159,59 @@ jobs:
       contents: read
       packages: read  # needed to pull images from GHCR
     strategy:
-      matrix:
-        app:
-          - zksync-airbender-prover
-          - zksync-os-prover-fri
-          - zksync-os-prover-snark
+      # SYSCOIN: Each matrix row carries the digest from its own completed build.
+      matrix: ${{ fromJSON(needs.create-parent-project.outputs.image_matrix) }}
     steps:
+      - name: Checkout bound SBOM evidence tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .sbom-tooling
+          sparse-checkout: .github/scripts
+          fetch-depth: '1'
+          persist-credentials: false
+
       - name: Generate CycloneDX file on image analysis
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ghcr.io/${{ github.repository_owner }}/${{ matrix.app }}:${{ inputs.version }}
+          image: ${{ matrix.image }}
           registry-username: ${{ github.repository_owner }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           output-file: "bom-${{ matrix.app }}-image.cdx.json"
           format: 'cyclonedx-json@1.6'
           upload-artifact: 'false'
           upload-release-assets: 'false'
+
+      - name: Bind image build identity to SBOM evidence
+        # SYSCOIN: Keep the scanned image digest and source/tooling identity inside the
+        # uploaded CycloneDX document, even when another run reuses the version label.
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TOOLING_SHA: ${{ job.workflow_sha }}
+          VERSION: ${{ inputs.version }}
+          COMPONENT: ${{ matrix.app }}
+          IMAGE_DIGEST: ${{ matrix.digest }}
+          BUILD_RUN_ATTEMPT: ${{ inputs.build_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .sbom-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .sbom-tooling status --porcelain --untracked-files=all)" ]]
+          python3 .sbom-tooling/.github/scripts/image-sbom-identity.py bind \
+            "${COMPONENT}" "${IMAGE_DIGEST}" "bom-${COMPONENT}-image.cdx.json" \
+            > "bom-${COMPONENT}-image.bound.cdx.json"
+          python3 .sbom-tooling/.github/scripts/image-sbom-identity.py record \
+            "${COMPONENT}" "${IMAGE_DIGEST}" > "image-identity.json"
+
+      - name: Preserve immutable image SBOM evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-sbom-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.app }}
+          path: |
+            bom-${{ matrix.app }}-image.bound.cdx.json
+            image-identity.json
+          if-no-files-found: error
 
       - name: Upload CycloneDX file to Dependency Track
         uses: DependencyTrack/gh-upload-sbom@b717d6595efa77a7ff1b18b57ac28597afc75d77 # v4.0.0
@@ -155,7 +221,7 @@ jobs:
           projectname: "${{ github.event.repository.name }}-${{ matrix.app }}-image"
           projectversion: ${{ inputs.version }}
           isLatest: true
-          bomfilename: "bom-${{ matrix.app }}-image.cdx.json"
+          bomfilename: "bom-${{ matrix.app }}-image.bound.cdx.json"
           autocreate: true
           parentname: ${{ github.event.repository.name }}
           parentversion: ${{ inputs.version }}

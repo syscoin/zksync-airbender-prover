@@ -156,7 +156,10 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: .image-tooling
           # Cone mode includes repository-root files (including .dockerignore) with this directory.
-          sparse-checkout: docker
+          # SYSCOIN: Load the digest handoff helper from the same verified tooling revision.
+          sparse-checkout: |
+            docker
+            .github/scripts
           fetch-depth: '1'
           persist-credentials: false
 
@@ -172,6 +175,8 @@ jobs:
           [[ "$(git -C .image-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
           [[ -z "$(git -C .image-source status --porcelain --untracked-files=all)" ]]
           [[ -z "$(git -C .image-tooling status --porcelain --untracked-files=all)" ]]
+          # SYSCOIN: Check the digest helper's runtime before starting an expensive image build.
+          python3 --version
           build_context="${RUNNER_TEMP}/prover-image-context"
           .image-tooling/docker/prepare-prover-image-context.sh \
             .image-source .image-tooling "${build_context}"
@@ -361,6 +366,28 @@ jobs:
           predicate-path: ${{ runner.temp }}/${{ matrix.component }}-provenance.json
           push-to-registry: true
 
+      # SYSCOIN: A separate immutable artifact preserves every matrix result; shared job
+      # outputs can retain only the last finishing component's digest.
+      - name: Record exact built image identity
+        env:
+          SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
+          TOOLING_SHA: ${{ github.workflow_sha }}
+          VERSION: ${{ needs.setup.outputs.image_tag }}
+          COMPONENT: ${{ matrix.component }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 .image-tooling/.github/scripts/image-sbom-identity.py record \
+            "${COMPONENT}" "${IMAGE_DIGEST}" > "${RUNNER_TEMP}/image-digest.json"
+
+      - name: Preserve component digest for SBOM generation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prover-image-digest-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.component }}
+          path: ${{ runner.temp }}/image-digest.json
+          if-no-files-found: error
+
       - name: Publish deployable digest summary
         run: |
           {
@@ -372,9 +399,54 @@ jobs:
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
 
+  # SYSCOIN: A single collector validates all matrix artifacts before exposing reusable inputs.
+  collect-image-digests:
+    name: Validate complete image digest inventory
+    needs: [setup, build-images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image_digests: ${{ steps.collect.outputs.image_digests }}
+      build_run_attempt: ${{ steps.collect.outputs.build_run_attempt }}
+    steps:
+      - name: Checkout bound digest validation tooling
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: .image-tooling
+          sparse-checkout: .github/scripts
+          fetch-depth: '1'
+          persist-credentials: false
+
+      - name: Download this build attempt's component identities
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: prover-image-digest-${{ github.run_id }}-${{ github.run_attempt }}-*
+          path: .image-digests
+          # SYSCOIN: Keep artifact directories separate so duplicate records cannot overwrite.
+          merge-multiple: false
+
+      - name: Validate every component and publish immutable digests
+        id: collect
+        env:
+          SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
+          TOOLING_SHA: ${{ github.workflow_sha }}
+          VERSION: ${{ needs.setup.outputs.image_tag }}
+          BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .image-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .image-tooling status --porcelain --untracked-files=all)" ]]
+          image_digests="$(python3 .image-tooling/.github/scripts/image-sbom-identity.py collect .image-digests)"
+          echo "image_digests=${image_digests}" >> "${GITHUB_OUTPUT}"
+          echo "build_run_attempt=${BUILD_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
   sbom-generation:
     name: SBOM
-    needs: [setup, build-images]
+    needs: [setup, collect-image-digests]
     permissions:
       contents: read
       packages: read
@@ -383,3 +455,5 @@ jobs:
     with:
       version: ${{ needs.setup.outputs.image_tag }}
       source_sha: ${{ needs.setup.outputs.source_sha }}
+      image_digests: ${{ needs.collect-image-digests.outputs.image_digests }}
+      build_run_attempt: ${{ needs.collect-image-digests.outputs.build_run_attempt }}
