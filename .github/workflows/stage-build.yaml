@@ -170,6 +170,7 @@ jobs:
         env:
           SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
           TOOLING_SHA: ${{ github.workflow_sha }}
+          COMPONENT: ${{ matrix.component }}
         run: |
           set -euo pipefail
           [[ "$(git -C .image-source rev-parse HEAD)" == "${SOURCE_SHA}" ]]
@@ -195,6 +196,7 @@ jobs:
                 or (.cmake.version | type) != "string"
                 or ((.cmake.sha256 | type) != "string" or (.cmake.sha256 | test("^[0-9a-f]{64}$") | not))
                 or (.cuda_architectures | type) != "string"
+                or .snark_cuda_architectures != "80;89;90;120"
                 or ((.bellman_cuda.repository | type) != "string" or (.bellman_cuda.repository | startswith("https://") | not))
                 or ((.bellman_cuda.commit | type) != "string" or (.bellman_cuda.commit | test("^[0-9a-f]{40}$") | not))
                 or (.crs | valid_crs | not)
@@ -218,6 +220,12 @@ jobs:
             "${build_context}/patches/airbender-cuda-device-diagnostics.json" \
             --source-lock "${build_context}/Cargo.lock")"
           echo "airbender_pins=${airbender_pins}" >> "${GITHUB_OUTPUT}"
+          gpu_backend_pins=null
+          if [[ "${COMPONENT}" != zksync-os-prover-fri ]]; then
+            gpu_backend_pins="$(python3 .image-tooling/.github/scripts/image-sbom-identity.py gpu-backend-pins \
+              "${build_context}/patches/gpu32-memory.json" --source-lock "${build_context}/Cargo.lock")"
+          fi
+          echo "gpu_backend_pins=${gpu_backend_pins}" >> "${GITHUB_OUTPUT}"
           echo "app_bin_sha256=${app_bin_sha256}" >> "${GITHUB_OUTPUT}"
           echo "app_bin_size=${app_bin_size}" >> "${GITHUB_OUTPUT}"
           echo "app_text_sha256=${app_text_sha256}" >> "${GITHUB_OUTPUT}"
@@ -297,6 +305,7 @@ jobs:
           APP_TEXT_SIZE: ${{ steps.source.outputs.app_text_size }}
           BUILD_PINS: ${{ steps.source.outputs.build_pins }}
           AIRBENDER_PINS: ${{ steps.source.outputs.airbender_pins }}
+          GPU_BACKEND_PINS: ${{ steps.source.outputs.gpu_backend_pins }}
           COMPONENT: ${{ matrix.component }}
         run: |
           set -euo pipefail
@@ -316,6 +325,7 @@ jobs:
             --argjson app_text_size "${APP_TEXT_SIZE}" \
             --arg component "${COMPONENT}" \
             --argjson build_pins "${BUILD_PINS}" \
+            --argjson gpu_backend "${GPU_BACKEND_PINS}" \
             --argjson airbender "${AIRBENDER_PINS}" \
             '
               if .buildDefinition.buildType != "https://actions.github.io/buildtypes/workflow/v1"
@@ -324,10 +334,11 @@ jobs:
                   or (.runDetails.builder.id | type) != "string"
               then error("unexpected GitHub provenance predicate shape") else . end
               # SYSCOIN: Attest the same role-specific serialization that the Dockerfile fetches.
-              | (if $component == "zksync-os-prover-snark" then $build_pins.cpu_snark_crs
-                 elif $component == "zksync-airbender-prover" then $build_pins.crs
+              | (if $component == "zksync-os-prover-snark" or $component == "zksync-airbender-prover" then $build_pins.crs
                  elif $component == "zksync-os-prover-fri" then null
                  else error("unknown prover image component") end) as $role_crs
+              | if ($role_crs == null) != ($gpu_backend == null) then
+                  error("GPU backend provenance does not match the built role") else . end
               | .buildDefinition.resolvedDependencies += [
                   {uri: $source_uri, digest: {gitCommit: $source_sha}},
                   {uri: $tooling_uri, digest: {gitCommit: $tooling_sha}},
@@ -338,7 +349,17 @@ jobs:
                   {uri: ($source_uri + "/Cargo.lock"), digest: {sha256: $airbender.selected_lock.canonical_lock_sha256}},
                   {uri: "syscoin:generated-lock:airbender-source-identity-only-v1", digest: {sha256: $airbender.selected_lock.overlay_lock_sha256}}
                 ]
-              | if $component == "zksync-airbender-prover" then
+              | if $gpu_backend != null then
+                  .buildDefinition.resolvedDependencies += [
+                    {uri: ($tooling_uri + "/patches/gpu32-memory.json"), digest: {sha256: $gpu_backend.manifest_sha256}},
+                    {uri: ($tooling_uri + "/patches/" + $gpu_backend.pins.crypto.patch_file), digest: {sha256: $gpu_backend.pins.crypto.patch_sha256}},
+                    {uri: ($tooling_uri + "/patches/" + $gpu_backend.pins.bellman.patch_file), digest: {sha256: $gpu_backend.pins.bellman.patch_sha256}},
+                    {uri: ("git+" + $gpu_backend.pins.crypto.upstream_url), digest: {gitCommit: $gpu_backend.pins.crypto.upstream_commit}},
+                    {uri: ("git+" + $gpu_backend.pins.bellman.upstream_url), digest: {gitCommit: $gpu_backend.pins.bellman.upstream_commit}},
+                    {uri: "syscoin:generated-lock:airbender-and-crypto-gpu-source-identity-only-v1", digest: {sha256: $gpu_backend.selected_lock.combined_overlay_lock_sha256}}
+                  ]
+                else . end
+              | if $component == "zksync-airbender-prover" or $component == "zksync-os-prover-snark" then
                   .buildDefinition.resolvedDependencies += [
                     {uri: ("git+" + $build_pins.bellman_cuda.repository), digest: {gitCommit: $build_pins.bellman_cuda.commit}}
                   ]
@@ -354,11 +375,13 @@ jobs:
                   tooling: {repository: $tooling_repository, gitCommit: $tooling_sha},
                   cargoLocked: true,
                   airbenderBuild: $airbender,
+                  gpuBackendBuild: $gpu_backend,
                   rustToolchain: $build_pins.rust_toolchain,
                   rustupInit: $build_pins.rustup_init,
                   cmake: $build_pins.cmake,
-                  cudaArchitectures: (if $component == "zksync-os-prover-snark" then null else $build_pins.cuda_architectures end),
-                  bellmanCudaCommit: (if $component == "zksync-airbender-prover" then $build_pins.bellman_cuda.commit else null end),
+                  cudaArchitectures: (if $component == "zksync-os-prover-fri" then $build_pins.cuda_architectures else $build_pins.snark_cuda_architectures end),
+                  bellmanCudaCommit: (if $component == "zksync-airbender-prover" or $component == "zksync-os-prover-snark" then $build_pins.bellman_cuda.commit else null end),
+                  snarkBackend: (if $component == "zksync-os-prover-fri" then null else "gpu" end),
                   securityLevel: 100,
                   protocolLane: "v32-proving-v8",
                   app: {

@@ -30,6 +30,15 @@ image additionally contains `/usr/share/syscoin-prover/airbender-build-inputs.js
 the role's success-only source/command/compiler record. See the
 [build overlay documentation](airbender-build-overlay.md) for the proof boundary.
 
+Default standalone SNARK and combined images additionally preserve the exact GPU32 manifest,
+both checked patch hashes, and their separately derived combined lock under
+`io.syscoin.prover.gpu-backend-build.inputs`. The same pure metadata check supplies image and
+release provenance; `gpu-backend-build-pins.json` is retained for those GPU images. The FRI-only
+image cannot acquire this property. Its original Airbender identity and architecture selection
+remain separate. The success-only in-image build record also binds the actual native CUDA
+library and physical patched source inventories; static manifest evidence is not a claimed
+service proof or a newly built library identity.
+
 Retries deliberately require a complete build attempt: rerun **all jobs** if a
 component build or digest collection fails. Rerunning only failed jobs can leave
 successful components' digest artifacts in an earlier attempt, which the collector

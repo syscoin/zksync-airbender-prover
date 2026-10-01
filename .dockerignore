@@ -7,10 +7,14 @@
 !scripts
 !scripts/cargo-with-patched-airbender.sh
 !scripts/prepare-patched-airbender.py
+!scripts/prepare-patched-gpu-backends.py
 !patches
 !patches/airbender-cuda-device-diagnostics.patch
 !patches/airbender-cuda-device-diagnostics.json
 !patches/airbender.Cargo.lock
+!patches/gpu32-memory.json
+!patches/crypto-gpu32-memory.patch
+!patches/bellman-gpu32-memory.patch
 !docker/install-build-toolchain.sh
 !docker/fetch-verified-crs.sh
 !docker/prover-build-pins.json

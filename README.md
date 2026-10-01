@@ -49,9 +49,11 @@ Use `-p` to select the worker package as well as `--bin`: selecting only a binar
 workspace root can unify other workers' GPU features and pull the SNARK CUDA backend into FRI.
 The isolated FRI GPU worker does not require `BELLMAN_CUDA_DIR`; GPU SNARK and combined workers do.
 
-Use the checked-in Cargo wrapper shown below for worker builds and runs. It applies the pinned,
-diagnostic-only CUDA compatibility patch in disposable source copies, audits the complete lock
-overlay, and leaves artifacts under the usual `target/` directory. Python 3.11+ or Python 3 with
+Use the checked-in Cargo wrapper shown below for worker builds and runs. FRI and explicit CPU
+builds retain the pinned diagnostic-only Airbender patch. GPU SNARK and combined builds select
+`--gpu32`, additionally applying the tested memory patches to pinned crypto-GPU and Bellman CUDA
+sources in disposable copies. It audits the complete lock overlay and leaves artifacts under
+the usual `target/` directory. Python 3.11+ or Python 3 with
 the distribution's `python3-tomli` package is required. Direct `cargo` worker builds omit this fix;
 see [build overlay and provenance](docs/airbender-build-overlay.md).
 
@@ -122,10 +124,11 @@ Note: the app program consists of the `.bin` file passed via `--app-bin-path` **
 `.text` sibling, which is resolved by replacing the extension (e.g. `multiblock_batch.bin`
 + `multiblock_batch.text`). Both files must be present; the prover refuses to start otherwise.
 
-The standalone SNARK prover supports either the CPU backend (no `gpu` feature) or the GPU
-backend (`--features gpu`). A dedicated CPU worker allows FRI workers to stay resident.
-For CPU-cold operation, use `--wrapper-cache-policy cpu-cold` as shown below; `warm` remains
-the compatible default. The validated serial mock workflow admitted 235 GiB of effective
+The standalone SNARK prover defaults to the GPU backend. Build it through `--gpu32` and use
+the compact GPU CRS; GPU errors fail the worker rather than silently switching to CPU.
+`--no-default-features` explicitly selects the separate CPU fallback and its full CPU CRS.
+Only that CPU binary accepts `--wrapper-cache-policy cpu-cold`; GPU builds use `warm` and reject
+`cpu-cold`. The validated serial CPU mock workflow admitted 235 GiB of effective
 host RAM with a 32 GiB runtime reserve on a 256 GiB host, with no swap. This is a tested
 admission policy, not a guarantee for larger ranges or concurrent FRI/SNARK jobs.
 See [CPU-cold cache ownership and input checks](CPU_COLD_CACHE.md).
@@ -134,24 +137,28 @@ See [CPU-cold cache ownership and input checks](CPU_COLD_CACHE.md).
 # optional - increase stack size to 300M (TODO: check if this could be lower)
 ulimit -s 300000
 
-# start the canonical CPU SNARK worker with a single sequencer
-RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file 'crs/setup_2^25.key' --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
+# start the default GPU SNARK worker with a single sequencer
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 
-# start the canonical CPU SNARK worker with multiple sequencers
-RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --trusted-setup-file 'crs/setup_2^25.key' --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
+# start the default GPU SNARK worker with multiple sequencers
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
+
+# explicit CPU fallback: choose this before acquiring a job, not after a GPU error
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-cpu-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file 'crs/setup_2^25.key' --output-dir ./outputs --submission-dir "$PWD/output/snark-cpu-submissions"
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
 The same timeout, decompression, and multi-sequencer scheduling rules described for the FRI
 prover apply here.
 
-### Canonical three-GPU FRI plus CPU SNARK deployment
+### Separate FRI and default GPU SNARK deployment
 
-<!-- SYSCOIN: Keep FRI residency separate from the server-leased CPU combine/wrap worker. -->
-Use three standalone, permanently resident FRI workers and one standalone CPU SNARK worker on
-a separate high-memory server. Expose exactly one GPU to each FRI process: Airbender enumerates
+<!-- SYSCOIN: Keep FRI residency separate from the server-leased combine/wrap worker. -->
+Use three standalone, permanently resident FRI workers and a dedicated GPU SNARK worker on
+a separate GPU/high-memory server. Expose exactly one GPU to each process: Airbender enumerates
 all visible CUDA devices, so leaving all three visible can allow one process to reserve the whole
-machine. The CPU worker must not be built with `--features gpu`. All workers must use the same
+machine. Do not overlap FRI and SNARK on one GPU. The explicit CPU fallback must not be built
+with `--features gpu`. All workers must use the same
 generated Syscoin `multiblock_batch.bin` and `.text` artifacts.
 
 ```bash
@@ -181,28 +188,36 @@ CUDA_VISIBLE_DEVICES=2 bash scripts/cargo-with-patched-airbender.sh fri-run -- c
   --submission-dir "$PWD/output/fri-gpu2/pending-submissions" \
   --path ./output/fri-gpu2/fri_proof.json
 
-# Run this process on the separate CPU server. No CUDA device is required or used.
-mkdir -p output/snark-cpu
-RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features \
-  --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold \
+# Run this process on the separate GPU SNARK server.
+mkdir -p output/snark-gpu
+CUDA_VISIBLE_DEVICES=0 RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu \
+  --bin zksync_os_snark_prover -- run-prover \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
-  --trusted-setup-file 'crs/setup_2^25.key' \
-  --output-dir ./output/snark-cpu \
-  --submission-dir "$PWD/output/snark-cpu/pending-submissions" \
-  --prover-name syscoin-snark-cpu --prometheus-port 3213
+  --trusted-setup-file crs/setup_compact.key \
+  --output-dir ./output/snark-gpu \
+  --submission-dir "$PWD/output/snark-gpu/pending-submissions" \
+  --prover-name syscoin-snark-gpu --prometheus-port 3213
 ```
 
 The sequencer owns SNARK assignment and atomically leases one compatible range to one eligible
 requester. A worker asks for work when ready; the server does not broadcast the same range to
 every SNARK prover. In a decentralized pool this lease remains the single-work guarantee while
-multiple compatible workers may request jobs. The CPU worker combines its assigned FRI range and
-performs the wrapper entirely on CPU.
+multiple compatible workers may request jobs. The GPU worker combines its assigned FRI range
+and uses the GPU backend for the three wrapper proof phases; host witness generation, synthesis
+and verification still run. The offline 30 GiB result covers final phase 3 only, not this full
+service pipeline or a larger range.
+
+The default `docker/zksync-os-prover-snark/Dockerfile` target is `gpu`; `--target cpu` explicitly
+builds the CPU image. Release archives distinguish `zksync_os_snark_prover-...-gpu.tar.gz`
+(default) from `...-cpu.tar.gz` (fallback), each with its own successful build-input record.
+Build and resource admission must be requalified for the selected backend before running it.
 
 <!-- SYSCOIN: This section documents the downstream deployment and batching policy. -->
 The workspace retains the upstream Matter Labs Airbender `v0.6.0-rc.2` versions and proving code.
-The build wrapper applies one pinned startup-diagnostic compatibility patch, without changing
-cryptographic algorithms or guest artifacts. The sole supported lane is protocol V32 / Execution
+The build wrapper preserves the pinned startup-diagnostic compatibility patch; `--gpu32` adds
+the exact tested memory placement/setup changes without weakening proof checks or changing guest
+artifacts. The sole supported lane is protocol V32 / Execution
 V7 / Proving V8. Every real SNARK
 job must therefore contain at least two compatible FRI proofs; the
 prover fails before merge or wrapper setup if the server violates that contract. Fake FRI and
@@ -231,9 +246,13 @@ the tested source snapshot, not a newly built release commit or production deplo
 Sustained throughput/drain, migration, asset-bridge and recovery gates remain pending,
 and server/Era/prover identities must be rolled out together before a public cutover.
 
-The separate GPU32 memory optimization has passed an offline final-wrapper experiment
-with the same Security100 VK. Its Bellman CUDA and wrapper overlays are **not included**
-here, and normal GPU-service/image integration and performance remain unvalidated.
+The GPU32 memory optimization passed an offline final-wrapper experiment with the same
+Security100 VK: 303.82 seconds end to end, 29.91 GiB sampled GPU memory and 43.61 GiB sampled
+host RSS on an RTX5090. This source now integrates its pinned Bellman CUDA and crypto-GPU
+overlays into the default SNARK/combined build recipes. A new ordinary service build,
+full-range service acceptance, native/DA/settlement verification and sustained performance
+are still required; the retained offline binary/proof is not a service qualification or a
+claim of an instantaneous memory peak or other hardware support.
 
 The guest is built reproducibly from final `zksync-os v0.4.0` (`69bc4305...`) plus
 the reviewed Syscoin patch, source tree `6935489bdbc7b1ed31e608677d1b2418b10691b5`.
@@ -287,7 +306,7 @@ Use `--path` to select a fresh pick file and pass that same file back with `--jo
 ulimit -s 300000
 
 # start prover service
-RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh combined-run -- cargo run --locked --release -p zksync_os_prover_service --features gpu --bin zksync-os-prover-service -- --base-url http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/combined-submissions" --max-snark-latency 3600 --max-fris-per-snark 100
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 combined-run -- cargo run --locked --release -p zksync_os_prover_service --features gpu --bin zksync-os-prover-service -- --base-url http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/combined-submissions" --max-snark-latency 3600 --max-fris-per-snark 100
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
@@ -309,17 +328,16 @@ Bellman Cuda (see instructions below).
 ## Installing bellman-cuda
 
 ```shell
-# SYSCOIN: Match the immutable CUDA source used by production release artifacts.
-git clone https://github.com/matter-labs/era-bellman-cuda.git bellman-cuda && \
-git -C bellman-cuda checkout --detach d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206 && \
-cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release && \
+# SYSCOIN: Exact GPU32 source postimages and source record; choose a fresh destination.
+python3 scripts/prepare-patched-gpu-backends.py --prepare-bellman "$PWD/bellman-cuda" && \
+cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES='80;89;90;120' && \
 cmake --build bellman-cuda/build/
 ```
 
 And then:
 
 ```shell
-export BELLMAN_CUDA_DIR=...
+export BELLMAN_CUDA_DIR="$PWD/bellman-cuda"
 ```
 
 ## Policies

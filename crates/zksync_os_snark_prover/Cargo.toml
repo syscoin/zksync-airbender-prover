@@ -40,4 +40,7 @@ vise-exporter.workspace = true
 url.workspace = true
 
 [features]
+# SYSCOIN: The SNARK role builds with the reviewed GPU backend by default.
+# CPU-only builds remain explicit via --no-default-features (and cpu-cold when run).
+default = ["gpu"]
 gpu = ["zkos_wrapper/gpu", "zksync_airbender_cli/gpu"]

@@ -4,8 +4,10 @@ These recipe checks do not replace native CUDA builds or dependency-tree validat
 """
 
 from pathlib import Path
+import hashlib
 import importlib.util
 import json
+import os
 import re
 import shlex
 import shutil
@@ -17,7 +19,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 ROLES = {
     "zksync_os_fri_prover": ("zksync_os_fri_prover", "zksync-os-prover-fri", True),
-    "zksync_os_snark_prover": ("zksync_os_snark_prover", "zksync-os-prover-snark", False),
+    "zksync_os_snark_prover": ("zksync_os_snark_prover", "zksync-os-prover-snark", True),
     "zksync-os-prover-service": ("zksync_os_prover_service", "zksync-airbender-prover", True),
 }
 RELEASE_BINS = {
@@ -31,6 +33,12 @@ OVERLAY_FILES = (
     "patches/airbender-cuda-device-diagnostics.patch",
     "patches/airbender-cuda-device-diagnostics.json",
     "patches/airbender.Cargo.lock",
+)
+GPU_OVERLAY_FILES = (
+    "scripts/prepare-patched-gpu-backends.py",
+    "patches/gpu32-memory.json",
+    "patches/crypto-gpu32-memory.patch",
+    "patches/bellman-gpu32-memory.patch",
 )
 LOCK_TEST_SPEC = importlib.util.spec_from_file_location(
     "lock_fixture", ROOT / ".github/scripts/test_patched_airbender_build.py")
@@ -91,24 +99,33 @@ class ProverRoleRecipeTests(unittest.TestCase):
             with self.subTest(role=binary):
                 dockerfile = ROOT / "docker" / image / "Dockerfile"
                 commands = cargo_commands(dockerfile.read_text(), "build")
-                self.assertEqual(len(commands), 1)
-                self.assert_role(commands[0], binary, gpu)
-                self.assertIn("--locked", commands[0])
+                self.assertEqual(len(commands), 2 if binary == "zksync_os_snark_prover" else 1)
+                self.assert_role(commands[-1], binary, gpu)
+                if binary == "zksync_os_snark_prover":
+                    self.assert_role(commands[0], binary, False)
+                for command in commands:
+                    self.assertIn("--locked", command)
 
     def test_release_builds_match_docker_roles(self):
         workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
         commands = cargo_commands(workflow, "build")
-        self.assertEqual(len(commands), len(ROLES))
+        self.assertEqual(len(commands), len(ROLES) + 1)
         seen = []
         for tokens in commands:
             bins = option_values(tokens, "--bin")
             self.assertEqual(len(bins), 1)
             binary = RELEASE_BINS.get(bins[0], bins[0])
             self.assertIn(binary, ROLES)
-            self.assert_role(tokens, binary, ROLES[binary][2])
+            cpu = binary == "zksync_os_snark_prover" and "--no-default-features" in tokens
+            self.assert_role(tokens, binary, False if cpu else ROLES[binary][2])
             self.assertIn("--locked", tokens)
             seen.append(binary)
-        self.assertCountEqual(seen, ROLES)
+        self.assertCountEqual(seen, [*ROLES, "zksync_os_snark_prover"])
+        self.assertIn('CARGO_TARGET_DIR="${PWD}/target/snark-gpu"', workflow)
+        for suffix in ("gpu", "cpu"):
+            self.assertEqual(workflow.count(
+                '${{ env.ZKSYNC_OS_SNARK_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-'
+                + suffix + '.tar.gz'), 2)
 
     def test_documented_worker_commands_select_their_package(self):
         for path, expected in (
@@ -121,8 +138,8 @@ class ProverRoleRecipeTests(unittest.TestCase):
                 if len(bins) != 1 or bins[0] not in ROLES:
                     continue
                 binary = bins[0]
-                # The development guide intentionally demonstrates optional GPU SNARK.
-                gpu = ROLES[binary][2] or path == "docs/setup_linux_vm.md"
+                # Explicit CPU fallback stays no-default-features; all defaults are GPU.
+                gpu = not (binary == "zksync_os_snark_prover" and "--no-default-features" in tokens)
                 with self.subTest(path=path, role=binary):
                     self.assert_role(tokens, binary, gpu)
                 seen.add(binary)
@@ -162,7 +179,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
                 if re.search(r"\bcargo build\b", line) and not line.lstrip().startswith("#"):
                     with self.subTest(path=path, line=line):
                         self.assertRegex(line, r"bash (?:\.release-tooling/)?scripts/"
-                                         r"cargo-with-patched-airbender\.sh [a-z-]+ --\s+cargo build")
+                                         r"cargo-with-patched-airbender\.sh (?:--gpu32 )?[a-z-]+ --\s+cargo build")
                         self.assertIn("AIRBENDER_BUILD_ATTESTATION=", line)
         ci = (ROOT / ".github/workflows/ci.yaml").read_text()
         for command in ("clippy", "build", "test"):
@@ -183,6 +200,91 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertIn(".cargo_exit_code == 0 and .inputs_reverified == true", release)
         self.assertIn("roleInputRecords: $airbender_records", release)
         self.assertIn("PROVER_SOURCE_DIR: ${{ github.workspace }}", release)
+        cpu = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
+        self.assertIn("AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-cpu-airbender-build-inputs.json", cpu)
+        self.assertIn("COPY --from=cpu-builder /usr/src/zksync/snark-cpu-airbender-build-inputs.json "
+                      "/usr/share/syscoin-prover/airbender-build-inputs.json", cpu)
+        self.assertIn('for role in combined fri snark snark-cpu; do', release)
+        self.assertRegex(release, r'tar -czf [^\n]+-cpu\.tar\.gz" \\\n[^\n]+snark-cpu-airbender-build-inputs\.json')
+
+    def test_gpu32_default_and_explicit_cpu_image_cannot_mix(self):
+        source = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
+        cpu, gpu = source.split("# SYSCOIN: Match the tested GPU32 backend's CUDA ABI", 1)
+        self.assertIn(" AS cpu\n", cpu)
+        self.assertIn(" AS gpu\n", gpu)
+        self.assertNotIn("nvidia/cuda", cpu)
+        self.assertNotIn("--gpu32", cpu)
+        self.assertNotIn("setup_compact.key", cpu)
+        self.assertNotIn("setup_2^25.key", gpu)
+        self.assertIn("--gpu32 docker-snark", gpu)
+        self.assertNotIn("--no-default-features", gpu)
+        for image in ("zksync-os-prover-snark", "zksync-airbender-prover"):
+            text = (ROOT / "docker" / image / "Dockerfile").read_text()
+            self.assertIn("12.9.1-devel-ubuntu24.04@sha256:e542739f", text)
+            self.assertIn("CUDAARCHS=80;89;90;120", text)
+            self.assertIn("--prepare-bellman /opt/bellman-cuda", text)
+            self.assertIn("-DBUILD_TESTS=OFF", text)
+            self.assertIn('-DCMAKE_CUDA_ARCHITECTURES="${CUDAARCHS}"', text)
+            self.assertNotIn("--wrapper-cache-policy cpu-cold", text)
+        # A backend failure cannot dispatch the other target or reacquire a lease.
+        entrypoint = (ROOT / "docker/zksync-os-prover-snark/entrypoint.sh").read_text()
+        self.assertIn('exec /usr/bin/zksync_os_snark_prover "$@"', entrypoint)
+        self.assertNotIn("||", entrypoint)
+        self.assertNotIn("cpu-cold", entrypoint)
+
+    def test_fri_recipe_is_byte_unchanged(self):
+        path = "docker/zksync-os-prover-fri/Dockerfile"
+        # Merged PR8/main 1b152e8 bytes; do not require an ancestor Git object in
+        # the shallow CI checkout merely to enforce the immutable FRI boundary.
+        self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(),
+                         "007eb0f396686d224c635b39fc505b497cb536dab40690f766dc016806e1d868")
+
+    def test_gpu_routes_require_opt_in_overlay_and_no_cpu_cache_argument(self):
+        for path in ("README.md", "docs/setup_linux_vm.md"):
+            source = re.sub(r"\\\r?\n\s*", " ", (ROOT / path).read_text())
+            for line in source.splitlines():
+                if "cargo run" not in line or "--trusted-setup-file" not in line:
+                    continue
+                cpu = "--no-default-features" in line
+                self.assertEqual("--gpu32" in line, not cpu)
+                if not cpu:
+                    self.assertNotIn("--wrapper-cache-policy cpu-cold", line)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is required")
+    def test_installer_keeps_strict_role_specific_architecture_gate(self):
+        installer = (ROOT / "docker/install-build-toolchain.sh").read_text()
+        block = re.search(r'(case "\$\{PROVER_GPU_ROLE:-fri\}" in\n.*?\nesac)', installer, re.S).group(1)
+        pins = ROOT / "docker/prover-build-pins.json"
+        for role, arch, valid in (
+            ("", "", True), ("fri", "80;89;90", True),
+            ("fri", "80;89;90;120", False), ("snark", "80;89;90;120", True),
+            ("combined", "80;89;90;120", True), ("snark", "", False),
+            ("combined", "80;89;90", False), ("unknown", "80;89;90;120", False),
+        ):
+            env = {**os.environ, "pins": str(pins), "PROVER_GPU_ROLE": role, "CUDAARCHS": arch}
+            with self.subTest(role=role, arch=arch):
+                result = subprocess.run(["sh", "-ec", block], env=env, capture_output=True)
+                self.assertEqual(result.returncode == 0, valid)
+        for image, role in (("zksync-os-prover-snark", "snark"), ("zksync-airbender-prover", "combined")):
+            source = (ROOT / "docker" / image / "Dockerfile").read_text()
+            self.assertIn(f"PROVER_GPU_ROLE={role}", source)
+
+    def test_release_rejects_old_or_unknown_nvcc_before_backend_build(self):
+        workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
+        block = workflow.split("      - name: Check CUDA version\n", 1)[1].split("      - name:", 1)[0]
+        command = block.split("        run: |\n", 1)[1]
+        command = "\n".join(line[10:] for line in command.splitlines())
+        self.assertLess(workflow.index("GPU32 SNARK requires NVCC"), workflow.index("--prepare-bellman"))
+        for version, valid in (("11.8", False), ("12.6", False), ("12.8", False),
+                               ("12.9", True), ("13.0", True), ("unknown", False)):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
+                bin_dir = Path(temporary)
+                nvcc = bin_dir / "nvcc"
+                nvcc.write_text(f"#!/bin/sh\nprintf '%s\\n' 'Cuda compilation tools, release {version}, Vfixture'\n")
+                nvcc.chmod(0o755)
+                result = subprocess.run(["bash", "-euc", command], env={**os.environ,
+                    "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}, capture_output=True)
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
 
     @unittest.skipUnless(shutil.which("git"), "Git is required")
     def test_release_selected_lock_matches_git_blob_before_build_and_role_validation(self):
@@ -222,7 +324,15 @@ class ProverRoleRecipeTests(unittest.TestCase):
             self.assertIn("    " + path + "\n", context)
             self.assertIn("!" + path, ignore)
             for _, image, _ in ROLES.values():
-                self.assertIn(path, (ROOT / "docker" / image / "Dockerfile").read_text())
+                docker = (ROOT / "docker" / image / "Dockerfile").read_text()
+                self.assertTrue(path in docker or (path.startswith("patches/") and "COPY patches ./patches" in docker))
+        for path in GPU_OVERLAY_FILES:
+            self.assertIn("    " + path + "\n", context)
+            self.assertIn("!" + path, ignore)
+            for image in ("zksync-airbender-prover", "zksync-os-prover-snark"):
+                docker = (ROOT / "docker" / image / "Dockerfile").read_text()
+                self.assertTrue(path in docker or (path.startswith("patches/") and "COPY patches ./patches" in docker))
+            self.assertNotIn(path, (ROOT / "docker/zksync-os-prover-fri/Dockerfile").read_text())
         for path in ("docker/install-build-toolchain.sh", ".github/actions/runner-setup/action.yaml"):
             text = (ROOT / path).read_text()
             self.assertIn("python3 python3-tomli", text)
