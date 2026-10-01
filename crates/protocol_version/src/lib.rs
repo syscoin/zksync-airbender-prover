@@ -80,20 +80,21 @@ struct ZkOsWrapperVersion(&'static str);
 #[allow(dead_code)]
 struct BinMd5Sum(&'static str);
 
-// SYSCOIN: The zero VK is a fail-closed release sentinel; bind the sole supported lane to the
-// reproducible compact-Bitcoin-DA guest only after V32 key generation replaces it.
+// SYSCOIN: Keep the zero sentinel rejection even after binding this isolated candidate
+// to the reproducible guest and its successfully generated Security100 verification key.
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const SYSCOIN_APP_MD5: &str = "5117d5dac6dbd34b93fef54e04d0b41c";
+const SYSCOIN_VK_HASH: &str = "0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe";
+const SYSCOIN_APP_MD5: &str = "1bc285f1bbde995134d483c4e75ee204";
 const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
-    0x0d2bc42e, 0xeea78bfb, 0x08553eb9, 0xe18ee1ef, 0xa4a97e19, 0x9b5db62d, 0x9972e789, 0x24d28425,
+    0x1be0999e, 0xb16ad923, 0x5efc3c32, 0x0a750afa, 0x496f7ee4, 0xcb947492, 0x6decbd53, 0x9eeea674,
 ]);
 
 /// SYSCOIN: The sole canonical lane is protocol V32, Execution V7, Proving V8.
 /// It uses the patched zksync-os v0.4.0 app with compact Bitcoin DA.
 const SYSCOIN_V32_EXECUTION_V7_PROVING_V8: ProtocolVersion = ProtocolVersion {
     // Keccak256 of the phase-3 SNARK VK (`generate-vk --check-aux-params`), so it binds the
-    // app binary below. The zero sentinel deliberately blocks deployment until keygen.
-    vk_hash: VerificationKeyHash(ZERO_VK_HASH),
+    // app binary below. This candidate does not authorize release or deployment.
+    vk_hash: VerificationKeyHash(SYSCOIN_VK_HASH),
     airbender_version: AirbenderVersion("v0.6.0-rc.2"),
     zksync_os_version: ZkSyncOSVersion("v0.4.0"),
     zkos_wrapper: ZkOsWrapperVersion("v0.6.0-rc.2"),
@@ -205,10 +206,31 @@ mod tests {
 
     #[test]
     fn zero_vk_sentinel_blocks_deployment() {
-        let error = SupportedProtocolVersions::default()
+        let mut versions = SupportedProtocolVersions::default();
+        versions.versions[0].vk_hash = VerificationKeyHash(ZERO_VK_HASH);
+        let error = versions
             .ensure_syscoin_release_constants()
             .expect_err("zero VK sentinel must keep the deployment gate closed");
         assert!(error.contains("zero regeneration sentinel"));
+    }
+
+    #[test]
+    fn generated_candidate_identity_is_the_only_registered_lane() {
+        let versions = SupportedProtocolVersions::default();
+        versions.ensure_syscoin_release_constants().unwrap();
+        assert_eq!(versions.vk_hashes(), vec![SYSCOIN_VK_HASH.to_owned()]);
+        assert_eq!(
+            SYSCOIN_VK_HASH,
+            "0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe"
+        );
+        assert_eq!(
+            versions.program_commitment_for(SYSCOIN_VK_HASH),
+            Some(SYSCOIN_PROGRAM_COMMITMENT)
+        );
+        assert!(!versions.contains(ZERO_VK_HASH));
+        assert!(!versions
+            .contains("0x9f7576b911e7d3f528d49f894208682c81800814db9e3beac7fc3b1c4d626e7a"));
+        assert!(!versions.supports_program(&ProgramCommitment([0; 8])));
     }
 
     #[test]
@@ -217,24 +239,24 @@ mod tests {
         let [version] = versions.versions.as_slice() else {
             panic!("expected one canonical version")
         };
-        assert_eq!(version.bin_md5sum.0, "5117d5dac6dbd34b93fef54e04d0b41c");
+        assert_eq!(version.bin_md5sum.0, "1bc285f1bbde995134d483c4e75ee204");
         let app_bin = include_bytes!("../../../multiblock_batch.bin");
         let app_text = include_bytes!("../../../multiblock_batch.text");
-        assert_eq!(app_bin.len(), 1_323_208);
-        assert_eq!(app_text.len(), 1_193_676);
+        assert_eq!(app_bin.len(), 1_329_732);
+        assert_eq!(app_text.len(), 1_200_064);
         assert_eq!(
             format!("{:x}", Sha256::digest(app_bin)),
-            "3eab56f061f330704fc90da98c5c3de9aef824842873fc2eb240475da5945d4a"
+            "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6"
         );
         assert_eq!(
             format!("{:x}", Sha256::digest(app_text)),
-            "cd1c9b6679b97a47b24a71208d281b417a3cb714760fcf5b065896e6c6a84ce9"
+            "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a"
         );
         assert_eq!(
             version.program_commitment.0,
             [
-                220972078, 4003957755, 139804345, 3784237551, 2762571289, 2606609965, 2574444425,
-                617776165,
+                467704222, 2976569635, 1593588786, 175442682, 1232043748, 3415504018, 1844231507,
+                2666440308,
             ]
         );
     }

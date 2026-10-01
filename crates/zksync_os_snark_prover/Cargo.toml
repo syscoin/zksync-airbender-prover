@@ -25,11 +25,13 @@ zkos_wrapper.workspace = true
 # external dependencies
 anyhow.workspace = true
 clap.workspace = true
+libc.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 # SYSCOIN: Materialize the legacy operator artifact in memory before moving the wrapper proof into
 # the crash-durable submission boundary, then write it only after a definitive disposition.
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

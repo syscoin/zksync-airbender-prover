@@ -168,7 +168,9 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .sbom-tooling
-          sparse-checkout: .github/scripts
+          sparse-checkout: |
+            .github/scripts
+            patches
           fetch-depth: '1'
           persist-credentials: false
 
@@ -200,7 +202,9 @@ jobs:
           [[ -z "$(git -C .sbom-tooling status --porcelain --untracked-files=all)" ]]
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py bind \
             "${COMPONENT}" "${IMAGE_DIGEST}" "bom-${COMPONENT}-image.cdx.json" \
+            --airbender-pins .sbom-tooling/patches/airbender-cuda-device-diagnostics.json \
             > "bom-${COMPONENT}-image.bound.cdx.json"
+          install -m 0644 .sbom-tooling/patches/airbender-cuda-device-diagnostics.json airbender-build-pins.json
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py record \
             "${COMPONENT}" "${IMAGE_DIGEST}" > "image-identity.json"
 
@@ -211,6 +215,7 @@ jobs:
           path: |
             bom-${{ matrix.app }}-image.bound.cdx.json
             image-identity.json
+            airbender-build-pins.json
           if-no-files-found: error
 
       - name: Upload CycloneDX file to Dependency Track

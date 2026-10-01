@@ -16,15 +16,19 @@ COPY docker/install-build-toolchain.sh /usr/local/bin/install-build-toolchain
 RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 
 COPY docker/fetch-verified-crs.sh /usr/local/bin/fetch-verified-crs
-RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs /setup_compact.key
+RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs cpu-snark /setup_2^25.key
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
+COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py ./scripts/
+COPY patches/airbender-cuda-device-diagnostics.patch patches/airbender-cuda-device-diagnostics.json patches/airbender.Cargo.lock ./patches/
 
 # SYSCOIN: Match the hardened release topology: CPU-only wrapping, without the GPU feature.
-RUN cargo build --locked --profile release --target x86_64-unknown-linux-gnu \
-    --bin zksync_os_snark_prover --no-default-features
+RUN AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-airbender-build-inputs.json \
+    bash scripts/cargo-with-patched-airbender.sh docker-snark -- \
+    cargo build --locked --profile release --target x86_64-unknown-linux-gnu \
+    -p zksync_os_snark_prover --bin zksync_os_snark_prover --no-default-features
 
 FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
 
@@ -33,10 +37,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 COPY docker/zksync-os-prover-snark/entrypoint.sh /entrypoint.sh
-COPY --from=builder /setup_compact.key /setup_compact.key
+COPY --from=builder /setup_2^25.key /setup_2^25.key
 COPY --from=builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
 COPY --from=builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
 COPY --from=builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync_os_snark_prover /usr/bin/zksync_os_snark_prover
+COPY --from=builder /usr/src/zksync/snark-airbender-build-inputs.json /usr/share/syscoin-prover/airbender-build-inputs.json
 
 RUN chmod 0755 /entrypoint.sh
 

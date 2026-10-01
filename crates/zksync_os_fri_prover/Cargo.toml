@@ -38,5 +38,6 @@ url.workspace = true
 gpu = ["zksync_airbender_cli/gpu"]
 
 [dev-dependencies]
+sha2.workspace = true
 # SYSCOIN: Validate the app commitment carried through unified recursion.
 zkos_wrapper.workspace = true

@@ -19,7 +19,7 @@ source ~/.bashrc
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential libssl-dev pkg-config clang cmake
+sudo apt-get install -y build-essential libssl-dev pkg-config clang cmake python3 python3-tomli
 ```
 
 ### 3. Install foundry
@@ -53,7 +53,7 @@ source ~/.bashrc
 ### 5. Compile era-bellman-cuda
 
 ```bash
-# needed for SNARKing
+# needed for GPU SNARK / combined workers, not the package-scoped FRI worker
 git clone https://github.com/matter-labs/era-bellman-cuda.git
 # SYSCOIN: Match the immutable CUDA source used by production release artifacts.
 git -C era-bellman-cuda checkout --detach d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206
@@ -75,8 +75,12 @@ git clone https://github.com/matter-labs/zksync-airbender-prover.git # prover
 
 ### 7. Download CRS file
 
+Only the GPU SNARK example below needs the compact CRS; FRI needs none. For the dedicated CPU
+SNARK worker, use the separate CPU CRS described in [crs/README.md](../crs/README.md).
+
 ```bash
-curl  https://storage.googleapis.com/matterlabs-setup-keys-us/setup-keys/setup_compact.key --output zksync-airbender-prover/crs/setup_compact.key
+PROVER_BUILD_PINS=zksync-airbender-prover/docker/prover-build-pins.json \
+  sh zksync-airbender-prover/docker/fetch-verified-crs.sh gpu-snark zksync-airbender-prover/crs/setup_compact.key
 ```
 
 ### 8. Start local L1
@@ -96,10 +100,15 @@ prover_api_fake_fri_provers_enabled=false prover_api_fake_snark_provers_enabled=
 
 ### 10. Start FRI prover
 
+The checked-in wrapper applies the pinned diagnostic-only CUDA compatibility patch in isolated
+source copies; see [build overlay](airbender-build-overlay.md). It preserves package selection,
+the caller's working directory, and the normal `target/` artifact location.
+
 ```bash
 # in a new terminal/session
 cd zksync-airbender-prover
-cargo run --release --features gpu --bin zksync_os_fri_prover -- --submission-dir "$PWD/output/fri-submissions"
+# Select the package to avoid enabling other workspace workers' GPU features.
+bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --release -p zksync_os_fri_prover --features gpu --bin zksync_os_fri_prover -- --submission-dir "$PWD/output/fri-submissions"
 ```
 
 ### 11. (OPTIONAL) Generate load
@@ -119,7 +128,7 @@ cargo run --release -- --rpc-url 'http://127.0.0.1:3050' --rich-privkey 0x772682
 ```bash
 # in same terminal session as the FRI prover, but first cancel FRI prover
 ulimit -s 300000
-RUST_BACKTRACE=full RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-url http://localhost:3124 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
+RUST_BACKTRACE=full RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-url http://localhost:3124 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 ```
 
 > NOTE: Even if you have enough VRAM to run both processes, by default, the provers will simply consume all the VRAM available. You can either run SNARK or FRI at any one given time. There's also the intermitent (that runs some FRIs, then a SNARK, etc.), you can read more in the main [README](https://github.com/matter-labs/zksync-airbender-prover), under [Usage section](https://github.com/matter-labs/zksync-airbender-prover?tab=readme-ov-file#usage). Look for `ZKsync OS Prover Service`.

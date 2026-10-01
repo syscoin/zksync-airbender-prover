@@ -1,5 +1,9 @@
 use core::fmt;
-use std::{collections::HashMap, net::Ipv4Addr, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr},
+    time::Duration,
+};
 
 use tokio::{sync::watch, time::Instant};
 use vise::{Counter, Gauge, Histogram, Metrics, MetricsCollection};
@@ -7,16 +11,26 @@ use vise_exporter::MetricsExporter;
 
 pub async fn start_metrics_exporter(
     port: u16,
+    stop_receiver: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    start_metrics_exporter_at(Ipv4Addr::UNSPECIFIED.into(), port, stop_receiver).await
+}
+
+/// SYSCOIN: Keep private validation listeners on loopback without changing the
+/// legacy all-interface exporter API or remote-monitoring default.
+pub async fn start_metrics_exporter_at(
+    bind_address: IpAddr,
+    port: u16,
     mut stop_receiver: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    tracing::info!("Starting metrics exporter on port {port}");
+    let prom_bind_address = (bind_address, port).into();
+    tracing::info!("Starting metrics exporter on {prom_bind_address}");
     let registry = MetricsCollection::lazy().collect();
     let metrics_exporter =
         MetricsExporter::new(registry.into()).with_graceful_shutdown(async move {
             stop_receiver.changed().await.ok();
         });
 
-    let prom_bind_address = (Ipv4Addr::UNSPECIFIED, port).into();
     metrics_exporter
         .start(prom_bind_address)
         .await

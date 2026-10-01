@@ -2,6 +2,7 @@
 """SYSCOIN: Bind the complete image build matrix and SBOM evidence to immutable digests."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,34 @@ def unique_object(pairs):
 
 def parse_json(text):
     return json.loads(text, object_pairs_hook=unique_object)
+
+
+def airbender_build_pins(path):
+    """Read the tooling-bound manifest and verify both adjacent immutable inputs."""
+    require(path.is_file() and not path.is_symlink(), "invalid Airbender pin manifest")
+    raw = path.read_bytes()
+    pins = parse_json(raw)
+    require(isinstance(pins, dict) and pins.get("schema_version") == 1,
+            "invalid Airbender pin schema")
+    require(pins.get("upstream_url") == "https://github.com/matter-labs/zksync-airbender",
+            "unexpected Airbender repository")
+    for key in ("upstream_commit", "upstream_tree", "patched_tree"):
+        require(isinstance(pins.get(key), str) and SHA.fullmatch(pins[key]),
+                f"invalid Airbender {key}")
+    for key in ("patch_sha256", "preimage_sha256", "postimage_sha256",
+                "canonical_lock_sha256", "overlay_lock_sha256"):
+        require(isinstance(pins.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", pins[key])
+                and pins[key] != "0" * 64, f"invalid Airbender {key}")
+    for key, expected_name, hash_key in (
+        ("patch_file", "airbender-cuda-device-diagnostics.patch", "patch_sha256"),
+        ("overlay_lock_file", "airbender.Cargo.lock", "overlay_lock_sha256"),
+    ):
+        require(pins.get(key) == expected_name, f"unexpected Airbender {key}")
+        artifact = path.parent / expected_name
+        require(artifact.is_file() and not artifact.is_symlink(), f"invalid Airbender {key}")
+        require(hashlib.sha256(artifact.read_bytes()).hexdigest() == pins[hash_key],
+                f"Airbender {key} hash mismatch")
+    return {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "pins": pins}
 
 
 def build_identity(env):
@@ -108,7 +137,7 @@ def image_matrix(digests, identity):
     ]}
 
 
-def bind_sbom(bom, record):
+def bind_sbom(bom, record, airbender=None):
     require(isinstance(bom, dict) and bom.get("bomFormat") == "CycloneDX"
             and bom.get("specVersion") == "1.6", "expected a CycloneDX 1.6 SBOM")
     metadata = bom.setdefault("metadata", {})
@@ -122,6 +151,12 @@ def bind_sbom(bom, record):
         require(not any(isinstance(prop, dict) and prop.get("name") == name for prop in properties),
                 f"SBOM already contains build identity: {key}")
         properties.append({"name": name, "value": value})
+    if airbender is not None:
+        name = "io.syscoin.prover.airbender-build.inputs"
+        require(not any(isinstance(prop, dict) and prop.get("name") == name for prop in properties),
+                "SBOM already contains Airbender build inputs")
+        properties.append({"name": name, "value": json.dumps(
+            airbender, separators=(",", ":"), sort_keys=True)})
     return bom
 
 
@@ -138,7 +173,13 @@ def main():
     bind.add_argument("component")
     bind.add_argument("digest")
     bind.add_argument("bom", type=Path)
+    bind.add_argument("--airbender-pins", type=Path)
+    pins = commands.add_parser("airbender-pins")
+    pins.add_argument("manifest", type=Path)
     args = parser.parse_args()
+    if args.command == "airbender-pins":
+        print(json.dumps(airbender_build_pins(args.manifest), separators=(",", ":"), sort_keys=True))
+        return
     identity = build_identity(os.environ)
     if args.command == "record":
         result = image_record(identity, args.component, args.digest)
@@ -148,7 +189,8 @@ def main():
         result = image_matrix(parse_json(os.environ["IMAGE_DIGESTS"]), identity)
     else:
         result = bind_sbom(parse_json(args.bom.read_text()),
-                           image_record(identity, args.component, args.digest))
+                           image_record(identity, args.component, args.digest),
+                           airbender_build_pins(args.airbender_pins) if args.airbender_pins else None)
     print(json.dumps(result, separators=(",", ":"), sort_keys=True))
 
 

@@ -18,5 +18,11 @@
     "url": "https://storage.googleapis.com/matterlabs-setup-keys-us/setup-keys/setup_compact.key",
     "size": 4831838468,
     "sha256": "90d1dea94da665d5741dcc6e9ffc1af23a29669f950a6d599a6ccfee4cfb81bd"
+  },
+  "cpu_snark_crs": {
+    "url": "https://storage.googleapis.com/matterlabs-setup-keys-us/setup-keys/setup_2%5E25.key?generation=1682086010630627",
+    "size": 2147483920,
+    "sha256": "021fcc36428ff74352a94ff9ccdd6ef234e99e33e670c2507612994849aa1421",
+    "g1_count": 33554432
   }
 }

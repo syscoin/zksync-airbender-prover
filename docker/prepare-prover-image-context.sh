@@ -29,6 +29,11 @@ readonly tooling_files=(
     docker/prover-build-pins.json
     docker/install-build-toolchain.sh
     docker/fetch-verified-crs.sh
+    scripts/cargo-with-patched-airbender.sh
+    scripts/prepare-patched-airbender.py
+    patches/airbender-cuda-device-diagnostics.patch
+    patches/airbender-cuda-device-diagnostics.json
+    patches/airbender.Cargo.lock
     docker/zksync-airbender-prover/Dockerfile
     docker/zksync-airbender-prover/entrypoint.sh
     docker/zksync-os-prover-fri/Dockerfile
@@ -51,6 +56,9 @@ readonly tooling_data_files=(
     docker/zksync-airbender-prover/Dockerfile
     docker/zksync-os-prover-fri/Dockerfile
     docker/zksync-os-prover-snark/Dockerfile
+    patches/airbender-cuda-device-diagnostics.patch
+    patches/airbender-cuda-device-diagnostics.json
+    patches/airbender.Cargo.lock
 )
 for path in "${tooling_data_files[@]}"; do
     install -d "${output_dir}/$(dirname "${path}")"
@@ -60,6 +68,8 @@ done
 readonly tooling_executables=(
     docker/install-build-toolchain.sh
     docker/fetch-verified-crs.sh
+    scripts/cargo-with-patched-airbender.sh
+    scripts/prepare-patched-airbender.py
     docker/zksync-airbender-prover/entrypoint.sh
     docker/zksync-os-prover-snark/entrypoint.sh
 )

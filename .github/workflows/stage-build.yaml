@@ -160,6 +160,8 @@ jobs:
           sparse-checkout: |
             docker
             .github/scripts
+            scripts
+            patches
           fetch-depth: '1'
           persist-credentials: false
 
@@ -181,6 +183,11 @@ jobs:
           .image-tooling/docker/prepare-prover-image-context.sh \
             .image-source .image-tooling "${build_context}"
           build_pins="$(jq -ce '
+            def valid_crs:
+              (.url | type) == "string" and (.url | startswith("https://"))
+              and (.size | type) == "number" and .size > 0 and .size == (.size | floor)
+              and (.sha256 | type) == "string" and (.sha256 | test("^[0-9a-f]{64}$"))
+              and .sha256 != ("0" * 64);
             if .schema != "syscoin-prover-image-build-pins-v1"
                 or (.rust_toolchain | type) != "string"
                 or (.rustup_init.version | type) != "string"
@@ -190,9 +197,11 @@ jobs:
                 or (.cuda_architectures | type) != "string"
                 or ((.bellman_cuda.repository | type) != "string" or (.bellman_cuda.repository | startswith("https://") | not))
                 or ((.bellman_cuda.commit | type) != "string" or (.bellman_cuda.commit | test("^[0-9a-f]{40}$") | not))
-                or ((.crs.url | type) != "string" or (.crs.url | startswith("https://") | not))
-                or ((.crs.size | type) != "number" or .crs.size <= 0)
-                or ((.crs.sha256 | type) != "string" or (.crs.sha256 | test("^[0-9a-f]{64}$") | not))
+                or (.crs | valid_crs | not)
+                or (.cpu_snark_crs | valid_crs | not)
+                or (.cpu_snark_crs.g1_count | type) != "number"
+                or .cpu_snark_crs.g1_count < 33554432
+                or .cpu_snark_crs.g1_count != (.cpu_snark_crs.g1_count | floor)
             then error("invalid prover image build pins") else . end
           ' "${build_context}/docker/prover-build-pins.json")"
           rust_toolchain="$(jq -r '.rust_toolchain' <<< "${build_pins}")"
@@ -205,6 +214,9 @@ jobs:
           [[ "$(sha256sum .image-source/multiblock_batch.text | awk '{print $1}')" == "${app_text_sha256}" ]]
           echo "build_context=${build_context}" >> "${GITHUB_OUTPUT}"
           echo "build_pins=${build_pins}" >> "${GITHUB_OUTPUT}"
+          airbender_pins="$(python3 .image-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
+            "${build_context}/patches/airbender-cuda-device-diagnostics.json")"
+          echo "airbender_pins=${airbender_pins}" >> "${GITHUB_OUTPUT}"
           echo "app_bin_sha256=${app_bin_sha256}" >> "${GITHUB_OUTPUT}"
           echo "app_bin_size=${app_bin_size}" >> "${GITHUB_OUTPUT}"
           echo "app_text_sha256=${app_text_sha256}" >> "${GITHUB_OUTPUT}"
@@ -283,6 +295,7 @@ jobs:
           APP_TEXT_SHA256: ${{ steps.source.outputs.app_text_sha256 }}
           APP_TEXT_SIZE: ${{ steps.source.outputs.app_text_size }}
           BUILD_PINS: ${{ steps.source.outputs.build_pins }}
+          AIRBENDER_PINS: ${{ steps.source.outputs.airbender_pins }}
           COMPONENT: ${{ matrix.component }}
         run: |
           set -euo pipefail
@@ -302,24 +315,34 @@ jobs:
             --argjson app_text_size "${APP_TEXT_SIZE}" \
             --arg component "${COMPONENT}" \
             --argjson build_pins "${BUILD_PINS}" \
+            --argjson airbender "${AIRBENDER_PINS}" \
             '
               if .buildDefinition.buildType != "https://actions.github.io/buildtypes/workflow/v1"
                   or (.buildDefinition.internalParameters | type) != "object"
                   or (.buildDefinition.resolvedDependencies | type) != "array"
                   or (.runDetails.builder.id | type) != "string"
               then error("unexpected GitHub provenance predicate shape") else . end
+              # SYSCOIN: Attest the same role-specific serialization that the Dockerfile fetches.
+              | (if $component == "zksync-os-prover-snark" then $build_pins.cpu_snark_crs
+                 elif $component == "zksync-airbender-prover" then $build_pins.crs
+                 elif $component == "zksync-os-prover-fri" then null
+                 else error("unknown prover image component") end) as $role_crs
               | .buildDefinition.resolvedDependencies += [
                   {uri: $source_uri, digest: {gitCommit: $source_sha}},
-                  {uri: $tooling_uri, digest: {gitCommit: $tooling_sha}}
+                  {uri: $tooling_uri, digest: {gitCommit: $tooling_sha}},
+                  {uri: ("git+" + $airbender.pins.upstream_url), digest: {gitCommit: $airbender.pins.upstream_commit}},
+                  {uri: ($tooling_uri + "/patches/airbender-cuda-device-diagnostics.json"), digest: {sha256: $airbender.manifest_sha256}},
+                  {uri: ($tooling_uri + "/patches/" + $airbender.pins.patch_file), digest: {sha256: $airbender.pins.patch_sha256}},
+                  {uri: ($tooling_uri + "/patches/" + $airbender.pins.overlay_lock_file), digest: {sha256: $airbender.pins.overlay_lock_sha256}}
                 ]
               | if $component == "zksync-airbender-prover" then
                   .buildDefinition.resolvedDependencies += [
                     {uri: ("git+" + $build_pins.bellman_cuda.repository), digest: {gitCommit: $build_pins.bellman_cuda.commit}}
                   ]
                 else . end
-              | if $component != "zksync-os-prover-fri" then
+              | if $role_crs != null then
                   .buildDefinition.resolvedDependencies += [
-                    {uri: $build_pins.crs.url, digest: {sha256: $build_pins.crs.sha256}}
+                    {uri: $role_crs.url, digest: {sha256: $role_crs.sha256}}
                   ]
                 else . end
               | .buildDefinition.internalParameters.syscoinProverImage = {
@@ -327,6 +350,7 @@ jobs:
                   source: {ref: $source_uri, gitCommit: $source_sha},
                   tooling: {repository: $tooling_repository, gitCommit: $tooling_sha},
                   cargoLocked: true,
+                  airbenderBuild: $airbender,
                   rustToolchain: $build_pins.rust_toolchain,
                   rustupInit: $build_pins.rustup_init,
                   cmake: $build_pins.cmake,
@@ -338,8 +362,8 @@ jobs:
                     bin: {sha256: $app_bin_sha256, size: $app_bin_size},
                     text: {sha256: $app_text_sha256, size: $app_text_size}
                   },
-                  trustedSetup: (if $component != "zksync-os-prover-fri" then
-                    {sha256: $build_pins.crs.sha256, size: $build_pins.crs.size}
+                  trustedSetup: (if $role_crs != null then
+                    {sha256: $role_crs.sha256, size: $role_crs.size}
                   else null end)
                 }
             ' <<< "${BASE_PROVENANCE}" > "${RUNNER_TEMP}/${COMPONENT}-provenance.json"

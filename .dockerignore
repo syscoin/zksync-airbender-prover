@@ -4,6 +4,13 @@
 !rust-toolchain.toml
 !multiblock_batch.bin
 !multiblock_batch.text
+!scripts
+!scripts/cargo-with-patched-airbender.sh
+!scripts/prepare-patched-airbender.py
+!patches
+!patches/airbender-cuda-device-diagnostics.patch
+!patches/airbender-cuda-device-diagnostics.json
+!patches/airbender.Cargo.lock
 !docker/install-build-toolchain.sh
 !docker/fetch-verified-crs.sh
 !docker/prover-build-pins.json
