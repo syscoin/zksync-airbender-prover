@@ -4,10 +4,13 @@
 //! authenticated against the registered nonzero VK. This utility authenticates native proof
 //! statements; it does not authorize a lease, settlement transaction, or worker program.
 
+use std::ffi::{CString, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::FromRawFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{ensure, Context};
@@ -350,23 +353,110 @@ fn read_bounded(path: &Path, limit: usize) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn write_verified(path: &Path, verified: &Verified) -> anyhow::Result<()> {
+struct PendingAttestation {
+    path: PathBuf,
+    file: File,
+    published: bool,
+}
+
+impl PendingAttestation {
+    fn new(parent: &Path) -> anyhow::Result<Self> {
+        let mut template = CString::new(parent.join(".verify-fri-XXXXXX").as_os_str().as_bytes())?
+            .into_bytes_with_nul();
+        // SAFETY: mkstemp receives a writable, NUL-terminated template ending in six Xs.
+        let fd = unsafe { libc::mkstemp(template.as_mut_ptr().cast()) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        template.pop();
+        let pending = Self {
+            path: PathBuf::from(OsString::from_vec(template)),
+            // SAFETY: successful mkstemp returns a new descriptor owned exclusively by this File.
+            file: unsafe { File::from_raw_fd(fd) },
+            published: false,
+        };
+        // SAFETY: the descriptor is live and F_SETFD accepts the integer FD_CLOEXEC flag.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(pending)
+    }
+}
+
+impl Drop for PendingAttestation {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_attestation(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    // A hard-link fallback could leave a complete but multiply linked attestation after a crash,
+    // which the controller correctly refuses. Require an exclusive rename from the filesystem.
+    #[cfg(target_os = "linux")]
+    // SAFETY: the arguments match renameat2; both paths are live and NUL-terminated.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    // SAFETY: both pointers refer to live NUL-terminated paths; AT_FDCWD needs no open descriptor.
+    let result = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_attestation(_source: &Path, _destination: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("atomic attestation publication requires Linux or macOS")
+}
+
+fn publish_verified(
+    path: &Path,
+    bytes: &[u8],
+    prepare: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
     ensure!(
         path.is_absolute(),
         "verification output must use an absolute path"
     );
+    let parent = path.parent().context("verification output has no parent")?;
+    let directory = File::open(parent)?;
+    let mut pending = PendingAttestation::new(parent)?;
+    prepare(&mut pending.file, bytes)?;
+    rename_attestation(&pending.path, path)?;
+    pending.published = true;
+    directory.sync_all()?;
+    Ok(())
+}
+
+fn write_verified(path: &Path, verified: &Verified) -> anyhow::Result<()> {
     let mut bytes = serde_json::to_vec(verified)?;
     bytes.push(b'\n');
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    File::open(path.parent().context("verification output has no parent")?)?.sync_all()?;
-    Ok(())
+    publish_verified(path, &bytes, |file, bytes| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
 }
 
 /// Verify the complete ordered range before writing a new private success attestation.
@@ -381,8 +471,11 @@ pub fn verify_files(payload: &Path, expected: &Path, output: &Path) -> anyhow::R
 mod tests {
     use super::*;
     use serde_json::{json, Value};
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     fn inputs() -> (Value, Value) {
         let payload = json!({"from_batch_number": 1, "to_batch_number": 2,
@@ -548,6 +641,43 @@ mod tests {
         path
     }
 
+    fn verified_result() -> Verified {
+        Verified {
+            schema_version: 1,
+            verification: "native_v32_fri_payload",
+            payload_sha256: "a".repeat(64),
+            expected_sha256: "b".repeat(64),
+            vk_hash: format!("0x{}", "11".repeat(32)),
+            program_commitment: format!("0x{}", "22".repeat(32)),
+            from_batch_number: 1,
+            to_batch_number: 2,
+            proof_count: 2,
+        }
+    }
+
+    fn verified_bytes(result: &Verified) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(result).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn assert_private_attestation(path: &Path, bytes: &[u8]) {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    fn entries(directory: &Path) -> Vec<PathBuf> {
+        let mut paths = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
     #[test]
     fn private_exclusive_output_and_bounded_nofollow_input() {
         let directory = temporary_dir();
@@ -561,24 +691,193 @@ mod tests {
         symlink(&input, &link).unwrap();
         assert!(read_bounded(&link, 7).is_err());
         let output = directory.join("output");
-        let result = Verified {
-            schema_version: 1,
-            verification: "native_v32_fri_payload",
-            payload_sha256: "a".repeat(64),
-            expected_sha256: "b".repeat(64),
-            vk_hash: format!("0x{}", "11".repeat(32)),
-            program_commitment: format!("0x{}", "22".repeat(32)),
-            from_batch_number: 1,
-            to_batch_number: 2,
-            proof_count: 2,
-        };
+        let result = verified_result();
         write_verified(&output, &result).unwrap();
-        assert_eq!(
-            std::fs::metadata(&output).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert!(write_verified(&output, &result).is_err());
+        let original = verified_bytes(&result);
+        assert_private_attestation(&output, &original);
+        let inode = std::fs::metadata(&output).unwrap().ino();
+        let mut replacement = verified_result();
+        replacement.payload_sha256 = "c".repeat(64);
+        assert!(write_verified(&output, &replacement).is_err());
+        assert_private_attestation(&output, &original);
+        assert_eq!(std::fs::metadata(&output).unwrap().ino(), inode);
         assert!(write_verified(&link, &result).is_err());
+        assert_eq!(std::fs::read_link(&link).unwrap(), input);
+        assert_eq!(std::fs::read(&input).unwrap(), b"bounded");
+        let missing = directory.join("missing");
+        let broken = directory.join("broken");
+        symlink(&missing, &broken).unwrap();
+        assert!(write_verified(&broken, &result).is_err());
+        assert_eq!(std::fs::read_link(&broken).unwrap(), missing);
+        assert!(!missing.exists());
+        let relative = Path::new("relative-attestation");
+        assert!(write_verified(relative, &result).is_err());
+        let mut prepared = false;
+        assert!(publish_verified(relative, &original, |_, _| {
+            prepared = true;
+            Ok(())
+        })
+        .is_err());
+        assert!(!prepared);
+        assert_eq!(entries(&directory).len(), 4);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn failed_preparation_can_retry(write_everything: bool) {
+        let directory = temporary_dir();
+        let output = directory.join("result");
+        let result = verified_result();
+        let bytes = verified_bytes(&result);
+        let error = publish_verified(&output, &bytes, |file, bytes| {
+            let count = if write_everything {
+                bytes.len()
+            } else {
+                bytes.len() / 2
+            };
+            file.write_all(&bytes[..count])?;
+            assert!(!output.exists());
+            Err(std::io::Error::other(if write_everything {
+                "injected sync failure"
+            } else {
+                "injected partial write failure"
+            }))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected"));
+        assert!(!output.exists());
+        assert!(entries(&directory).is_empty());
+        write_verified(&output, &result).unwrap();
+        assert_private_attestation(&output, &bytes);
+        assert_eq!(entries(&directory), vec![output]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn partial_attestation_write_failure_leaves_output_retryable() {
+        failed_preparation_can_retry(false);
+    }
+
+    #[test]
+    fn attestation_sync_failure_leaves_output_retryable() {
+        failed_preparation_can_retry(true);
+    }
+
+    #[test]
+    fn attestation_crash_child() {
+        let Some(output) = std::env::var_os("ZKSYS_ATTESTATION_CRASH_TEST_OUTPUT") else {
+            return;
+        };
+        let bytes = verified_bytes(&verified_result());
+        publish_verified(Path::new(&output), &bytes, |file, bytes| {
+            file.write_all(&bytes[..bytes.len() / 2])?;
+            file.sync_all()?;
+            std::process::exit(73);
+        })
+        .unwrap();
+        panic!("child unexpectedly published an attestation");
+    }
+
+    #[test]
+    fn abrupt_exit_before_publication_leaves_private_temp_and_allows_retry() {
+        let directory = temporary_dir();
+        let output = directory.join("result");
+        let test_name = format!(
+            "{}::attestation_crash_child",
+            module_path!().split_once("::").unwrap().1
+        );
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name, "--test-threads=1"])
+            .env("ZKSYS_ATTESTATION_CRASH_TEST_OUTPUT", &output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                std::fs::remove_dir_all(&directory).unwrap();
+                panic!("attestation crash child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(73));
+        assert!(!output.exists());
+        let orphaned = entries(&directory);
+        assert_eq!(orphaned.len(), 1);
+        assert!(orphaned[0]
+            .file_name()
+            .unwrap()
+            .as_bytes()
+            .starts_with(b".verify-fri-"));
+        let result = verified_result();
+        let bytes = verified_bytes(&result);
+        assert_private_attestation(&orphaned[0], &bytes[..bytes.len() / 2]);
+        write_verified(&output, &result).unwrap();
+        assert_private_attestation(&output, &bytes);
+        assert_private_attestation(&orphaned[0], &bytes[..bytes.len() / 2]);
+        assert_eq!(entries(&directory).len(), 2);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publishers_preserve_one_complete_exclusive_attestation() {
+        let directory = temporary_dir();
+        let output = directory.join("result");
+        let first = verified_bytes(&verified_result());
+        let mut other = verified_result();
+        other.payload_sha256 = "c".repeat(64);
+        let second = verified_bytes(&other);
+        let (ready_send, ready_receive) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let mut publishers = Vec::new();
+            let mut start = Vec::new();
+            for bytes in [&first, &second] {
+                let (go, wait) = mpsc::channel();
+                start.push(go);
+                let ready = ready_send.clone();
+                let destination = &output;
+                publishers.push(scope.spawn(move || {
+                    publish_verified(destination, bytes, |file, bytes| {
+                        file.write_all(bytes)?;
+                        file.sync_all()?;
+                        ready.send(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(10))
+                            .map_err(std::io::Error::other)?;
+                        Ok(())
+                    })
+                }));
+            }
+            for _ in 0..2 {
+                ready_receive.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+            assert!(!output.exists());
+            assert_eq!(entries(&directory).len(), 2);
+            for sender in start {
+                sender.send(()).unwrap();
+            }
+            let outcomes = publishers
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+            let winner = outcomes.iter().position(|result| result.is_ok()).unwrap();
+            let error = outcomes.into_iter().find_map(Result::err).unwrap();
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(libc::EEXIST)
+            );
+            assert_private_attestation(&output, [&first, &second][winner]);
+        });
+        assert_eq!(entries(&directory), vec![output]);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
