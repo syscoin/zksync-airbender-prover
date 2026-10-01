@@ -170,7 +170,18 @@ jobs:
           path: .sbom-tooling
           sparse-checkout: |
             .github/scripts
+            scripts
             patches
+          fetch-depth: '1'
+          persist-credentials: false
+
+      - name: Checkout exact source lock for image build evidence
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: .sbom-image-source
+          sparse-checkout: Cargo.lock
+          sparse-checkout-cone-mode: false
           fetch-depth: '1'
           persist-credentials: false
 
@@ -200,11 +211,17 @@ jobs:
           [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git -C .sbom-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
           [[ -z "$(git -C .sbom-tooling status --porcelain --untracked-files=all)" ]]
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .sbom-image-source rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ -z "$(git -C .sbom-image-source status --porcelain --untracked-files=all)" ]]
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py bind \
             "${COMPONENT}" "${IMAGE_DIGEST}" "bom-${COMPONENT}-image.cdx.json" \
             --airbender-pins .sbom-tooling/patches/airbender-cuda-device-diagnostics.json \
+            --source-lock .sbom-image-source/Cargo.lock \
             > "bom-${COMPONENT}-image.bound.cdx.json"
-          install -m 0644 .sbom-tooling/patches/airbender-cuda-device-diagnostics.json airbender-build-pins.json
+          python3 .sbom-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
+            .sbom-tooling/patches/airbender-cuda-device-diagnostics.json \
+            --source-lock .sbom-image-source/Cargo.lock > airbender-build-pins.json
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py record \
             "${COMPONENT}" "${IMAGE_DIGEST}" > "image-identity.json"
 

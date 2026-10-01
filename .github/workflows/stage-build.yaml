@@ -215,7 +215,8 @@ jobs:
           echo "build_context=${build_context}" >> "${GITHUB_OUTPUT}"
           echo "build_pins=${build_pins}" >> "${GITHUB_OUTPUT}"
           airbender_pins="$(python3 .image-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
-            "${build_context}/patches/airbender-cuda-device-diagnostics.json")"
+            "${build_context}/patches/airbender-cuda-device-diagnostics.json" \
+            --source-lock "${build_context}/Cargo.lock")"
           echo "airbender_pins=${airbender_pins}" >> "${GITHUB_OUTPUT}"
           echo "app_bin_sha256=${app_bin_sha256}" >> "${GITHUB_OUTPUT}"
           echo "app_bin_size=${app_bin_size}" >> "${GITHUB_OUTPUT}"
@@ -333,7 +334,9 @@ jobs:
                   {uri: ("git+" + $airbender.pins.upstream_url), digest: {gitCommit: $airbender.pins.upstream_commit}},
                   {uri: ($tooling_uri + "/patches/airbender-cuda-device-diagnostics.json"), digest: {sha256: $airbender.manifest_sha256}},
                   {uri: ($tooling_uri + "/patches/" + $airbender.pins.patch_file), digest: {sha256: $airbender.pins.patch_sha256}},
-                  {uri: ($tooling_uri + "/patches/" + $airbender.pins.overlay_lock_file), digest: {sha256: $airbender.pins.overlay_lock_sha256}}
+                  {uri: ($tooling_uri + "/patches/" + $airbender.pins.overlay_lock_file), digest: {sha256: $airbender.pins.overlay_lock_sha256}},
+                  {uri: ($source_uri + "/Cargo.lock"), digest: {sha256: $airbender.selected_lock.canonical_lock_sha256}},
+                  {uri: "syscoin:generated-lock:airbender-source-identity-only-v1", digest: {sha256: $airbender.selected_lock.overlay_lock_sha256}}
                 ]
               | if $component == "zksync-airbender-prover" then
                   .buildDefinition.resolvedDependencies += [

@@ -78,6 +78,47 @@ def audit_lock(canonical, overlay, pins):
     return dict(packages)
 
 
+def selected_lock_overlay(source_lock, reference_overlay, pins):
+    """Derive only the reviewed source-identity substitution from the selected lock.
+
+    The checked-in overlay remains an immutable tooling reference, not a replacement
+    for another compatible application's dependency graph. No Cargo resolution occurs.
+    """
+    require(source_lock.is_file() and not source_lock.is_symlink(), "invalid selected Cargo.lock")
+    checked_hash(reference_overlay, pins["overlay_lock_sha256"])
+    raw = source_lock.read_bytes()
+    canonical = tomllib.loads(raw.decode("utf-8"))
+    reference = read_toml(reference_overlay)
+    blocks = re.split(rb"(?m)(?=^\[\[package\]\]\r?$)", raw)
+    require(len(blocks) == len(canonical["package"]) + 1, "unexpected lock package layout")
+    for index, package in enumerate(canonical["package"], 1):
+        source = package.get("source", "")
+        if "github.com/matter-labs/zksync-airbender" not in source:
+            continue
+        require(source == pins["upstream_lock_source"], "mixed Airbender sources in lock")
+        lines = blocks[index].splitlines(keepends=True)
+        # Cargo emits this simple quoted source assignment. Refuse alternate layouts
+        # instead of guessing which bytes to remove from an application lock.
+        expected_line = ("source = " + json.dumps(source)).encode()
+        matches = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == expected_line]
+        require(len(matches) == 1, "unexpected Airbender source assignment")
+        del lines[matches[0]]
+        blocks[index] = b"".join(lines)
+    overlay_raw = b"".join(blocks)
+    packages = audit_lock(canonical, tomllib.loads(overlay_raw.decode("utf-8")), pins)
+    for name, version in packages.items():
+        matches = [item for item in reference["package"]
+                   if item["name"] == name and item["version"] == version and "source" not in item]
+        require(len(matches) == 1, "selected Airbender package differs from tooling reference")
+    selection = {
+        "schema_version": 1, "derivation": "airbender-source-identity-only-v1",
+        "canonical_lock_sha256": hashlib.sha256(raw).hexdigest(),
+        "overlay_lock_sha256": hashlib.sha256(overlay_raw).hexdigest(),
+        "airbender_packages": packages,
+    }
+    return overlay_raw, selection
+
+
 def cargo_command(argv, manifest):
     require(len(argv) >= 2 and argv[0] == "cargo" and argv[1] in ALLOWED_COMMANDS,
             "expected literal cargo build|test|run|check|clippy|metadata|tree")
@@ -170,8 +211,8 @@ def main(argv):
     overlay = PIN_PATH.parent / pins["overlay_lock_file"]
     checked_hash(patch, pins["patch_sha256"])
     checked_hash(overlay, pins["overlay_lock_sha256"])
-    checked_hash(source / "Cargo.lock", pins["canonical_lock_sha256"])
-    expected = audit_lock(read_toml(source / "Cargo.lock"), read_toml(overlay), pins)
+    overlay_raw, selected_lock = selected_lock_overlay(source / "Cargo.lock", overlay, pins)
+    expected = selected_lock["airbender_packages"]
     attestation = os.environ.get("AIRBENDER_BUILD_ATTESTATION")
     if attestation:
         attestation = Path(attestation)
@@ -186,7 +227,7 @@ def main(argv):
     workspace = build / "prover"
     workspace.mkdir()
     source_hashes = copy_application(source, workspace)
-    checked_hash(workspace / "Cargo.lock", pins["canonical_lock_sha256"])
+    checked_hash(workspace / "Cargo.lock", selected_lock["canonical_lock_sha256"])
     upstream = build / "airbender"
     clone_source = os.environ.get("AIRBENDER_SOURCE_DIR", pins["upstream_url"])
     if "AIRBENDER_SOURCE_DIR" in os.environ:
@@ -213,9 +254,9 @@ def main(argv):
         for name, relative in paths.items():
             destination.write(json.dumps(name) + " = { path = "
                               + json.dumps(str(upstream / relative)) + " }\n")
-    shutil.copyfile(overlay, workspace / "Cargo.lock")
+    (workspace / "Cargo.lock").write_bytes(overlay_raw)
     record = {
-        "schema_version": 1, "label": label, "pins": pins,
+        "schema_version": 1, "label": label, "pins": pins, "selected_lock": selected_lock,
         "tooling_sha256": {str(path.relative_to(TOOLING_ROOT)): sha256(path) for path in
                            (PIN_PATH, patch, overlay, Path(__file__).resolve(),
                             TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")},
@@ -245,7 +286,7 @@ def main(argv):
         write_json_exclusive(build / "build-result.json", record)
         return result.returncode
     verify_upstream(upstream, pins)
-    checked_hash(workspace / "Cargo.lock", pins["overlay_lock_sha256"])
+    checked_hash(workspace / "Cargo.lock", selected_lock["overlay_lock_sha256"])
     checked_hash(manifest, record["workspace_manifest_sha256"])
     for relative, expected_hash in source_hashes.items():
         if relative not in {"Cargo.toml", "Cargo.lock"}:

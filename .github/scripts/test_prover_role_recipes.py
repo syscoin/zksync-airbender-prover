@@ -4,6 +4,7 @@ These recipe checks do not replace native CUDA builds or dependency-tree validat
 """
 
 from pathlib import Path
+import importlib.util
 import json
 import re
 import shlex
@@ -31,6 +32,10 @@ OVERLAY_FILES = (
     "patches/airbender-cuda-device-diagnostics.json",
     "patches/airbender.Cargo.lock",
 )
+LOCK_TEST_SPEC = importlib.util.spec_from_file_location(
+    "lock_fixture", ROOT / ".github/scripts/test_patched_airbender_build.py")
+LOCK_FIXTURE = importlib.util.module_from_spec(LOCK_TEST_SPEC)
+LOCK_TEST_SPEC.loader.exec_module(LOCK_FIXTURE)
 
 
 def cargo_commands(source, verb):
@@ -179,6 +184,33 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertIn("roleInputRecords: $airbender_records", release)
         self.assertIn("PROVER_SOURCE_DIR: ${{ github.workspace }}", release)
 
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_release_selected_lock_matches_git_blob_before_build_and_role_validation(self):
+        release = (ROOT / ".github/workflows/release-bins.yml").read_text()
+        guard = '[[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]'
+        self.assertEqual(release.count(guard), 2)
+        build = release.index('AIRBENDER_BUILD_ATTESTATION="${PWD}/combined-airbender-build-inputs.json"')
+        last_build = release.index('--bin "${ZKSYNC_OS_SNARK_PROVER_BIN}" --no-default-features')
+        records = release.index('airbender_pins="$(python3 .release-tooling/')
+        positions = [match.start() for match in re.finditer(re.escape(guard), release)]
+        self.assertLess(positions[0], build)
+        self.assertTrue(last_build < positions[1] < records)
+        # Run the actual workflow guard against committed current and exact parent locks.
+        # Unrelated dirty application files are deliberately not a lock-identity bypass.
+        for raw in ((ROOT / "Cargo.lock").read_bytes(), LOCK_FIXTURE.parent_lock_bytes()):
+            with self.subTest(lock=raw[:32]), tempfile.TemporaryDirectory() as temporary:
+                repo = Path(temporary)
+                (repo / "Cargo.lock").write_bytes(raw)
+                (repo / "unrelated.txt").write_text("original\n")
+                subprocess.run(["git", "init", "-q", str(repo)], check=True)
+                subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+                subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture",
+                                "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
+                (repo / "unrelated.txt").write_text("unrelated dirty change\n")
+                self.assertEqual(subprocess.run(["bash", "-c", guard], cwd=repo).returncode, 0)
+                (repo / "Cargo.lock").write_bytes(raw + b"\n")
+                self.assertNotEqual(subprocess.run(["bash", "-c", guard], cwd=repo).returncode, 0)
+
     def test_context_and_dockerinclude_the_exact_overlay_inputs(self):
         context = (ROOT / "docker/prepare-prover-image-context.sh").read_text()
         ignore = (ROOT / ".dockerignore").read_text().splitlines()
@@ -197,7 +229,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git") and shutil.which("jq"), "Git and jq are required")
     def test_context_takes_overlay_from_tooling_not_older_application(self):
-        # Real context composition, synthetic source only; no dependency downloads or builds.
+        # Real context composition and exact parent lock; no dependency downloads or builds.
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             source, tooling = directory / "source", directory / "tooling"
@@ -205,6 +237,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
             tooling.mkdir()
             for name in ("Cargo.toml", "Cargo.lock", "multiblock_batch.bin", "multiblock_batch.text"):
                 (source / name).write_text("synthetic context fixture\n")
+            (source / "Cargo.lock").write_bytes(LOCK_FIXTURE.parent_lock_bytes())
             (source / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "nightly-2026-01-01"\n')
             (source / "crates").mkdir()
             (source / "crates/README").write_text("synthetic application fixture\n")
@@ -230,6 +263,17 @@ class ProverRoleRecipeTests(unittest.TestCase):
                 self.assertEqual((output / relative).read_bytes(), (tooling / relative).read_bytes())
                 self.assertNotEqual((output / relative).read_bytes(), (source / relative).read_bytes())
             self.assertEqual((output / "Cargo.lock").read_bytes(), (source / "Cargo.lock").read_bytes())
+            # Invoke the wrapper's actual derivation from the composed tooling/source,
+            # not just a file-copy assertion that misses old-tag lock incompatibility.
+            spec = importlib.util.spec_from_file_location("context_wrapper", output / OVERLAY_FILES[1])
+            wrapper = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(wrapper)
+            reference_pins = json.loads((output / OVERLAY_FILES[3]).read_text())
+            raw, selection = wrapper.selected_lock_overlay(
+                output / "Cargo.lock", output / OVERLAY_FILES[4], reference_pins)
+            self.assertEqual(len(wrapper.audit_lock(wrapper.read_toml(output / "Cargo.lock"),
+                                                   wrapper.tomllib.loads(raw.decode()), reference_pins)), 46)
+            self.assertNotEqual(selection["overlay_lock_sha256"], reference_pins["overlay_lock_sha256"])
             pins = json.loads((output / "docker/prover-build-pins.json").read_text())
             self.assertEqual(pins["rust_toolchain"], "nightly-2026-01-01")
             self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)

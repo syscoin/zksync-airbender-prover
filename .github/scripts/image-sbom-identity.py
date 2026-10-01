@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -36,7 +37,7 @@ def parse_json(text):
     return json.loads(text, object_pairs_hook=unique_object)
 
 
-def airbender_build_pins(path):
+def airbender_build_pins(path, source_lock=None):
     """Read the tooling-bound manifest and verify both adjacent immutable inputs."""
     require(path.is_file() and not path.is_symlink(), "invalid Airbender pin manifest")
     raw = path.read_bytes()
@@ -61,7 +62,19 @@ def airbender_build_pins(path):
         require(artifact.is_file() and not artifact.is_symlink(), f"invalid Airbender {key}")
         require(hashlib.sha256(artifact.read_bytes()).hexdigest() == pins[hash_key],
                 f"Airbender {key} hash mismatch")
-    return {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "pins": pins}
+    result = {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "pins": pins}
+    if source_lock is not None:
+        # Use the same byte derivation and full semantic audit as the Cargo wrapper.
+        # Tooling pins continue to identify immutable reference files; selected_lock
+        # identifies the actual source and generated lock used by this build.
+        wrapper = Path(__file__).resolve().parents[2] / "scripts/prepare-patched-airbender.py"
+        spec = importlib.util.spec_from_file_location("selected_airbender_lock", wrapper)
+        helper = importlib.util.module_from_spec(spec)
+        # Keep a verified sparse tooling checkout clean (including untracked files).
+        exec(compile(wrapper.read_bytes(), str(wrapper), "exec"), helper.__dict__)
+        _, result["selected_lock"] = helper.selected_lock_overlay(
+            source_lock, path.parent / pins["overlay_lock_file"], pins)
+    return result
 
 
 def build_identity(env):
@@ -174,11 +187,13 @@ def main():
     bind.add_argument("digest")
     bind.add_argument("bom", type=Path)
     bind.add_argument("--airbender-pins", type=Path)
+    bind.add_argument("--source-lock", type=Path)
     pins = commands.add_parser("airbender-pins")
     pins.add_argument("manifest", type=Path)
+    pins.add_argument("--source-lock", type=Path)
     args = parser.parse_args()
     if args.command == "airbender-pins":
-        print(json.dumps(airbender_build_pins(args.manifest), separators=(",", ":"), sort_keys=True))
+        print(json.dumps(airbender_build_pins(args.manifest, args.source_lock), separators=(",", ":"), sort_keys=True))
         return
     identity = build_identity(os.environ)
     if args.command == "record":
@@ -188,9 +203,12 @@ def main():
     elif args.command == "matrix":
         result = image_matrix(parse_json(os.environ["IMAGE_DIGESTS"]), identity)
     else:
+        require(args.source_lock is None or args.airbender_pins is not None,
+                "source lock requires Airbender pins")
         result = bind_sbom(parse_json(args.bom.read_text()),
                            image_record(identity, args.component, args.digest),
-                           airbender_build_pins(args.airbender_pins) if args.airbender_pins else None)
+                           airbender_build_pins(args.airbender_pins, args.source_lock)
+                           if args.airbender_pins else None)
     print(json.dumps(result, separators=(",", ":"), sort_keys=True))
 
 

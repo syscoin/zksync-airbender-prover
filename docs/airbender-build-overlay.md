@@ -10,8 +10,12 @@ The manifest `patches/airbender-cuda-device-diagnostics.json` binds the exact up
 and tree, patch SHA-256, pre/post source hashes, resulting tree, and canonical/overlay lock hashes.
 The alternate lock changes only the source identities of all 46 locked Airbender packages; every
 package version, dependency edge, and registry checksum must remain equal. All those packages
-map to the same disposable patched checkout. A mismatched application lock fails closed, including
-an incompatible older release tag; the wrapper never resolves fresh versions to make it fit.
+map to the same disposable patched checkout. For a compatible separately selected source tag,
+the wrapper derives its overlay from that source's own `Cargo.lock`, removing only those same
+46 pinned Airbender source identities. The checked-in lock hashes remain immutable tooling
+reference hashes, not a requirement that older application dependencies equal today's graph.
+Mixed or incompatible Airbender revisions and overlay drift fail closed; the wrapper never
+resolves fresh versions to make a tag fit.
 
 The wrapper requires Git, the repository's Rust toolchain, and Python 3.11+, or Python 3 with the
 distribution's `python3-tomli` package. It creates fresh source copies and input/result records
@@ -35,7 +39,10 @@ Each runtime image includes `/usr/share/syscoin-prover/airbender-build-inputs.js
 archive includes its role's `*-airbender-build-inputs.json`. These records contain source-input
 hashes, exact patch/lock pins, resolved package paths, command and tool versions. The image digest
 or signed archive digest binds the record to the built artifact. Build provenance also records
-the upstream source and patch/lock identity, and image SBOM evidence preserves those tooling pins.
+the upstream source and patch/lock identity. The records, release/image provenance and image SBOM
+evidence distinguish immutable tooling pins from `selected_lock`: the actual source lock hash,
+the generated overlay hash, the identity-only derivation and its complete Airbender package map.
+Generated lock bytes are not attributed to the checked-in tooling overlay file.
 
 The former bulk-property log reported an incorrect SM count with CUDA 12.9. Its removal is a
 compatibility correction, not a throughput improvement claim. Rebuild and re-run native proof

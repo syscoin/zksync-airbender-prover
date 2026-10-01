@@ -168,6 +168,8 @@ jobs:
           # SNARK GPU backend into the standalone FRI role.
           [[ "$(git -C .release-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
           [[ -z "$(git -C .release-tooling status --porcelain --untracked-files=all)" ]]
+          # Bind the selected lock to the verified release commit, not a dirty runner file.
+          [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
           AIRBENDER_BUILD_ATTESTATION="${PWD}/combined-airbender-build-inputs.json" \
             bash .release-tooling/scripts/cargo-with-patched-airbender.sh release-combined -- \
             cargo build --locked --profile "${RELEASE_PROFILE}" \
@@ -185,12 +187,15 @@ jobs:
             --bin "${ZKSYNC_OS_SNARK_PROVER_BIN}" --no-default-features
           # SYSCOIN: Successful role records accompany the binaries and are bound into the
           # archive attestation; compatible older source tags use these exact tooling pins.
+          [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
           airbender_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
-            .release-tooling/patches/airbender-cuda-device-diagnostics.json)"
+            .release-tooling/patches/airbender-cuda-device-diagnostics.json --source-lock Cargo.lock)"
           for role in combined fri snark; do
             jq -e --argjson expected "${airbender_pins}" --arg role "release-${role}" \
               '.cargo_exit_code == 0 and .inputs_reverified == true and .label == $role
-               and .pins == $expected.pins' "${role}-airbender-build-inputs.json" >/dev/null
+               and .pins == $expected.pins and .selected_lock == $expected.selected_lock
+               and .application_inputs_sha256["Cargo.lock"] == $expected.selected_lock.canonical_lock_sha256' \
+              "${role}-airbender-build-inputs.json" >/dev/null
           done
           airbender_records="$(jq -cn \
             --arg combined "$(sha256sum combined-airbender-build-inputs.json | awk '{print $1}')" \
@@ -266,7 +271,9 @@ jobs:
                   {uri: ("git+" + $airbender.pins.upstream_url), digest: {gitCommit: $airbender.pins.upstream_commit}},
                   {uri: ($tooling_uri + "/patches/airbender-cuda-device-diagnostics.json"), digest: {sha256: $airbender.manifest_sha256}},
                   {uri: ($tooling_uri + "/patches/" + $airbender.pins.patch_file), digest: {sha256: $airbender.pins.patch_sha256}},
-                  {uri: ($tooling_uri + "/patches/" + $airbender.pins.overlay_lock_file), digest: {sha256: $airbender.pins.overlay_lock_sha256}}
+                  {uri: ($tooling_uri + "/patches/" + $airbender.pins.overlay_lock_file), digest: {sha256: $airbender.pins.overlay_lock_sha256}},
+                  {uri: ($source_uri + "/Cargo.lock"), digest: {sha256: $airbender.selected_lock.canonical_lock_sha256}},
+                  {uri: "syscoin:generated-lock:airbender-source-identity-only-v1", digest: {sha256: $airbender.selected_lock.overlay_lock_sha256}}
                 ]
               | .buildDefinition.internalParameters.syscoinAirbenderBuild = {
                   inputs: $airbender, roleInputRecords: $airbender_records, cargoLocked: true
