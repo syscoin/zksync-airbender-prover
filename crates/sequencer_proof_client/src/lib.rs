@@ -510,6 +510,33 @@ async fn ordered_client_indices_with_timeout(
     max_concurrency: NonZeroUsize,
     probe_timeout: Duration,
 ) -> Vec<usize> {
+    scored_client_indices(clients, stage, max_concurrency, probe_timeout)
+        .await
+        .into_iter()
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Clients whose status advertises unassigned work, ordered by oldest head. These hints do not
+/// establish aggregate readiness or lease eligibility; callers must periodically try all clients.
+pub async fn hinted_client_indices(
+    clients: &[Box<dyn ProofClient + Send + Sync>],
+    stage: JobQueueStage,
+    max_concurrency: NonZeroUsize,
+) -> Vec<usize> {
+    scored_client_indices(clients, stage, max_concurrency, STATUS_PROBE_TIMEOUT)
+        .await
+        .into_iter()
+        .filter_map(|(idx, score)| score.map(|_| idx))
+        .collect()
+}
+
+async fn scored_client_indices(
+    clients: &[Box<dyn ProofClient + Send + Sync>],
+    stage: JobQueueStage,
+    max_concurrency: NonZeroUsize,
+    probe_timeout: Duration,
+) -> Vec<(usize, Option<(u64, u32)>)> {
     use futures_util::{stream, StreamExt};
 
     let probes = stream::iter(clients.iter().enumerate().map(|(idx, client)| async move {
@@ -535,7 +562,144 @@ async fn ordered_client_indices_with_timeout(
         Some((age, batch)) => (false, std::cmp::Reverse(*age), *batch, *idx),
         None => (true, std::cmp::Reverse(0), 0, *idx),
     });
-    scored.into_iter().map(|(idx, _)| idx).collect()
+    scored
+}
+
+/// One native SNARK lease retained while the combined worker releases its FRI GPU state.
+/// Its first pick consumes the retained input; it can never acquire another lease.
+#[must_use = "a claimed SNARK job must reach its original proof/disposition path"]
+pub struct ClaimedSnarkJob<'a> {
+    client: &'a dyn ProofClient,
+    input: std::sync::Mutex<Option<SnarkProofInputs>>,
+    from_batch_number: L2BatchNumber,
+    to_batch_number: L2BatchNumber,
+    vk_hash: String,
+    lease_token: ProverLeaseToken,
+}
+
+impl ClaimedSnarkJob<'_> {
+    fn validate_submission(
+        &self,
+        from_batch_number: L2BatchNumber,
+        to_batch_number: L2BatchNumber,
+        vk_hash: &str,
+        lease_token: &ProverLeaseToken,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            from_batch_number == self.from_batch_number
+                && to_batch_number == self.to_batch_number
+                && vk_hash == self.vk_hash
+                && lease_token == &self.lease_token,
+            "SNARK submission does not match the retained native lease"
+        );
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ProofClient for ClaimedSnarkJob<'_> {
+    fn sequencer_url(&self) -> &Url {
+        self.client.sequencer_url()
+    }
+
+    async fn resume_pending_submissions(&self) -> anyhow::Result<usize> {
+        self.client.resume_pending_submissions().await
+    }
+
+    async fn pick_fri_job(&self) -> anyhow::Result<Option<FriJobInputs>> {
+        Err(job_acquisition_error(anyhow::anyhow!(
+            "cannot acquire FRI work while retaining a SNARK lease"
+        )))
+    }
+
+    async fn submit_fri_proof(
+        &self,
+        _batch_number: u32,
+        _vk_hash: String,
+        _proof: String,
+        _lease_token: ProverLeaseToken,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("a retained SNARK lease cannot submit FRI work")
+    }
+
+    async fn status(&self, stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>> {
+        self.client.status(stage).await
+    }
+
+    async fn pick_snark_job(&self) -> anyhow::Result<Option<SnarkProofInputs>> {
+        self.input
+            .lock()
+            .map_err(|_| job_acquisition_error(anyhow::anyhow!("retained SNARK lease poisoned")))?
+            .take()
+            .map(Some)
+            .ok_or_else(|| {
+                job_acquisition_error(anyhow::anyhow!("retained SNARK lease was already consumed"))
+            })
+    }
+
+    async fn submit_snark_proof(
+        &self,
+        from_batch_number: L2BatchNumber,
+        to_batch_number: L2BatchNumber,
+        vk_hash: String,
+        proof: SnarkWrapperProof,
+        lease_token: ProverLeaseToken,
+    ) -> anyhow::Result<()> {
+        self.validate_submission(from_batch_number, to_batch_number, &vk_hash, &lease_token)?;
+        self.client
+            .submit_snark_proof(
+                from_batch_number,
+                to_batch_number,
+                vk_hash,
+                proof,
+                lease_token,
+            )
+            .await
+    }
+}
+
+/// Attempts native picks sequentially without dropping the caller's idle FRI setup. A successful
+/// response retains its exact origin and lease; any ambiguous claim prevents endpoint fallback.
+pub async fn claim_first_snark_job<'a>(
+    clients: &'a [Box<dyn ProofClient + Send + Sync>],
+    candidate_indices: &[usize],
+    stop_receiver: &tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<Option<ClaimedSnarkJob<'a>>> {
+    resume_pending_submissions(clients)
+        .await
+        .context("durable submission replay blocks a new SNARK claim")?;
+    for &index in candidate_indices {
+        if *stop_receiver.borrow() {
+            return Ok(None);
+        }
+        let client = clients
+            .get(index)
+            .context("SNARK candidate index is outside the configured clients")?
+            .as_ref();
+        match client.pick_snark_job().await {
+            Ok(Some(input)) => {
+                // A shutdown arriving during the pick cannot discard the newly owned lease.
+                return Ok(Some(ClaimedSnarkJob {
+                    client,
+                    from_batch_number: input.from_batch_number,
+                    to_batch_number: input.to_batch_number,
+                    vk_hash: input.vk_hash.clone(),
+                    lease_token: input.lease_token.clone(),
+                    input: std::sync::Mutex::new(Some(input)),
+                }));
+            }
+            Ok(None) => {}
+            Err(error) if error_follows_job_acquisition(&error) => {
+                return Err(error).context("SNARK claim may own a lease; no fallback is allowed");
+            }
+            Err(error) => tracing::warn!(
+                sequencer = %client.sequencer_url(),
+                %error,
+                "SNARK endpoint unavailable before lease acquisition"
+            ),
+        }
+    }
+    Ok(None)
 }
 
 #[async_trait]
@@ -848,5 +1012,298 @@ mod tests {
         assert!(started_at.elapsed() < Duration::from_millis(80));
         // Healthy scored client first; timed-out endpoint is still tried as a fallback.
         assert_eq!(ordered, vec![1, 0]);
+    }
+
+    #[tokio::test]
+    async fn hinted_snark_candidates_exclude_empty_assigned_and_unavailable_queues() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let clients = vec![
+            client(0, vec![status(10, 10, false)], false, &active, &peak),
+            client(1, vec![status(20, 20, false)], false, &active, &peak),
+            client(2, vec![], true, &active, &peak),
+            client(3, vec![status(1, 50_000, true)], false, &active, &peak),
+            client(4, vec![], false, &active, &peak),
+        ];
+        assert_eq!(
+            hinted_client_indices(
+                &clients,
+                JobQueueStage::Snark,
+                NonZeroUsize::new(2).unwrap()
+            )
+            .await,
+            vec![1, 0]
+        );
+    }
+
+    enum ClaimOutcome {
+        Empty,
+        Unavailable,
+        Ambiguous,
+        Job,
+    }
+
+    struct ClaimClient {
+        url: Url,
+        outcome: ClaimOutcome,
+        replay_fails: bool,
+        stop_on_pick: Option<tokio::sync::watch::Sender<bool>>,
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl ClaimClient {
+        fn record(&self, action: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{}:{action}", self.url.host_str().unwrap()));
+        }
+    }
+
+    fn claimed_input() -> SnarkProofInputs {
+        SnarkProofInputs {
+            from_batch_number: L2BatchNumber(7),
+            to_batch_number: L2BatchNumber(8),
+            vk_hash: format!("0x{}", "11".repeat(32)),
+            fri_proofs: vec![],
+            lease_token: ProverLeaseToken::from(format!("0x{}", "22".repeat(32))),
+        }
+    }
+
+    #[async_trait]
+    impl ProofClient for ClaimClient {
+        fn sequencer_url(&self) -> &Url {
+            &self.url
+        }
+
+        async fn resume_pending_submissions(&self) -> anyhow::Result<usize> {
+            self.record("replay");
+            anyhow::ensure!(!self.replay_fails, "retained submission cannot be resolved");
+            Ok(0)
+        }
+
+        async fn pick_fri_job(&self) -> anyhow::Result<Option<FriJobInputs>> {
+            self.record("pick-fri");
+            Ok(None)
+        }
+
+        async fn submit_fri_proof(
+            &self,
+            _batch_number: u32,
+            _vk_hash: String,
+            _proof: String,
+            _lease_token: ProverLeaseToken,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("unexpected FRI submission")
+        }
+
+        async fn status(&self, _stage: JobQueueStage) -> anyhow::Result<Vec<QueueJobStatus>> {
+            Ok(vec![])
+        }
+
+        async fn pick_snark_job(&self) -> anyhow::Result<Option<SnarkProofInputs>> {
+            self.record("pick-snark");
+            if let Some(stop) = &self.stop_on_pick {
+                stop.send_replace(true);
+            }
+            match self.outcome {
+                ClaimOutcome::Empty => Ok(None),
+                ClaimOutcome::Unavailable => anyhow::bail!("known pre-assignment outage"),
+                ClaimOutcome::Ambiguous => Err(job_acquisition_error(anyhow::anyhow!(
+                    "lost native pick response"
+                ))),
+                ClaimOutcome::Job => Ok(Some(claimed_input())),
+            }
+        }
+
+        async fn submit_snark_proof(
+            &self,
+            _from_batch_number: L2BatchNumber,
+            _to_batch_number: L2BatchNumber,
+            _vk_hash: String,
+            _proof: SnarkWrapperProof,
+            _lease_token: ProverLeaseToken,
+        ) -> anyhow::Result<()> {
+            self.record("submit-snark");
+            Ok(())
+        }
+    }
+
+    fn claim_client(
+        index: usize,
+        outcome: ClaimOutcome,
+        events: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> ClaimClient {
+        ClaimClient {
+            url: Url::parse(&format!("https://sequencer-{index}.invalid")).unwrap(),
+            outcome,
+            replay_fails: false,
+            stop_on_pick: None,
+            events: events.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn claimed_snark_consumes_once_and_submits_only_the_same_origin_and_binding() {
+        let events = Arc::new(std::sync::Mutex::new(vec![]));
+        let clients: Vec<Box<dyn ProofClient + Send + Sync>> = vec![
+            Box::new(claim_client(0, ClaimOutcome::Unavailable, &events)),
+            Box::new(claim_client(1, ClaimOutcome::Job, &events)),
+            Box::new(claim_client(2, ClaimOutcome::Job, &events)),
+        ];
+        let (_stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
+        let claim = claim_first_snark_job(&clients, &[0, 1, 2], &stop_receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.sequencer_url(), clients[1].sequencer_url());
+        let input = claim.pick_snark_job().await.unwrap().unwrap();
+        assert_eq!(input.from_batch_number, L2BatchNumber(7));
+        assert_eq!(input.to_batch_number, L2BatchNumber(8));
+        assert_eq!(input.lease_token, claimed_input().lease_token);
+        assert!(error_follows_job_acquisition(
+            &claim.pick_snark_job().await.unwrap_err()
+        ));
+        assert!(error_follows_job_acquisition(
+            &claim.pick_fri_job().await.unwrap_err()
+        ));
+
+        for (from, to, vk, token) in [
+            (
+                L2BatchNumber(6),
+                input.to_batch_number,
+                input.vk_hash.clone(),
+                input.lease_token.clone(),
+            ),
+            (
+                input.from_batch_number,
+                L2BatchNumber(9),
+                input.vk_hash.clone(),
+                input.lease_token.clone(),
+            ),
+            (
+                input.from_batch_number,
+                input.to_batch_number,
+                "other-vk".to_owned(),
+                input.lease_token.clone(),
+            ),
+            (
+                input.from_batch_number,
+                input.to_batch_number,
+                input.vk_hash.clone(),
+                ProverLeaseToken::from("other-lease".to_owned()),
+            ),
+        ] {
+            assert!(claim
+                .submit_snark_proof(from, to, vk, SnarkWrapperProof::empty(), token)
+                .await
+                .is_err());
+        }
+        claim
+            .submit_snark_proof(
+                input.from_batch_number,
+                input.to_batch_number,
+                input.vk_hash,
+                SnarkWrapperProof::empty(),
+                input.lease_token,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "sequencer-0.invalid:replay",
+                "sequencer-1.invalid:replay",
+                "sequencer-2.invalid:replay",
+                "sequencer-0.invalid:pick-snark",
+                "sequencer-1.invalid:pick-snark",
+                "sequencer-1.invalid:submit-snark",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_snark_claim_and_retained_replay_both_block_other_endpoints() {
+        for retained_submission in [false, true] {
+            let events = Arc::new(std::sync::Mutex::new(vec![]));
+            let mut first = claim_client(0, ClaimOutcome::Ambiguous, &events);
+            first.replay_fails = retained_submission;
+            let clients: Vec<Box<dyn ProofClient + Send + Sync>> = vec![
+                Box::new(first),
+                Box::new(claim_client(1, ClaimOutcome::Job, &events)),
+            ];
+            let (_stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
+            let Err(error) = claim_first_snark_job(&clients, &[0, 1], &stop_receiver).await else {
+                panic!("unresolved ownership must stop acquisition");
+            };
+            if retained_submission {
+                assert!(format!("{error:#}").contains("retained submission"));
+                assert_eq!(*events.lock().unwrap(), vec!["sequencer-0.invalid:replay"]);
+            } else {
+                assert!(error_follows_job_acquisition(&error));
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    vec![
+                        "sequencer-0.invalid:replay",
+                        "sequencer-1.invalid:replay",
+                        "sequencer-0.invalid:pick-snark",
+                    ]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_successful_claim_retains_the_exact_job_for_processing() {
+        let events = Arc::new(std::sync::Mutex::new(vec![]));
+        let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
+        let mut first = claim_client(0, ClaimOutcome::Job, &events);
+        first.stop_on_pick = Some(stop_sender);
+        let clients: Vec<Box<dyn ProofClient + Send + Sync>> = vec![
+            Box::new(first),
+            Box::new(claim_client(1, ClaimOutcome::Job, &events)),
+        ];
+        let claim = claim_first_snark_job(&clients, &[0, 1], &stop_receiver)
+            .await
+            .unwrap()
+            .expect("a transferred lease must survive shutdown");
+        assert!(*stop_receiver.borrow());
+        assert_eq!(
+            claim.pick_snark_job().await.unwrap().unwrap().lease_token,
+            claimed_input().lease_token
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "sequencer-0.invalid:replay",
+                "sequencer-1.invalid:replay",
+                "sequencer-0.invalid:pick-snark",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_queue_hint_does_not_create_a_claim_or_authorize_another_pick_on_shutdown() {
+        let events = Arc::new(std::sync::Mutex::new(vec![]));
+        let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
+        let clients: Vec<Box<dyn ProofClient + Send + Sync>> =
+            vec![Box::new(claim_client(0, ClaimOutcome::Empty, &events))];
+        assert!(claim_first_snark_job(&clients, &[0], &stop_receiver)
+            .await
+            .unwrap()
+            .is_none());
+        stop_sender.send_replace(true);
+        assert!(claim_first_snark_job(&clients, &[0], &stop_receiver)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "sequencer-0.invalid:replay",
+                "sequencer-0.invalid:pick-snark",
+                "sequencer-0.invalid:replay",
+            ]
+        );
     }
 }

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "mode": "native-compute",
+  "provider_state_dir": "/absolute/private/provider-controller",
+  "releases": {
+    "FRI": "/absolute/reviewed/FRI-release.json",
+    "SNARK": "/absolute/reviewed/SNARK-release.json"
+  },
+  "storage": {
+    "endpoint_url": "https://REPLACE_WITH_REVIEWED_S3_ENDPOINT",
+    "region": "REPLACE_WITH_REGION",
+    "bucket": "replace-with-private-bucket",
+    "prefix": "zksys-warm",
+    "profile": null,
+    "url_ttl_seconds": 14400
+  },
+  "poll_interval_seconds": 5,
+  "idle_grace_seconds": 120,
+  "startup_reserve_seconds": 60,
+  "runtime_seconds": {
+    "FRI": null,
+    "SNARK": null
+  },
+  "sequencers": [
+    {
+      "name": "child",
+      "lane": "child",
+      "endpoint": "http://127.0.0.1:3125/",
+      "auth_file": "/absolute/private/child-auth.txt",
+      "identity": {
+        "chain_id": "REPLACE_WITH_HEX_CHAIN_ID",
+        "chain_address": "REPLACE_WITH_DEPLOYED_CHAIN_ADDRESS",
+        "settlement_chain_id": "REPLACE_WITH_HEX_SETTLEMENT_CHAIN_ID",
+        "protocol_version": 32,
+        "vk_hash": "REPLACE_WITH_REVIEWED_V8_VK_HASH"
+      },
+      "native_lease_seconds": 7200,
+      "stages": ["FRI", "SNARK"]
+    },
+    {
+      "name": "gateway",
+      "lane": "gateway",
+      "endpoint": "http://127.0.0.1:3124/",
+      "auth_file": "/absolute/private/gateway-auth.txt",
+      "identity": {
+        "chain_id": "REPLACE_WITH_HEX_CHAIN_ID",
+        "chain_address": "REPLACE_WITH_DEPLOYED_CHAIN_ADDRESS",
+        "settlement_chain_id": "REPLACE_WITH_HEX_SETTLEMENT_CHAIN_ID",
+        "protocol_version": 32,
+        "vk_hash": "REPLACE_WITH_REVIEWED_V8_VK_HASH"
+      },
+      "native_lease_seconds": 7200,
+      "stages": ["FRI", "SNARK"]
+    }
+  ],
+  "external_pool_dirs": []
+}

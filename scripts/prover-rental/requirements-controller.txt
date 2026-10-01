@@ -1,0 +1,2 @@
+# Trusted host only; workers use scoped HTTPS URLs and Python's standard library.
+boto3==1.43.106

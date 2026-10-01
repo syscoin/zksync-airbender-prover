@@ -1,0 +1,27 @@
+name: Prover rental controller
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  controller-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install trusted-host SDK in an isolated environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/prover-rental"
+          "$RUNNER_TEMP/prover-rental/bin/python" -m pip install -r scripts/prover-rental/requirements-controller.txt
+      - name: Test lifecycle, queue scheduling, and offline SDK contracts
+        run: >-
+          "$RUNNER_TEMP/prover-rental/bin/python" -m unittest discover
+          -s scripts/prover-rental -p 'test_*.py' -v

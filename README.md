@@ -29,7 +29,19 @@ SNARKs the final proof. Gets a set of continuous FRIs from sequencer, merges the
 
 ### ZKsync OS Prover Service
 
-The ZKsync OS Prover Service alternates FRI and SNARK proving on one visible GPU. You can configure `max_snark_latency` and `max_fris_per_snark`; they have OR semantics.
+The ZKsync OS Prover Service alternates FRI and SNARK proving on one visible GPU.
+Between FRI jobs it checks for an available SNARK lease and prioritizes wrapping.
+`max_snark_latency` and `max_fris_per_snark` retain their OR semantics as fallback
+triggers when queue status is unavailable. Each worker owns one job at a time.
+
+### On-demand GPU rentals
+
+The [rental supervisor](scripts/prover-rental/README.md) runs on the prover
+operator's machine, rents a GPU after finding eligible work, reuses the pod across
+FRI/SNARK jobs and terminates it after an idle grace period. Its independent
+provider watchdog, durable job journal and bounded spending policy also cover
+restarts and ambiguous provider responses. Provider and sequencer credentials
+stay on the operator's machine. Commands are dry-run by default.
 
 ### Usage
 
@@ -311,10 +323,14 @@ RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 co
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
 `--max-snark-latency` and `--max-fris-per-snark` may be supplied together. The combined
-service exits its FRI phase when either threshold is reached (by default, 3600 seconds OR
-100 locally produced FRI proofs). These are local phase controls, not the dedicated SNARK
-worker's server-side batching readiness policy.
-Specify `--snark-acquire-timeout-secs` to return to FRI proving if no SNARK job becomes available after switching modes.
+service checks for ready wrapping work between jobs and keeps its FRI GPU setup
+until an actual SNARK lease is granted. `--snark-probe-interval-secs` (default 5)
+also probes every configured endpoint when queue hints are missing or stale.
+Available wraps run consecutively before another FRI job is acquired.
+Reaching either phase threshold (by default, 3600 seconds OR 100 locally produced
+FRI proofs) triggers a bounded SNARK acquisition wait; configure that wait with
+`--snark-acquire-timeout-secs`. An empty result resumes FRI work with its setup
+still resident. The sequencer remains responsible for aggregate readiness.
 
 ## Development / WIP
 

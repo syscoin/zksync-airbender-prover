@@ -1,0 +1,10 @@
+ARG PROVER_BASE_IMAGE=scratch
+FROM ${PROVER_BASE_IMAGE}
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY runpod.py job.py worker.py warm_worker.py warm_protocol.py entrypoint.py /opt/zksys-rental/
+COPY releases /opt/zksys-rental/releases/
+RUN python3 /opt/zksys-rental/warm_worker.py --validate-image
+ENTRYPOINT ["python3", "/opt/zksys-rental/entrypoint.py"]

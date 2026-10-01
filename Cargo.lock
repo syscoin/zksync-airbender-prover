@@ -5809,12 +5809,15 @@ name = "zksync_os_snark_prover"
 version = "0.8.2"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "bincode 2.0.1",
  "clap",
  "cli",
  "execution_utils",
  "libc",
  "protocol_version",
  "reqwest",
+ "riscv_transpiler",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5822,6 +5825,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "verifier_common",
  "vise",
  "vise-exporter",
  "zkos-wrapper",

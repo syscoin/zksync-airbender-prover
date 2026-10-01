@@ -24,7 +24,10 @@ def parent_lock_bytes():
     raw = (ROOT / "Cargo.lock").read_bytes()
     for name, removed in (
         ("zksync_os_fri_prover", (b' "sha2 0.10.9",\n',)),
-        ("zksync_os_snark_prover", (b' "libc",\n', b' "sha2 0.10.9",\n')),
+        ("zksync_os_snark_prover", (
+            b' "base64 0.22.1",\n', b' "bincode 2.0.1",\n', b' "libc",\n',
+            b' "riscv_transpiler",\n', b' "sha2 0.10.9",\n', b' "verifier_common",\n',
+        )),
     ):
         blocks = raw.split(b"[[package]]\n")
         matches = [index for index, block in enumerate(blocks)
