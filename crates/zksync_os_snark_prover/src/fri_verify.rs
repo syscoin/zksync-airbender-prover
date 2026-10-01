@@ -3,13 +3,16 @@
 //! The expected file is a trusted controller input: its program commitment must already be
 //! authenticated against the registered nonzero VK. This utility authenticates native proof
 //! statements; it does not authorize a lease, settlement transaction, or worker program.
+//!
+//! SYSCOIN: Publication recovery follows native verification and accepts only identical private
+//! output, so an interrupted durability barrier cannot strand a valid result or bypass proof checks.
 
 use std::ffi::{CString, OsString};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -431,10 +434,99 @@ fn rename_attestation(_source: &Path, _destination: &Path) -> anyhow::Result<()>
     anyhow::bail!("atomic attestation publication requires Linux or macOS")
 }
 
+fn same_attestation_metadata(before: &Metadata, after: &Metadata) -> bool {
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.mode() == after.mode()
+        && before.uid() == after.uid()
+        && before.nlink() == after.nlink()
+        && before.len() == after.len()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
+}
+
+fn ensure_attestation_unchanged(
+    path: &Path,
+    file: &File,
+    original: &Metadata,
+) -> anyhow::Result<()> {
+    ensure!(
+        same_attestation_metadata(original, &file.metadata()?)
+            && same_attestation_metadata(original, &std::fs::symlink_metadata(path)?),
+        "existing verification output changed during recovery"
+    );
+    Ok(())
+}
+
+fn ensure_output_directory(parent: &Path, directory: &File) -> anyhow::Result<()> {
+    let retained = directory.metadata()?;
+    let current = std::fs::metadata(parent)?;
+    ensure!(
+        retained.is_dir()
+            && current.is_dir()
+            && retained.dev() == current.dev()
+            && retained.ino() == current.ino(),
+        "verification output directory changed during publication"
+    );
+    Ok(())
+}
+
+fn recover_verified(
+    path: &Path,
+    bytes: &[u8],
+    directory: &File,
+    sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    // SAFETY: geteuid has no arguments and only observes this process's effective identity.
+    let owner = unsafe { libc::geteuid() };
+    ensure!(
+        metadata.is_file()
+            && metadata.uid() == owner
+            && metadata.mode() & 0o7777 == 0o600
+            && metadata.nlink() == 1
+            && metadata.len() == bytes.len() as u64,
+        "existing verification output must be an owned 0600 single-link regular file of the exact expected length"
+    );
+    let mut existing = Vec::with_capacity(bytes.len());
+    (&mut file)
+        .take(bytes.len() as u64 + 1)
+        .read_to_end(&mut existing)?;
+    ensure!(
+        existing == bytes,
+        "existing verification output differs from the verified result"
+    );
+    ensure_attestation_unchanged(path, &file, &metadata)?;
+    let parent = path.parent().context("verification output has no parent")?;
+    ensure_output_directory(parent, directory)?;
+    // SYSCOIN: A previous process may have stopped after rename but before directory fsync.
+    // Reusing its exact output must complete both durability barriers without replacing its inode.
+    file.sync_all()?;
+    sync_directory(directory)?;
+    ensure_attestation_unchanged(path, &file, &metadata)?;
+    ensure_output_directory(parent, directory)?;
+    Ok(())
+}
+
 fn publish_verified(
     path: &Path,
     bytes: &[u8],
     prepare: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    publish_verified_with_directory_sync(path, bytes, prepare, File::sync_all)
+}
+
+fn publish_verified_with_directory_sync(
+    path: &Path,
+    bytes: &[u8],
+    prepare: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
 ) -> anyhow::Result<()> {
     ensure!(
         path.is_absolute(),
@@ -444,9 +536,20 @@ fn publish_verified(
     let directory = File::open(parent)?;
     let mut pending = PendingAttestation::new(parent)?;
     prepare(&mut pending.file, bytes)?;
-    rename_attestation(&pending.path, path)?;
+    ensure_output_directory(parent, &directory)?;
+    if let Err(error) = rename_attestation(&pending.path, path) {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.raw_os_error() == Some(libc::EEXIST))
+        {
+            drop(pending);
+            return recover_verified(path, bytes, &directory, sync_directory);
+        }
+        return Err(error);
+    }
     pending.published = true;
-    directory.sync_all()?;
+    sync_directory(&directory)?;
+    ensure_output_directory(parent, &directory)?;
     Ok(())
 }
 
@@ -661,6 +764,21 @@ mod tests {
         bytes
     }
 
+    fn prepare_attestation(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+
+    fn write_private(path: &Path, bytes: &[u8]) {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        prepare_attestation(&mut file, bytes).unwrap();
+    }
+
     fn assert_private_attestation(path: &Path, bytes: &[u8]) {
         let metadata = std::fs::symlink_metadata(path).unwrap();
         assert!(metadata.is_file());
@@ -696,6 +814,11 @@ mod tests {
         let original = verified_bytes(&result);
         assert_private_attestation(&output, &original);
         let inode = std::fs::metadata(&output).unwrap().ino();
+        for _ in 0..2 {
+            write_verified(&output, &result).unwrap();
+            assert_private_attestation(&output, &original);
+            assert_eq!(std::fs::metadata(&output).unwrap().ino(), inode);
+        }
         let mut replacement = verified_result();
         replacement.payload_sha256 = "c".repeat(64);
         assert!(write_verified(&output, &replacement).is_err());
@@ -763,11 +886,172 @@ mod tests {
     }
 
     #[test]
+    fn directory_sync_failure_recovers_the_exact_published_inode() {
+        let directory = temporary_dir();
+        let output = directory.join("result");
+        let result = verified_result();
+        let bytes = verified_bytes(&result);
+        let error =
+            publish_verified_with_directory_sync(&output, &bytes, prepare_attestation, |_| {
+                Err(std::io::Error::from_raw_os_error(libc::EIO))
+            })
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EIO)
+        );
+        assert_private_attestation(&output, &bytes);
+        assert_eq!(entries(&directory), vec![output.clone()]);
+        let inode = std::fs::metadata(&output).unwrap().ino();
+        let mut synced = false;
+        publish_verified_with_directory_sync(&output, &bytes, prepare_attestation, |parent| {
+            assert_eq!(entries(&directory), vec![output.clone()]);
+            synced = true;
+            parent.sync_all()
+        })
+        .unwrap();
+        assert!(synced, "exact reuse must repeat the durability barrier");
+        assert_private_attestation(&output, &bytes);
+        assert_eq!(std::fs::metadata(&output).unwrap().ino(), inode);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn exact_output_recovery_rejects_unsafe_or_nonidentical_files() {
+        for kind in [
+            "public",
+            "readonly",
+            "executable",
+            "hardlink",
+            "symlink",
+            "fifo",
+            "directory",
+            "short",
+            "long",
+            "json-equivalent",
+        ] {
+            let directory = temporary_dir();
+            let output = directory.join("result");
+            let result = verified_result();
+            let bytes = verified_bytes(&result);
+            match kind {
+                "fifo" => {
+                    let path = CString::new(output.as_os_str().as_bytes()).unwrap();
+                    // SAFETY: path is NUL-terminated and mode is a valid file permission mask.
+                    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                }
+                "directory" => std::fs::create_dir(&output).unwrap(),
+                "symlink" => {
+                    let target = directory.join("target");
+                    write_private(&target, &bytes);
+                    symlink(target, &output).unwrap();
+                }
+                "short" => write_private(&output, &bytes[..bytes.len() - 1]),
+                "long" => write_private(&output, &[bytes.as_slice(), b"\n"].concat()),
+                "json-equivalent" => {
+                    let reordered = String::from_utf8(bytes.clone())
+                        .unwrap()
+                        .replacen(
+                            "{\"schema_version\":1,\"verification\":\"native_v32_fri_payload\",",
+                            "{\"verification\":\"native_v32_fri_payload\",\"schema_version\":1,",
+                            1,
+                        )
+                        .into_bytes();
+                    assert_eq!(reordered.len(), bytes.len());
+                    assert_ne!(reordered, bytes);
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&reordered).unwrap(),
+                        serde_json::from_slice::<Value>(&bytes).unwrap()
+                    );
+                    write_private(&output, &reordered);
+                }
+                _ => {
+                    write_private(&output, &bytes);
+                    match kind {
+                        "public" | "readonly" | "executable" => {
+                            let mode = match kind {
+                                "public" => 0o644,
+                                "readonly" => 0o400,
+                                _ => 0o700,
+                            };
+                            std::fs::set_permissions(
+                                &output,
+                                std::fs::Permissions::from_mode(mode),
+                            )
+                            .unwrap();
+                        }
+                        "hardlink" => {
+                            std::fs::hard_link(&output, directory.join("linked")).unwrap()
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            let before = std::fs::symlink_metadata(&output).unwrap();
+            let content = before.is_file().then(|| std::fs::read(&output).unwrap());
+            let previous_entries = entries(&directory);
+            assert!(write_verified(&output, &result).is_err(), "{kind}");
+            assert!(
+                same_attestation_metadata(&before, &std::fs::symlink_metadata(&output).unwrap()),
+                "{kind} must remain unchanged"
+            );
+            if let Some(content) = content {
+                assert_eq!(std::fs::read(&output).unwrap(), content, "{kind}");
+            }
+            assert_eq!(entries(&directory), previous_entries, "{kind}");
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn exact_output_recovery_rechecks_path_after_durability_barrier() {
+        let directory = temporary_dir();
+        let output = directory.join("result");
+        let replaced = directory.join("replaced");
+        let result = verified_result();
+        let bytes = verified_bytes(&result);
+        write_verified(&output, &result).unwrap();
+        let inode = std::fs::metadata(&output).unwrap().ino();
+        let error =
+            publish_verified_with_directory_sync(&output, &bytes, prepare_attestation, |parent| {
+                std::fs::rename(&output, &replaced)?;
+                write_private(&output, &bytes);
+                parent.sync_all()
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("changed during recovery"));
+        assert_eq!(std::fs::metadata(&replaced).unwrap().ino(), inode);
+        assert_ne!(std::fs::metadata(&output).unwrap().ino(), inode);
+        assert_private_attestation(&output, &bytes);
+        assert_private_attestation(&replaced, &bytes);
+        assert_eq!(entries(&directory), vec![replaced, output]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn attestation_crash_child() {
         let Some(output) = std::env::var_os("ZKSYS_ATTESTATION_CRASH_TEST_OUTPUT") else {
             return;
         };
         let bytes = verified_bytes(&verified_result());
+        if std::env::var_os("ZKSYS_ATTESTATION_CRASH_AFTER_RENAME").is_some() {
+            publish_verified_with_directory_sync(
+                Path::new(&output),
+                &bytes,
+                prepare_attestation,
+                |_| {
+                    std::fs::write(Path::new(&output).with_extension("ready"), b"published")?;
+                    loop {
+                        std::thread::park();
+                    }
+                },
+            )
+            .unwrap();
+            panic!("child unexpectedly completed the directory barrier");
+        }
         publish_verified(Path::new(&output), &bytes, |file, bytes| {
             file.write_all(&bytes[..bytes.len() / 2])?;
             file.sync_all()?;
@@ -777,22 +1061,26 @@ mod tests {
         panic!("child unexpectedly published an attestation");
     }
 
-    #[test]
-    fn abrupt_exit_before_publication_leaves_private_temp_and_allows_retry() {
-        let directory = temporary_dir();
-        let output = directory.join("result");
+    fn attestation_child(output: &Path) -> Command {
         let test_name = format!(
             "{}::attestation_crash_child",
             module_path!().split_once("::").unwrap().1
         );
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--exact", &test_name, "--test-threads=1"])
-            .env("ZKSYS_ATTESTATION_CRASH_TEST_OUTPUT", &output)
+            .env("ZKSYS_ATTESTATION_CRASH_TEST_OUTPUT", output)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        command
+    }
+
+    #[test]
+    fn abrupt_exit_before_publication_leaves_private_temp_and_allows_retry() {
+        let directory = temporary_dir();
+        let output = directory.join("result");
+        let mut child = attestation_child(&output).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -826,12 +1114,50 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_publishers_preserve_one_complete_exclusive_attestation() {
+    fn killed_after_rename_recovers_the_exact_published_inode() {
+        let directory = temporary_dir();
+        let output = directory.join("result");
+        let ready = output.with_extension("ready");
+        let mut child = attestation_child(&output)
+            .env("ZKSYS_ATTESTATION_CRASH_AFTER_RENAME", "1")
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                std::fs::remove_dir_all(&directory).unwrap();
+                panic!("attestation child exited before publication: {status}");
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                std::fs::remove_dir_all(&directory).unwrap();
+                panic!("attestation child did not reach the directory barrier");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+        std::fs::remove_file(ready).unwrap();
+        let result = verified_result();
+        let bytes = verified_bytes(&result);
+        let inode = std::fs::metadata(&output).unwrap().ino();
+        assert_private_attestation(&output, &bytes);
+        write_verified(&output, &result).unwrap();
+        assert_private_attestation(&output, &bytes);
+        assert_eq!(std::fs::metadata(&output).unwrap().ino(), inode);
+        assert_eq!(entries(&directory), vec![output]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn concurrent_publications(matching: bool) {
         let directory = temporary_dir();
         let output = directory.join("result");
         let first = verified_bytes(&verified_result());
         let mut other = verified_result();
-        other.payload_sha256 = "c".repeat(64);
+        if !matching {
+            other.payload_sha256 = "c".repeat(64);
+        }
         let second = verified_bytes(&other);
         let (ready_send, ready_receive) = mpsc::channel();
         std::thread::scope(|scope| {
@@ -865,16 +1191,17 @@ mod tests {
                 .into_iter()
                 .map(|thread| thread.join().unwrap())
                 .collect::<Vec<_>>();
-            assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
-            let winner = outcomes.iter().position(|result| result.is_ok()).unwrap();
-            let error = outcomes.into_iter().find_map(Result::err).unwrap();
             assert_eq!(
-                error
-                    .downcast_ref::<std::io::Error>()
-                    .unwrap()
-                    .raw_os_error(),
-                Some(libc::EEXIST)
+                outcomes.iter().filter(|result| result.is_ok()).count(),
+                if matching { 2 } else { 1 }
             );
+            let winner = outcomes.iter().position(|result| result.is_ok()).unwrap();
+            if !matching {
+                let error = outcomes.into_iter().find_map(Result::err).unwrap();
+                assert!(error
+                    .to_string()
+                    .contains("differs from the verified result"));
+            }
             assert_private_attestation(&output, [&first, &second][winner]);
         });
         assert_eq!(entries(&directory), vec![output]);
@@ -882,7 +1209,17 @@ mod tests {
     }
 
     #[test]
-    fn failed_proof_never_creates_a_success_file() {
+    fn concurrent_publishers_preserve_one_complete_exclusive_attestation() {
+        concurrent_publications(false);
+    }
+
+    #[test]
+    fn concurrent_matching_publishers_reuse_one_complete_attestation() {
+        concurrent_publications(true);
+    }
+
+    #[test]
+    fn failed_proof_never_creates_or_reuses_a_success_file() {
         let directory = temporary_dir();
         let (payload, expected) = inputs();
         let paths = (
@@ -894,6 +1231,12 @@ mod tests {
         std::fs::write(&paths.1, serde_json::to_vec(&expected).unwrap()).unwrap();
         assert!(verify_files(&paths.0, &paths.1, &paths.2).is_err());
         assert!(!paths.2.exists());
+        let bytes = verified_bytes(&verified_result());
+        write_private(&paths.2, &bytes);
+        let inode = std::fs::metadata(&paths.2).unwrap().ino();
+        assert!(verify_files(&paths.0, &paths.1, &paths.2).is_err());
+        assert_private_attestation(&paths.2, &bytes);
+        assert_eq!(std::fs::metadata(&paths.2).unwrap().ino(), inode);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
