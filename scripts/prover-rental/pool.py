@@ -6,6 +6,7 @@ from decimal import Decimal
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import time
 import uuid
@@ -19,6 +20,8 @@ from runpod import (Controller, Error, Runpod, Store, TERMINAL, atomic_json, exa
 ORDER = (("child", "FRI"), ("gateway", "FRI"), ("child", "SNARK"), ("gateway", "SNARK"))
 DONE = {"no_job", "complete", "rejected", "lease_expired", "authorization_expired", "returned"}
 MAX_EVIDENCE = 1024 * 1024
+NATIVE_PICK_FIELDS = {"lane", "stage", "mode", "status", "picked_at", "job_id", "deadline", "expiry_not_before",
+                      "lease_sha256", "reserved_usd", "rental_operation", "chain_binding", "native_status"}
 
 
 def service_keeper():
@@ -186,7 +189,65 @@ class Pool:
             return False
         return sum((money(op["reserved_usd"], allow_zero=True) for op in stage_ops), Decimal(0)) + reserve <= money(limits["lifetime_budget_usd"])
 
+    def empty_pick_files(self, operation, op):
+        pruning = op.get("prune_no_job") is True
+        if (set(op) != NATIVE_PICK_FIELDS | ({"prune_no_job"} if pruning else set())
+                or op["mode"] != "native" or op["status"] != "no_job" or op["native_status"] != "no_job"
+                or money(op["reserved_usd"], allow_zero=True) != 0
+                or any(op[field] is not None for field in ("expiry_not_before", "lease_sha256", "rental_operation", "chain_binding"))
+                or not re.fullmatch(r"[0-9a-f]{32}", operation) or (op["lane"], op["stage"]) not in ORDER):
+            return None
+        require(op["job_id"] == self.state["pool_id"] + ":" + op["lane"] + ":" + op["stage"] + ":" + operation,
+                "empty_pick_identity_changed")
+        lane = self.settings["lanes"][op["lane"]]
+        release = job.read_file(self.store.root / op["lane"] / op["stage"] / "release.json", job.MAX_MANIFEST, private=True)
+        require(job.hash_bytes(release) == lane["stages"][op["stage"]]["release_sha256"], "lane_release_changed")
+        _, expected = sentry.pick_intent(lane["endpoint"], release, op["job_id"])
+        expected["status"] = "no_job"
+        directory = self.directory(operation)
+        if not os.path.lexists(directory):
+            return [] if pruning else None
+        sentry.private_directory(directory)
+        files = list(directory.iterdir())
+        names = {entry.name for entry in files}
+        require(names <= {"authority.json", "release.json"}
+                and (pruning or names == {"authority.json", "release.json"}), "empty_pick_contains_unknown_artifacts")
+        for entry in files:
+            info = entry.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                    and not info.st_mode & 0o077 and info.st_nlink == 1, "unsafe_empty_pick_file")
+            if entry.name == "authority.json":
+                require(read_private_json(entry) == expected, "empty_pick_authority_changed")
+            else:
+                require(job.read_file(entry, job.MAX_MANIFEST, private=True) == release, "lane_release_changed")
+        return files
+
+    def prune_no_jobs(self):
+        candidates = []
+        for operation, op in self.state["operations"].items():
+            try:
+                files = self.empty_pick_files(operation, op)
+            except (Error, OSError, ValueError, TypeError, KeyError):
+                continue
+            if files is not None:
+                op["prune_no_job"] = True
+                candidates.append((operation, files))
+        if not candidates:
+            return
+        # A failed save can leave markers only in memory; persist them before removing their evidence.
+        self.save()
+        for operation, files in candidates:
+            directory = self.directory(operation)
+            for entry in files:
+                entry.unlink()
+            if os.path.lexists(directory):
+                directory.rmdir()
+            sync_dir(directory.parent)
+            del self.state["operations"][operation]
+        self.save()
+
     def pick_next(self):
+        self.prune_no_jobs()
         require(len(self.state["operations"]) < 1000, "pool_operation_count_limit")
         for offset in range(len(ORDER)):
             index = (self.state["cursor"] + offset) % len(ORDER)
@@ -218,8 +279,21 @@ class Pool:
         require(op["mode"] == "native", "external_job_has_no_native_pick")
         require(op["status"] in ("pick_uncertain", "awaiting_evidence", "ready"), "pool_pick_not_recoverable")
         directory = self.directory(operation)
-        authority = read_private_json(directory / "authority.json")
         lane = self.settings["lanes"][op["lane"]]
+        if not os.path.lexists(directory / "authority.json"):
+            require(set(op) == NATIVE_PICK_FIELDS and op["status"] == "pick_uncertain"
+                    and all(op[field] is None for field in ("expiry_not_before", "lease_sha256", "rental_operation",
+                                                           "chain_binding", "native_status")),
+                    "missing_pick_authority_requires_origin_reconciliation")
+            release = job.read_file(self.store.root / op["lane"] / op["stage"] / "release.json", job.MAX_MANIFEST, private=True)
+            require(job.hash_bytes(release) == lane["stages"][op["stage"]]["release_sha256"], "lane_release_changed")
+            auth = self.auth(op["lane"])
+            sentry.reset_unstarted_pick(directory, lane["endpoint"], release, op["job_id"])
+            now = self.clock()
+            op.update(picked_at=now, deadline=now + lane["native_lease_seconds"])
+            self.save()
+            sentry.pick(directory, lane["endpoint"], release, op["job_id"], auth, self.native)
+        authority = read_private_json(directory / "authority.json")
         require(authority["endpoint"] == lane["endpoint"] and authority["job_id"] == op["job_id"]
                 and authority["stage"] == op["stage"] and authority["release_sha256"]
                 == lane["stages"][op["stage"]]["release_sha256"], "native_origin_changed")
@@ -289,6 +363,7 @@ class Pool:
             payload.get("batch_number", payload.get("from_batch_number")),
             payload.get("batch_number", payload.get("to_batch_number")))
         require(type(deadline) is int and self.clock() < deadline <= self.clock() + 86400, "invalid_external_deadline")
+        self.prune_no_jobs()
         operation = None
         for existing, op in self.state["operations"].items():
             if op["job_id"] == job_id:

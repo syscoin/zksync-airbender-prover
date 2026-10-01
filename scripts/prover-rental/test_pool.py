@@ -4,11 +4,13 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import urllib.parse
 
 import job
 import pool
 import runpod
+import sentry
 import worker
 from test_adapter import VK, Storage, payload, release, storage_plan, successful_native
 from test_runpod import FakeApi, policy
@@ -212,6 +214,285 @@ class PoolTests(unittest.TestCase):
         self.now = 100000
         with self.assertRaisesRegex(runpod.Error, "requires_origin_reconciliation"):
             instance.expire(operation)
+        self.assertEqual(len(self.native.calls), 1)
+
+    def interrupted_pick(self):
+        with patch("pool.sentry.pick", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.instance.pick_next()
+        operation = next(reversed(self.instance.state["operations"]))
+        return operation, copy.deepcopy(self.instance.operation(operation))
+
+    def test_recover_unstarted_pick_preserves_identity_and_refreshes_only_proven_window(self):
+        self.start()
+        for index, shape in enumerate(("absent", "empty", "release", "temporary")):
+            with self.subTest(shape=shape):
+                operation, original = self.interrupted_pick()
+                directory = self.instance.directory(operation)
+                release_raw = job.read_file(self.store.root / original["lane"] / original["stage"] / "release.json", job.MAX_MANIFEST)
+                if shape != "absent":
+                    sentry.private_directory(directory, create=True)
+                if shape == "release":
+                    job.write_new(directory / "release.json", release_raw)
+                if shape == "temporary":
+                    _, authority = sentry.pick_intent(self.instance.settings["lanes"][original["lane"]]["endpoint"],
+                                                     release_raw, original["job_id"])
+                    job.write_new(directory / (".authority.json." + "a" * 32 + ".tmp"), job.encode(authority)[:40])
+                self.now += 8000
+                instance = self.reload()
+                if index == 0:
+                    with patch("pool.sentry.pick", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+                        instance.recover_pick(operation)
+                    retained = self.reload().operation(operation)
+                    self.assertEqual((retained["picked_at"], retained["deadline"]), (self.now, self.now + 7200))
+                    self.assertEqual(self.native.calls, [])
+                    self.now += 8000
+                instance = self.reload()
+                instance.recover_pick(operation)
+                op = instance.operation(operation)
+                self.assertEqual((op["job_id"], op["reserved_usd"]), (original["job_id"], original["reserved_usd"]))
+                self.assertEqual((op["picked_at"], op["deadline"], op["expiry_not_before"]),
+                                 (self.now, self.now + 7200, self.now + 7200))
+                self.assertEqual(op["status"], "ready")
+                self.assertEqual(instance.state["cursor"], (index + 1) % len(pool.ORDER))
+        self.assertEqual(len([call for call in self.native.calls if "/pick?" in call[0]]), 4)
+        self.assertEqual(self.api.calls, [])
+
+    def test_recover_missing_authority_rejects_capability_artifacts_and_owned_state(self):
+        instance = self.start()
+        operation, original = self.interrupted_pick()
+        directory = sentry.private_directory(instance.directory(operation), create=True)
+        wire = directory / "picked-wire.json"
+        job.write_new(wire, job.encode({**payload("FRI"), "lease_token": "0x" + "f1" * 32}))
+        self.now += 8000
+        with self.assertRaisesRegex(runpod.Error, "pick_initialization_contains_unknown_artifacts"):
+            self.reload().recover_pick(operation)
+        self.assertEqual(wire.read_bytes(), job.encode({**payload("FRI"), "lease_token": "0x" + "f1" * 32}))
+        self.assertEqual(self.reload().operation(operation), original)
+        wire.unlink()
+        instance = self.reload()
+        instance.operation(operation)["lease_sha256"] = "a" * 64
+        instance.save()
+        owned = copy.deepcopy(instance.operation(operation))
+        with self.assertRaisesRegex(runpod.Error, "missing_pick_authority_requires_origin_reconciliation"):
+            self.reload().recover_pick(operation)
+        self.assertEqual(self.reload().operation(operation), owned)
+        self.assertEqual(self.native.calls, [])
+
+    def test_recover_existing_uncertain_authority_never_repicks_or_refreshes_window(self):
+        instance = self.start()
+        self.native.pick_error = True
+        with self.assertRaisesRegex(runpod.Error, "transport_failure"):
+            instance.pick_next()
+        operation = next(iter(instance.state["operations"]))
+        original = copy.deepcopy(instance.operation(operation))
+        self.now += 8000
+        self.native.pick_error = False
+        with self.assertRaises(OSError):
+            self.reload().recover_pick(operation)
+        self.assertEqual(self.reload().operation(operation), original)
+        self.assertEqual(len(self.native.calls), 1)
+
+    def test_more_than_a_thousand_empty_polls_remain_bounded_and_rotate(self):
+        instance = self.start()
+        self.native.no_job = True
+        previous, previous_directory = None, None
+        for index in range(1005):
+            instance = self.reload()
+            operation = instance.pick_next()
+            op = instance.operation(operation)
+            self.assertEqual((op["lane"], op["stage"]), pool.ORDER[index % len(pool.ORDER)])
+            self.assertEqual((op["status"], op["reserved_usd"], op["native_status"]), ("no_job", "0", "no_job"))
+            self.assertEqual(list(instance.report()), [operation])
+            self.assertEqual(runpod.read_private_json(instance.directory(operation) / "authority.json")["status"], "no_job")
+            if previous is not None:
+                self.assertNotIn(previous, instance.state["operations"])
+                self.assertFalse(previous_directory.exists())
+            previous, previous_directory = operation, instance.directory(operation)
+        self.assertEqual(len(self.native.calls), 1005)
+        self.assertTrue(all(instance.eligible(name, stage) for name, stage in pool.ORDER))
+        self.assertEqual(self.api.calls, [])
+
+    def legacy_empty(self, instance, operation, template):
+        op = copy.deepcopy(template)
+        op["job_id"] = instance.state["pool_id"] + ":" + op["lane"] + ":" + op["stage"] + ":" + operation
+        instance.state["operations"][operation] = op
+        directory = sentry.private_directory(instance.directory(operation), create=True)
+        release_raw = job.read_file(self.store.root / op["lane"] / op["stage"] / "release.json", job.MAX_MANIFEST)
+        _, authority = sentry.pick_intent(instance.settings["lanes"][op["lane"]]["endpoint"], release_raw, op["job_id"])
+        authority["status"] = "no_job"
+        runpod.atomic_json(directory / "authority.json", authority)
+        job.write_new(directory / "release.json", release_raw)
+        return op
+
+    def test_full_legacy_empty_journal_recovers_before_operation_limit(self):
+        instance = self.start()
+        self.native.no_job = True
+        first = instance.pick_next()
+        template = copy.deepcopy(instance.operation(first))
+        for index in range(999):
+            self.legacy_empty(instance, f"{index:032x}", template)
+        instance.save()
+        self.assertEqual(len(instance.state["operations"]), 1000)
+        instance = self.reload()
+        operation = instance.pick_next()
+        self.assertEqual(len(instance.state["operations"]), 1)
+        self.assertEqual((instance.operation(operation)["lane"], instance.operation(operation)["stage"]), pool.ORDER[1])
+        self.assertEqual(sum(len(list((self.store.root / name / "jobs").iterdir())) for name in ("child", "gateway")), 1)
+        self.assertEqual(len(self.native.calls), 2)
+
+    def test_empty_pruning_preserves_uncertain_spent_external_and_owned_records(self):
+        instance = self.start()
+        self.native.no_job = True
+        first = instance.pick_next()
+        template = copy.deepcopy(instance.operation(first))
+        changes = [{"status": "pick_uncertain"}, {"reserved_usd": "2"}, {"mode": "external"},
+                   {"lease_sha256": "a" * 64}, {"rental_operation": "rental"}, {"chain_binding": {"owned": True}},
+                   {"warm_owner": "supervisor"}, {"native_status": None}, {"expiry_not_before": 8200},
+                   {"released_reserved_usd": "2"}]
+        retained = {}
+        for index, change in enumerate(changes):
+            operation = f"{index:032x}"
+            op = self.legacy_empty(instance, operation, template)
+            op.update(change)
+            retained[operation] = copy.deepcopy(op)
+        # A status-only row, a foreign artifact, and changed authority must never authorize deletion.
+        for index, shape in enumerate(("missing", "artifact", "uncertain"), len(changes)):
+            operation = f"{index:032x}"
+            op = self.legacy_empty(instance, operation, template)
+            directory = instance.directory(operation)
+            if shape == "missing":
+                (directory / "authority.json").unlink()
+            elif shape == "artifact":
+                job.write_new(directory / "picked-wire.json", b"retained capability")
+            else:
+                authority = runpod.read_private_json(directory / "authority.json")
+                authority["status"] = "pick_uncertain"
+                runpod.atomic_json(directory / "authority.json", authority)
+            retained[operation] = copy.deepcopy(op)
+        instance.save()
+        before = {str(path): path.read_bytes() for name in ("child", "gateway")
+                  for path in (self.store.root / name / "jobs").rglob("*") if path.is_file() and first not in str(path)}
+        self.reload().prune_no_jobs()
+        instance = self.reload()
+        self.assertEqual(instance.state["operations"], retained)
+        self.assertEqual(before, {str(path): path.read_bytes() for name in ("child", "gateway")
+                         for path in (self.store.root / name / "jobs").rglob("*") if path.is_file()})
+        self.assertEqual(sum(runpod.money(op["reserved_usd"], allow_zero=True) for op in retained.values()), 2)
+        self.assertEqual(len(self.native.calls), 1)
+
+    def interrupted_empty_cleanup(self, at_unlink):
+        instance = self.start()
+        self.native.no_job = True
+        previous = instance.pick_next()
+        directory = instance.directory(previous)
+        original_unlink, original_save = Path.unlink, pool.Pool.save
+        def unlink(path, *args, **kwargs):
+            original_unlink(path, *args, **kwargs)
+            if at_unlink and path.name == "authority.json":
+                raise KeyboardInterrupt
+        def save(selected):
+            if not at_unlink and previous not in selected.state["operations"]:
+                raise KeyboardInterrupt
+            original_save(selected)
+        with patch.object(Path, "unlink", unlink), patch.object(pool.Pool, "save", save), self.assertRaises(KeyboardInterrupt):
+            instance.pick_next()
+        instance = self.reload()
+        self.assertIs(instance.operation(previous)["prune_no_job"], True)
+        operation = instance.pick_next()
+        self.assertNotIn(previous, instance.state["operations"])
+        self.assertFalse(directory.exists())
+        self.assertEqual((instance.operation(operation)["lane"], instance.operation(operation)["stage"]), pool.ORDER[1])
+        self.assertEqual(instance.operation(operation)["reserved_usd"], "0")
+        self.assertEqual(len(self.native.calls), 2)
+
+    def test_empty_cleanup_recovers_after_partial_file_removal(self):
+        self.interrupted_empty_cleanup(True)
+
+    def test_empty_cleanup_recovers_after_file_removal_before_journal_retirement(self):
+        self.interrupted_empty_cleanup(False)
+
+    def test_empty_cleanup_resyncs_parent_after_directory_removal_interruption(self):
+        instance = self.start()
+        self.native.no_job = True
+        previous = instance.pick_next()
+        directory = instance.directory(previous)
+        def interrupt_parent(path):
+            if path == directory.parent:
+                raise KeyboardInterrupt
+            runpod.sync_dir(path)
+        with patch("pool.sync_dir", interrupt_parent), self.assertRaises(KeyboardInterrupt):
+            instance.pick_next()
+        self.assertFalse(directory.exists())
+        instance = self.reload()
+        self.assertIs(instance.operation(previous)["prune_no_job"], True)
+        original_save, synced = pool.Pool.save, []
+        def sync(path):
+            synced.append(path)
+            runpod.sync_dir(path)
+        def save(selected):
+            if previous not in selected.state["operations"]:
+                self.assertIn(directory.parent, synced)
+            original_save(selected)
+        with patch("pool.sync_dir", sync), patch.object(pool.Pool, "save", save):
+            operation = instance.pick_next()
+        self.assertEqual(list(instance.state["operations"]), [operation])
+        self.assertEqual(len(self.native.calls), 2)
+
+    def test_empty_cleanup_resyncs_visible_marker_before_removing_evidence(self):
+        instance = self.start()
+        self.native.no_job = True
+        previous = instance.pick_next()
+        directory = instance.directory(previous)
+        original_sync, original_unlink = runpod.sync_dir, Path.unlink
+        def interrupt_marker(path):
+            if path == self.store.root:
+                raise KeyboardInterrupt
+            original_sync(path)
+        with patch("runpod.sync_dir", interrupt_marker), self.assertRaises(KeyboardInterrupt):
+            instance.pick_next()
+        instance = self.reload()
+        self.assertIs(instance.operation(previous)["prune_no_job"], True)
+        self.assertTrue((directory / "authority.json").exists())
+        synced = []
+        def sync(path):
+            synced.append(path)
+            original_sync(path)
+        def unlink(path, *args, **kwargs):
+            if path.parent == directory:
+                self.assertIn(self.store.root, synced)
+            original_unlink(path, *args, **kwargs)
+        with patch("runpod.sync_dir", sync), patch.object(Path, "unlink", unlink):
+            operation = instance.pick_next()
+        self.assertEqual(list(instance.state["operations"]), [operation])
+        self.assertEqual(len(self.native.calls), 2)
+
+    def test_empty_cleanup_persists_in_memory_marker_after_failed_save(self):
+        instance = self.start()
+        self.native.no_job = True
+        previous = instance.pick_next()
+        directory = instance.directory(previous)
+        with patch("pool.atomic_json", side_effect=OSError("save failed")), self.assertRaises(OSError):
+            instance.pick_next()
+        self.assertIs(instance.operation(previous)["prune_no_job"], True)
+        self.assertNotIn("prune_no_job", self.reload().operation(previous))
+        original_unlink = Path.unlink
+        def unlink(path, *args, **kwargs):
+            if path.parent == directory:
+                self.assertIs(self.reload().operation(previous)["prune_no_job"], True)
+            original_unlink(path, *args, **kwargs)
+        with patch.object(Path, "unlink", unlink):
+            operation = instance.pick_next()
+        self.assertEqual(list(instance.state["operations"]), [operation])
+        self.assertEqual(len(self.native.calls), 2)
+
+    def test_enqueue_prunes_only_prior_empty_native_probes(self):
+        instance = self.start(change=lambda value: value["lanes"]["child"]["stages"]["FRI"].update(acquisition="external"))
+        self.native.no_job = True
+        previous = instance.pick_next()
+        operation = instance.enqueue("child", "FRI", "dispatch:1", job.encode(payload("FRI")), evidence("child", "FRI"), 8200)
+        self.assertEqual(list(instance.state["operations"]), [operation])
+        self.assertEqual((instance.operation(operation)["mode"], instance.operation(operation)["reserved_usd"]), ("external", "2"))
+        self.assertFalse((self.store.root / "gateway" / "jobs" / previous).exists())
         self.assertEqual(len(self.native.calls), 1)
 
     def test_no_jobs_release_reservations_and_rotate_lanes(self):

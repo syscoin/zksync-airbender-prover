@@ -137,12 +137,25 @@ private job directory. It fetches `/FRI/{batch}/evidence` or
 `complete` uses only that origin and exact lease for submission. A mismatch or
 missing evidence cannot be exported or silently reclassified as another lane.
 
-Use `recover-pick --operation-id ...` after a durable pick response survived an
-interruption. A missing response remains uncertain and cannot be replaced by a
-new pick. A launch retry discovers its already-journaled rental even if the
+Use `recover-pick --operation-id ...` after an interruption. If no durable
+`authority.json` exists, recovery retries the same job ID only after the sentry
+proves that the directory is absent or contains exclusively matching pre-request
+initialization files. It then durably refreshes the pick time and deadline before
+POSTing. A durable uncertain authority, response, capability, or unfamiliar file
+blocks that reset; a missing response after authority creation still requires
+origin reconciliation. A launch retry discovers its already-journaled rental even if the
 native deadline has since elapsed; it never creates a second allocation for the
 same attempt. Unmarked native responses retain the exact submission for retry.
 No status here proves reward eligibility or on-chain finality.
+
+The most recent definitive `no_job` result remains available to `status` and the
+caller until the next mutating `pick-next` or `enqueue`. That action prunes older
+empty probes only when their matching sentry authority records an explicitly
+unleased outcome, their budget reservation is zero, and neither their row nor
+job directory carries lease, rental, or chain-binding ownership. Cleanup records
+a durable marker before removing files and resumes safely after interruption.
+This also recovers an older journal filled with empty probes; uncertain, spent,
+external, and owned records retain their existing limits and budget accounting.
 
 `expire --operation-id ...` releases a known job's scheduling slot only after its
 deadline and after every rental for that job has a terminal provider state.
