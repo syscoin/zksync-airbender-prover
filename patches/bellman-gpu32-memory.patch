@@ -1,0 +1,868 @@
+--- a/src/ff.cu
++++ b/src/ff.cu
+@@ -8,6 +8,10 @@
+ namespace ff {
+ 
+ using namespace allocator;
++
++// Reuse bounded scratch on one stream instead of allocating a whole PLONK vector.
++// At 32 bytes per field element this caps the explicit vector scratch at 16 MiB.
++static constexpr unsigned FF_SCRATCH_CHUNK_COUNT = 1u << 19;
+ 
+ cudaError_t set_up(const unsigned powers_of_w_coarse_log_count, const unsigned powers_of_g_coarse_log_count) {
+   HANDLE_CUDA_ERROR(set_up_powers_of_w(powers_of_w_coarse_log_count));
+@@ -169,10 +173,31 @@
+   storage *inputs = configuration.inputs;
+   storage *outputs = configuration.outputs;
+   const unsigned count = configuration.count;
++  if (count == 0)
++    return cudaSuccess;
+   if (outputs == inputs) {
++    // Chunk partitioning is equivalent only for nonzero denominators. Reject any
++    // zero before mutating outputs, rather than changing the old zero propagation
++    // behavior or allocating the original whole-vector scratch as a fallback.
++    allocation<unsigned> zero_flag;
++    HANDLE_CUDA_ERROR(allocate(zero_flag, 1, pool, stream));
++    HANDLE_CUDA_ERROR(cudaMemsetAsync(zero_flag.ptr, 0, sizeof(unsigned), stream));
++    HANDLE_CUDA_ERROR(detect_zero<fd_q>(inputs, zero_flag, count, stream));
++    unsigned has_zero = 0;
++    HANDLE_CUDA_ERROR(cudaMemcpyAsync(&has_zero, zero_flag.ptr, sizeof(unsigned), cudaMemcpyDeviceToHost, stream));
++    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream));
++    HANDLE_CUDA_ERROR(free(zero_flag, stream));
++    if (has_zero)
++      return cudaErrorInvalidValue;
+     allocation<storage> scratch;
+-    HANDLE_CUDA_ERROR(allocate(scratch, count, pool, stream));
+-    HANDLE_CUDA_ERROR(batch_inverse_per_thread<fd_q>(inputs, scratch, inputs, count, stream));
++    const unsigned scratch_count = count < FF_SCRATCH_CHUNK_COUNT ? count : FF_SCRATCH_CHUNK_COUNT;
++    HANDLE_CUDA_ERROR(allocate(scratch, scratch_count, pool, stream));
++    for (unsigned offset = 0; offset < count;) {
++      const unsigned remaining = count - offset;
++      const unsigned chunk_count = remaining < scratch_count ? remaining : scratch_count;
++      HANDLE_CUDA_ERROR(batch_inverse_per_thread<fd_q>(inputs + offset, scratch, outputs + offset, chunk_count, stream));
++      offset += chunk_count;
++    }
+     HANDLE_CUDA_ERROR(free(scratch, stream));
+   } else {
+     HANDLE_CUDA_ERROR(batch_inverse_per_thread<fd_q>(inputs, outputs, outputs, count, stream));
+@@ -186,16 +211,42 @@
+   cudaStream_t stream = configuration.stream;
+   const unsigned count = configuration.count;
+   ff_storage<8> *result = configuration.result;
++  if (count == 0) {
++    static const storage zero{};
++    return cudaMemcpyAsync(result, &zero, sizeof(storage), cudaMemcpyDefault, stream);
++  }
++  const unsigned scratch_count = count < FF_SCRATCH_CHUNK_COUNT ? count : FF_SCRATCH_CHUNK_COUNT;
+   allocation<storage> temp;
+-  HANDLE_CUDA_ERROR(allocate(temp, count, pool, stream));
+-  const multiply_by_powers_configuration mpc = {pool, stream, configuration.values, configuration.point, temp, count};
+-  HANDLE_CUDA_ERROR(multiply_by_powers(mpc));
+-  allocation<void> temp_storage;
+-  size_t temp_storage_bytes = 0;
+-  HANDLE_CUDA_ERROR(sum(temp_storage, temp_storage_bytes, temp.ptr, result, count));
+-  HANDLE_CUDA_ERROR(allocate(temp_storage, temp_storage_bytes, pool, stream));
+-  HANDLE_CUDA_ERROR(sum(temp_storage, temp_storage_bytes, temp.ptr, result, count, stream));
+-  HANDLE_CUDA_ERROR(free(temp_storage, stream));
++  allocation<storage> scalars;
++  HANDLE_CUDA_ERROR(allocate(temp, scratch_count, pool, stream));
++  HANDLE_CUDA_ERROR(allocate(scalars, 4, pool, stream));
++  storage *point = scalars.ptr;
++  storage *factor = scalars.ptr + 1;
++  storage *partial = scalars.ptr + 2;
++  storage *accumulator = scalars.ptr + 3;
++  // Snapshot the point, and do not write result until all coefficients are read.
++  // This preserves result aliases with the point or any coefficient.
++  HANDLE_CUDA_ERROR(set_value(point, configuration.point, 1, stream));
++  HANDLE_CUDA_ERROR(set_value_zero(accumulator, 1, stream));
++  for (unsigned offset = 0; offset < count;) {
++    const unsigned remaining = count - offset;
++    const unsigned chunk_count = remaining < scratch_count ? remaining : scratch_count;
++    const multiply_by_powers_configuration mpc = {pool, stream, configuration.values + offset, point, temp, chunk_count};
++    HANDLE_CUDA_ERROR(multiply_by_powers(mpc));
++    allocation<void> temp_storage;
++    size_t temp_storage_bytes = 0;
++    HANDLE_CUDA_ERROR(sum(temp_storage, temp_storage_bytes, temp.ptr, partial, chunk_count));
++    HANDLE_CUDA_ERROR(allocate(temp_storage, temp_storage_bytes, pool, stream));
++    HANDLE_CUDA_ERROR(sum(temp_storage, temp_storage_bytes, temp.ptr, partial, chunk_count, stream));
++    HANDLE_CUDA_ERROR(free(temp_storage, stream));
++    // Local powers start at zero; restore each chunk's absolute exponent.
++    HANDLE_CUDA_ERROR(power_by_ref<fd_q>(point, factor, offset, stream));
++    HANDLE_CUDA_ERROR(ax_by_ref<fd_q>(factor, partial, partial, 1, stream));
++    HANDLE_CUDA_ERROR(x_plus_y<fd_q>(accumulator, partial, accumulator, 1, stream));
++    offset += chunk_count;
++  }
++  HANDLE_CUDA_ERROR(cudaMemcpyAsync(result, accumulator, sizeof(storage), cudaMemcpyDefault, stream));
++  HANDLE_CUDA_ERROR(free(scalars, stream));
+   HANDLE_CUDA_ERROR(free(temp, stream));
+   return cudaSuccess;
+ }
+@@ -243,4 +294,4 @@
+   return cudaSuccess;
+ }
+ 
+-} // namespace ff
+\ No newline at end of file
++} // namespace ff
+--- a/src/ff_kernels.cu
++++ b/src/ff_kernels.cu
+@@ -537,6 +537,45 @@
+ }
+ 
+ template cudaError_t naive_inverse<fd_q>(const fd_q::storage *x, fd_q::storage *result, const unsigned count, cudaStream_t stream);
++
++template <class FD>
++__global__ void power_by_ref_kernel(const typename FD::storage *base, typename FD::storage *result, unsigned exponent) {
++  typedef typename FD::storage storage;
++  auto power = memory::load<storage, memory::ld_modifier::ca>(base);
++  auto value = FD::get_one();
++  for (; exponent != 0; exponent >>= 1, power = FD::sqr(power))
++    if (exponent & 1u)
++      value = FD::mul(value, power);
++  memory::store<storage, memory::st_modifier::cs>(result, value);
++}
++
++template <class FD>
++cudaError_t power_by_ref(const typename FD::storage *base, typename FD::storage *result, const unsigned exponent, cudaStream_t stream) {
++  power_by_ref_kernel<FD><<<1, 1, 0, stream>>>(base, result, exponent);
++  return cudaGetLastError();
++}
++
++template cudaError_t power_by_ref<fd_q>(const fd_q::storage *base, fd_q::storage *result, const unsigned exponent, cudaStream_t stream);
++
++template <class FD>
++__global__ void detect_zero_kernel(const typename FD::storage *inputs, unsigned *flag, const unsigned count) {
++  typedef typename FD::storage storage;
++  const unsigned gid = blockIdx.x * blockDim.x + threadIdx.x;
++  if (gid < count && FD::is_zero(memory::load<storage, memory::ld_modifier::cg>(inputs + gid)))
++    atomicExch(flag, 1u);
++}
++
++template <class FD>
++cudaError_t detect_zero(const typename FD::storage *inputs, unsigned *flag, const unsigned count, cudaStream_t stream) {
++  if (count == 0)
++    return cudaSuccess;
++  const unsigned block_dim = 256;
++  const dim3 grid_dim = (count - 1) / block_dim + 1;
++  detect_zero_kernel<FD><<<grid_dim, block_dim, 0, stream>>>(inputs, flag, count);
++  return cudaGetLastError();
++}
++
++template cudaError_t detect_zero<fd_q>(const fd_q::storage *inputs, unsigned *flag, const unsigned count, cudaStream_t stream);
+ 
+ template <class FD>
+ __global__ void get_powers_of_w_kernel(typename FD::storage *target, const unsigned log_degree, const unsigned offset, const unsigned count, const bool inverse,
+--- a/src/ff_kernels.cuh
++++ b/src/ff_kernels.cuh
+@@ -106,6 +106,12 @@
+ template <class FD> cudaError_t naive_inverse(const typename FD::storage *x, typename FD::storage *result, unsigned count, cudaStream_t stream);
+ 
+ template <class FD>
++cudaError_t power_by_ref(const typename FD::storage *base, typename FD::storage *result, unsigned exponent, cudaStream_t stream);
++
++template <class FD>
++cudaError_t detect_zero(const typename FD::storage *inputs, unsigned *flag, unsigned count, cudaStream_t stream);
++
++template <class FD>
+ cudaError_t get_powers_of_w(typename FD::storage *target, unsigned log_degree, unsigned offset, unsigned count, bool inverse, bool bit_reverse,
+                             cudaStream_t stream);
+ 
+--- a/src/msm.cu
++++ b/src/msm.cu
+@@ -2,6 +2,7 @@
+ #include "bellman-cuda-cub.cuh"
+ #include "common.cuh"
+ #include "msm.cuh"
++#include "msm_memory_policy.cuh"
+ #include <algorithm>
+ 
+ namespace msm {
+@@ -27,8 +28,9 @@
+   case 23:
+     return 19;
+   case 24:
++    return 20;
+   case 25:
+-    return 20;
++    return memory_policy::WRAPPER_WINDOW_BITS;
+   case 26:
+     return 22;
+   default:
+@@ -49,6 +51,7 @@
+   case 24:
+     return 19;
+   case 25:
++    return memory_policy::WRAPPER_CHUNK_LOG;
+   case 26:
+     return 22;
+   default:
+@@ -439,6 +442,10 @@
+     return schedule_execution(cfg, false);
+   }
+   unsigned log_max_inputs_count = copy_scalars ? max(log_min_inputs_count, log_scalars_count == 0 ? 0 : log_scalars_count - 1) : log_scalars_count;
++  // SYSCOIN: Bound only the default log25 wrapper schedule; explicit backend test chunk settings remain authoritative.
++  const auto bounded_chunks = memory_policy::default_chunks(log_scalars_count, exec_cfg.force_min_chunk_size, log_min_inputs_count, log_max_inputs_count);
++  log_min_inputs_count = bounded_chunks.minimum;
++  log_max_inputs_count = bounded_chunks.maximum;
+   while (true) {
+     extended_configuration cfg = {exec_cfg, scalars_attributes, bases_attributes, results_attributes, log_min_inputs_count, log_max_inputs_count, props};
+     cudaError_t error = schedule_execution(cfg, true);
+--- /dev/null
++++ b/src/msm_memory_policy.cuh
+@@ -0,0 +1,29 @@
++#pragma once
++
++namespace msm::memory_policy {
++
++// SYSCOIN: This is scheduling geometry, not the field, curve, proof security or wrapper domain.
++// The existing signed-window kernels already support the 17-bit window at other input sizes.
++constexpr unsigned WRAPPER_SCALARS_LOG = 25;
++constexpr unsigned WRAPPER_WINDOW_BITS = 17;
++constexpr unsigned WRAPPER_CHUNK_LOG = 20;
++
++struct chunk_limits {
++  unsigned minimum;
++  unsigned maximum;
++};
++
++constexpr unsigned clamp_chunk(const unsigned value) {
++  return value < WRAPPER_CHUNK_LOG ? value : WRAPPER_CHUNK_LOG;
++}
++
++constexpr chunk_limits default_chunks(const unsigned scalars_log, const bool force_minimum,
++                                      const unsigned minimum, const unsigned maximum) {
++  // Preserve unrelated domains and an explicitly requested backend schedule. force_maximum
++  // takes the existing early-return path before this helper is called.
++  return scalars_log == WRAPPER_SCALARS_LOG && !force_minimum
++             ? chunk_limits{clamp_chunk(minimum), clamp_chunk(maximum)}
++             : chunk_limits{minimum, maximum};
++}
++
++} // namespace msm::memory_policy
+--- /dev/null
++++ b/tests/ff_chunk_reference.py
+@@ -0,0 +1,127 @@
++#!/usr/bin/env python3
++"""CPU mathematical/model tests only; never assert CUDA execution or GPU-fit green."""
++import hashlib
++from pathlib import Path
++import re
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++P = 21888242871839275222246405745257275088548364400416034343698204186575808495617
++SOURCE_PINS = {
++    "src/ff.cu": "13e022d0078c9c49496c8808729c27b463216421006653172658058a485b8c29",
++    "src/ff_kernels.cu": "4ec81224687ec11bb58026697abb9a5523c5c64a4e4b5a7f0a7a2a32f6ab5843",
++    "src/ff_kernels.cuh": "2fd3d6c9bd9dd7c9211e8db5368bf9db76ae303b00c69dc38071f4693a4d9ffb",
++}
++SOURCE = (ROOT / "src/ff.cu").read_text()
++CHUNK = 1 << int(re.search(r"FF_SCRATCH_CHUNK_COUNT = 1u << (\d+)", SOURCE).group(1))
++
++
++def chunks(count):
++    offset = 0
++    while offset < count:
++        length = min(count - offset, CHUNK)
++        yield offset, length
++        offset += length
++
++
++def scalar_power(base, exponent):
++    value = 1
++    while exponent:
++        if exponent & 1:
++            value = value * base % P
++        base = base * base % P
++        exponent >>= 1
++    return value
++
++
++def polynomial(coefficients, point):
++    # Snapshot the point and delay the only externally visible result write.
++    point = int(point)
++    result = 0
++    for offset, count in chunks(len(coefficients)):
++        local_sum, power = 0, 1
++        for value in coefficients[offset:offset + count]:
++            local_sum = (local_sum + value * power) % P
++            power = power * point % P
++        result = (result + local_sum * scalar_power(point, offset)) % P
++    return result
++
++
++def horner(coefficients, point):
++    result = 0
++    for value in reversed(coefficients):
++        result = (result * point + value) % P
++    return result
++
++
++def inverse_alias(values):
++    if any(value == 0 for value in values):
++        raise ValueError("invalid zero denominator")
++    for offset, count in chunks(len(values)):
++        prefix = []
++        product = 1
++        for value in values[offset:offset + count]:
++            prefix.append(product)
++            product = product * value % P
++        inverse = pow(product, P - 2, P)
++        for local in range(count - 1, -1, -1):
++            index = offset + local
++            old = values[index]
++            values[index] = prefix[local] * inverse % P
++            inverse = inverse * old % P
++
++
++class ReferenceTests(unittest.TestCase):
++    def test_source_pins_and_allocation_geometry(self):
++        for name, expected in SOURCE_PINS.items():
++            self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), expected)
++        self.assertEqual(CHUNK * 32, 16 * 1024**2)
++        for count in (0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 1 << 25, (1 << 32) - 1):
++            schedule = list(chunks(count))
++            self.assertEqual(sum(length for _, length in schedule), count)
++            self.assertTrue(all(0 < length <= CHUNK for _, length in schedule))
++        self.assertEqual(len(list(chunks(1 << 25))), 64)
++
++    def test_scalar_power_zero_one_random_absolute_offsets(self):
++        for point in (0, 1, 0x9E3779B9, P - 1):
++            for exponent in (0, 1, 31, CHUNK - 1, CHUNK, CHUNK + 1, (1 << 25) - 1):
++                self.assertEqual(scalar_power(point, exponent), pow(point, exponent, P))
++
++    def test_polynomial_horner_boundaries_and_exact_aliases(self):
++        for count in (0, 1, 31, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK + 37):
++            original = [0 if index % 17 == 0 else (index * 1664525 + 1013904223) % P for index in range(count)]
++            for point in (0, 1, 0x9E3779B9):
++                expected = horner(original, point)
++                self.assertEqual(polynomial(original, point), expected)
++                for index in ({0, count // 2, count - 1} if count else set()):
++                    aliased = original.copy()
++                    result = polynomial(aliased, point)
++                    aliased[index] = result
++                    self.assertEqual(aliased[index], expected)
++                    self.assertEqual(aliased[:index], original[:index])
++                    self.assertEqual(aliased[index + 1:], original[index + 1:])
++                # Snapshot before the point itself becomes the result.
++                aliased_point = [point]
++                aliased_point[0] = polynomial(original, aliased_point[0])
++                self.assertEqual(aliased_point[0], expected)
++
++    def test_inverse_nonzero_boundaries_against_independent_scalar_oracle(self):
++        oracle = {value: pow(value, P - 2, P) for value in range(1, 258)}
++        for count in (0, 1, 31, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK + 37):
++            original = [index % 257 + 1 for index in range(count)]
++            actual = original.copy()
++            inverse_alias(actual)
++            self.assertEqual(actual, [oracle[value] for value in original])
++
++    def test_zero_denominator_rejected_before_any_mutation(self):
++        for count, zero_index in ((1, 0), (CHUNK + 1, 0), (CHUNK + 1, CHUNK), (2 * CHUNK + 37, CHUNK + 3)):
++            values = [index % 257 + 1 for index in range(count)]
++            values[zero_index] = 0
++            before = values.copy()
++            with self.assertRaises(ValueError):
++                inverse_alias(values)
++            self.assertEqual(values, before)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+--- /dev/null
++++ b/tests/ff_memory_correctness.cu
+@@ -0,0 +1,287 @@
++#include "ff.cuh"
++#include "ff_dispatch_st.cuh"
++#include "bellman-cuda-cub.cuh"
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++#include <vector>
++
++// Standalone CUDA correctness test: independent host fd_q reference, no Googletest.
++// This must be compiled against the candidate library, not an installed original.
++using F = fd_q;
++using S = F::storage;
++static constexpr unsigned CHUNK = 1u << 19;
++
++static void checked(cudaError_t error, const char *expression, int line) {
++  if (error != cudaSuccess) {
++    std::fprintf(stderr, "CUDA error %d at line %d: %s\n", int(error), line, expression);
++    std::exit(1);
++  }
++}
++#define CHECK(expression) checked((expression), #expression, __LINE__)
++
++static void equal(const S &actual, const S &expected, const char *operation, unsigned count, unsigned index) {
++  if (!F::eq(actual, expected)) {
++    std::fprintf(stderr, "%s mismatch count=%u index=%u\n", operation, count, index);
++    std::exit(2);
++  }
++}
++
++static S field(unsigned value) { return F::to_montgomery({value}); }
++
++static std::vector<S> values(unsigned count) {
++  std::vector<S> result(count);
++  unsigned state = 0x57184590u;
++  for (auto &value : result) {
++    state = state * 1664525u + 1013904223u;
++    value = field(state ? state : 1u); // Batch inversion's existing nonzero domain.
++  }
++  return result;
++}
++
++// Independent single CPU batch, not the CUDA per-thread or chunk partition.
++static std::vector<S> inverse_reference(const std::vector<S> &input) {
++  std::vector<S> result(input.size());
++  auto product = F::get_one();
++  for (unsigned i = 0; i < input.size(); ++i) {
++    result[i] = product;
++    product = F::mul(product, input[i]);
++  }
++  auto inverse = F::inverse(product);
++  for (size_t i = input.size(); i-- > 0;) {
++    result[i] = F::mul(result[i], inverse);
++    inverse = F::mul(inverse, input[i]);
++  }
++  return result;
++}
++
++// Horner reference is independent of the candidate's powers/reduce/chunk offset.
++static S polynomial_reference(const std::vector<S> &input, const S &point) {
++  S result{};
++  for (size_t i = input.size(); i-- > 0;)
++    result = F::add(F::mul(result, point), input[i]);
++  return result;
++}
++
++static void inverse_test(cudaMemPool_t pool, cudaStream_t stream, unsigned count, bool alias) {
++  if (count == 0) {
++    CHECK(ff::inverse({pool, stream, nullptr, nullptr, 0}));
++    return;
++  }
++  const auto input = values(count);
++  const auto expected = inverse_reference(input);
++  std::vector<S> guarded(count + 2, field(0xdeadbeefu));
++  for (unsigned i = 0; i < count; ++i)
++    guarded[i + 1] = input[i];
++  S *device_input;
++  S *device_output;
++  CHECK(cudaMalloc(&device_input, guarded.size() * sizeof(S)));
++  CHECK(cudaMalloc(&device_output, guarded.size() * sizeof(S)));
++  CHECK(cudaMemcpyAsync(device_input, guarded.data(), guarded.size() * sizeof(S), cudaMemcpyHostToDevice, stream));
++  CHECK(cudaMemcpyAsync(device_output, guarded.data(), guarded.size() * sizeof(S), cudaMemcpyHostToDevice, stream));
++  auto output = alias ? device_input : device_output;
++  CHECK(ff::inverse({pool, stream, device_input + 1, output + 1, count}));
++  CHECK(cudaStreamSynchronize(stream));
++  std::vector<S> actual(guarded.size());
++  CHECK(cudaMemcpy(actual.data(), output, actual.size() * sizeof(S), cudaMemcpyDeviceToHost));
++  equal(actual.front(), guarded.front(), "inverse guard", count, 0);
++  equal(actual.back(), guarded.back(), "inverse guard", count, count + 1);
++  for (unsigned i = 0; i < count; ++i)
++    equal(actual[i + 1], expected[i], "inverse", count, i);
++  if (!alias) {
++    CHECK(cudaMemcpy(actual.data(), device_input, actual.size() * sizeof(S), cudaMemcpyDeviceToHost));
++    for (unsigned i = 0; i < actual.size(); ++i)
++      equal(actual[i], guarded[i], "inverse input unchanged", count, i);
++  }
++  CHECK(cudaFree(device_output));
++  CHECK(cudaFree(device_input));
++}
++
++static void polynomial_test(cudaMemPool_t pool, cudaStream_t stream, unsigned count, const S &point, unsigned alias_mode) {
++  auto input = values(count);
++  // Include zero coefficients (unlike inversion, these are part of the domain).
++  for (unsigned i = 0; i < count; i += 17)
++    input[i] = S{};
++  S expected = polynomial_reference(input, point);
++  std::vector<S> guarded(count + 2, field(0xdeadbeefu));
++  for (unsigned i = 0; i < count; ++i)
++    guarded[i + 1] = input[i];
++  S *device_values;
++  S *device_point;
++  S *device_result;
++  CHECK(cudaMalloc(&device_values, guarded.size() * sizeof(S)));
++  CHECK(cudaMalloc(&device_point, sizeof(S)));
++  CHECK(cudaMalloc(&device_result, sizeof(S)));
++  CHECK(cudaMemcpyAsync(device_values, guarded.data(), guarded.size() * sizeof(S), cudaMemcpyHostToDevice, stream));
++  CHECK(cudaMemcpyAsync(device_point, &point, sizeof(S), cudaMemcpyHostToDevice, stream));
++  S *result = device_result;
++  S host_point = point;
++  S host_result{};
++  unsigned replaced = 0;
++  if (count && alias_mode >= 1 && alias_mode <= 3) {
++    replaced = alias_mode == 1 ? 0 : alias_mode == 2 ? count / 2 : count - 1;
++    result = device_values + 1 + replaced;
++  } else if (alias_mode == 4) {
++    result = device_point;
++  }
++  // Mode5 also aliases the point with a coefficient and the final result.
++  S *point_input = device_point;
++  if (count && alias_mode == 5) {
++    input[count / 2] = point;
++    expected = polynomial_reference(input, point);
++    replaced = count / 2;
++    guarded[replaced + 1] = point;
++    CHECK(cudaMemcpyAsync(device_values, guarded.data(), guarded.size() * sizeof(S), cudaMemcpyHostToDevice, stream));
++    point_input = result = device_values + 1 + replaced;
++  }
++  if (alias_mode == 6)
++    result = &host_result;
++  if (alias_mode == 7)
++    point_input = &host_point;
++  if (alias_mode == 8) {
++    result = &host_result;
++    point_input = &host_point;
++  }
++  if (alias_mode == 9)
++    point_input = result = &host_point;
++  CHECK(ff::poly_evaluate({pool, stream, count ? device_values + 1 : nullptr, count ? point_input : nullptr, result, count}));
++  CHECK(cudaStreamSynchronize(stream));
++  S actual;
++  CHECK(cudaMemcpy(&actual, result, sizeof(S), cudaMemcpyDefault));
++  equal(actual, expected, "polynomial", count, alias_mode);
++  CHECK(cudaMemcpy(guarded.data(), device_values, guarded.size() * sizeof(S), cudaMemcpyDeviceToHost));
++  equal(guarded.front(), field(0xdeadbeefu), "polynomial guard", count, 0);
++  equal(guarded.back(), field(0xdeadbeefu), "polynomial guard", count, count + 1);
++  for (unsigned i = 0; i < count; ++i) {
++    const bool overwritten = (alias_mode >= 1 && alias_mode <= 3) || alias_mode == 5;
++    equal(guarded[i + 1], overwritten && i == replaced ? expected : input[i], "polynomial input", count, i);
++  }
++  CHECK(cudaFree(device_result));
++  CHECK(cudaFree(device_point));
++  CHECK(cudaFree(device_values));
++}
++
++static void inverse_zero_rejected(cudaMemPool_t pool, cudaStream_t stream, unsigned count, unsigned zero_index) {
++  auto input = values(count);
++  input[zero_index] = S{};
++  S *device_values;
++  CHECK(cudaMalloc(&device_values, size_t(count) * sizeof(S)));
++  CHECK(cudaMemcpyAsync(device_values, input.data(), size_t(count) * sizeof(S), cudaMemcpyHostToDevice, stream));
++  const auto error = ff::inverse({pool, stream, device_values, device_values, count});
++  if (error != cudaErrorInvalidValue) {
++    std::fprintf(stderr, "zero inverse did not fail closed count=%u index=%u error=%d\n", count, zero_index, int(error));
++    std::exit(4);
++  }
++  std::vector<S> actual(count);
++  CHECK(cudaMemcpy(actual.data(), device_values, size_t(count) * sizeof(S), cudaMemcpyDeviceToHost));
++  for (unsigned i = 0; i < count; ++i)
++    equal(actual[i], input[i], "rejected inverse unchanged", count, i);
++  CHECK(cudaFree(device_values));
++}
++
++static S power_reference(S point, unsigned exponent) {
++  auto result = F::get_one();
++  for (; exponent; exponent >>= 1, point = F::sqr(point))
++    if (exponent & 1u)
++      result = F::mul(result, point);
++  return result;
++}
++
++static S geometric_reference(const S &point, unsigned count) {
++  if (F::eq(point, F::get_one()))
++    return field(count);
++  return F::mul(F::sub(power_reference(point, count), F::get_one()), F::inverse(F::sub(point, F::get_one())));
++}
++
++static void uniform_vector_check(const S *device_values, const S &expected, unsigned count, unsigned replaced, const S &replacement) {
++  std::vector<S> host(CHUNK);
++  for (unsigned offset = 0; offset < count;) {
++    const unsigned length = count - offset < CHUNK ? count - offset : CHUNK;
++    CHECK(cudaMemcpy(host.data(), device_values + offset, length * sizeof(S), cudaMemcpyDeviceToHost));
++    for (unsigned i = 0; i < length; ++i)
++      equal(host[i], offset + i == replaced ? replacement : expected, "full25 vector", count, offset + i);
++    offset += length;
++  }
++}
++
++static void full25_test(cudaMemPool_t pool, cudaStream_t stream) {
++  const unsigned count = 1u << 25;
++  S *device_values;
++  S *device_output;
++  S *device_point;
++  CHECK(cudaMalloc(&device_values, size_t(count) * sizeof(S)));
++  CHECK(cudaMalloc(&device_output, sizeof(S)));
++  CHECK(cudaMalloc(&device_point, sizeof(S)));
++  const S value = field(0x571u);
++  CHECK(ff::set_value_by_val(device_values, &value, count, stream));
++  CHECK(ff::inverse({pool, stream, device_values, device_values, count}));
++  CHECK(cudaStreamSynchronize(stream));
++  uniform_vector_check(device_values, F::inverse(value), count, count, S{});
++  const S points[] = {S{}, F::get_one(), field(0x9e3779b9u)};
++  for (const auto &point : points) {
++    for (unsigned alias_mode = 0; alias_mode < 3; ++alias_mode) {
++      CHECK(ff::set_value_one<F>(device_values, count, stream));
++      CHECK(cudaMemcpyAsync(device_point, &point, sizeof(S), cudaMemcpyHostToDevice, stream));
++      S *result = alias_mode == 1 ? device_values + count - 1 : alias_mode == 2 ? device_point : device_output;
++      CHECK(ff::poly_evaluate({pool, stream, device_values, device_point, result, count}));
++      CHECK(cudaStreamSynchronize(stream));
++      S actual;
++      CHECK(cudaMemcpy(&actual, result, sizeof(S), cudaMemcpyDeviceToHost));
++      const S expected = geometric_reference(point, count);
++      equal(actual, expected, "full25 polynomial", count, alias_mode);
++      uniform_vector_check(device_values, F::get_one(), count, alias_mode == 1 ? count - 1 : count, expected);
++    }
++  }
++  size_t scan_bytes = 0;
++  size_t sum_bytes = 0;
++  CHECK(ff::inclusive_prefix_product(nullptr, scan_bytes, device_values, device_values, CHUNK, stream));
++  CHECK(ff::sum(nullptr, sum_bytes, device_values, device_output, CHUNK, stream));
++  unsigned long long used_high = 0;
++  CHECK(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &used_high));
++  // Explicit vector16MiB +4scalars; peak also includes bounded CUB scratch.
++  // Allow allocator granularity; this is a measured guard, not a GPU-fit proof.
++  const size_t bound = size_t(CHUNK) * sizeof(S) + scan_bytes + sum_bytes + 128 + (2u << 20);
++  if (used_high > bound) {
++    std::fprintf(stderr, "scratch bound failed used=%llu bound=%zu\n", used_high, bound);
++    std::exit(3);
++  }
++  std::printf("CPU-reference/CUDA full25 PASS scratch_high=%llu bound=%zu scan=%zu sum=%zu\n", used_high, bound, scan_bytes, sum_bytes);
++  CHECK(cudaFree(device_point));
++  CHECK(cudaFree(device_output));
++  CHECK(cudaFree(device_values));
++}
++
++int main(int argc, char **argv) {
++  CHECK(cudaSetDevice(0));
++  cudaMemPoolProps properties{};
++  properties.allocType = cudaMemAllocationTypePinned;
++  properties.handleTypes = cudaMemHandleTypeNone;
++  properties.location.type = cudaMemLocationTypeDevice;
++  properties.location.id = 0;
++  cudaMemPool_t pool;
++  cudaStream_t stream;
++  CHECK(cudaMemPoolCreate(&pool, &properties));
++  CHECK(cudaStreamCreate(&stream));
++  const unsigned counts[] = {0, 1, 2, 31, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK + 37};
++  const S points[] = {S{}, F::get_one(), field(0x9e3779b9u)};
++  for (unsigned count : counts) {
++    inverse_test(pool, stream, count, false);
++    inverse_test(pool, stream, count, true);
++    for (const auto &point : points)
++      for (unsigned alias_mode = 0; alias_mode < 10; ++alias_mode)
++        polynomial_test(pool, stream, count, point, alias_mode);
++    std::printf("CPU-reference/CUDA correctness PASS count=%u\n", count);
++  }
++  inverse_zero_rejected(pool, stream, 1, 0);
++  inverse_zero_rejected(pool, stream, CHUNK + 1, 0);
++  inverse_zero_rejected(pool, stream, CHUNK + 1, CHUNK);
++  inverse_zero_rejected(pool, stream, 2 * CHUNK + 37, CHUNK + 3);
++  if (argc == 2 && std::string(argv[1]) == "--full25")
++    full25_test(pool, stream);
++  unsigned long long used_high = 0;
++  CHECK(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &used_high));
++  std::printf("FF scratch pool observed high bytes=%llu\n", used_high);
++  CHECK(cudaStreamDestroy(stream));
++  CHECK(cudaMemPoolDestroy(pool));
++  return 0;
++}
+--- /dev/null
++++ b/tests/msm_host_bases_test.cu
+@@ -0,0 +1,98 @@
++// A distinct test executable; the retained physical msm_test.cu70f7 remains unchanged.
++// Compile with -I the reviewed original candidate tests/src directories.
++#include "msm_test.cu"
++#include "msm_memory_policy.cuh"
++
++static_assert(msm::memory_policy::WRAPPER_SCALARS_LOG == 25);
++static_assert(msm::memory_policy::WRAPPER_WINDOW_BITS == 17);
++static_assert(msm::memory_policy::WRAPPER_CHUNK_LOG == 20);
++static_assert(msm::memory_policy::default_chunks(25, false, 25, 25).minimum == 20);
++static_assert(msm::memory_policy::default_chunks(25, false, 25, 25).maximum == 20);
++
++class msm_host_bases_test : public msm_test {
++protected:
++  pa *pinned_bases{};
++  cudaMemPool_t owned_pool{};
++  cudaStream_t owned_stream{};
++
++  // Release every owned allocation even after a fatal assertion in the test body.
++  // The inherited fixture otherwise frees host allocations only on its happy path.
++  void TearDown() override {
++    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
++    if (owned_stream)
++      EXPECT_EQ(cudaStreamDestroy(owned_stream), cudaSuccess);
++    if (owned_pool)
++      EXPECT_EQ(cudaMemPoolDestroy(owned_pool), cudaSuccess);
++    if (pinned_bases)
++      EXPECT_EQ(cudaFreeHost(pinned_bases), cudaSuccess);
++    if (h_scalars)
++      EXPECT_EQ(cudaFreeHost(h_scalars), cudaSuccess);
++    if (h_results)
++      EXPECT_EQ(cudaFreeHost(h_results), cudaSuccess);
++    if (d_bases)
++      EXPECT_EQ(cudaFree(d_bases), cudaSuccess);
++    if (d_scalars)
++      EXPECT_EQ(cudaFree(d_scalars), cudaSuccess);
++    if (d_results)
++      EXPECT_EQ(cudaFree(d_results), cudaSuccess);
++    delete[] u_bases;
++    delete[] base_multipliers;
++    delete[] u_scalars;
++    delete[] u_results;
++    EXPECT_EQ(msm::tear_down(), cudaSuccess);
++    EXPECT_EQ(cudaDeviceReset(), cudaSuccess);
++  }
++
++  void host_bases_full25(const bool pinned_scalar_input) {
++    constexpr unsigned LOG_COUNT = 25;
++    constexpr unsigned COUNT = 1u << LOG_COUNT;
++    ASSERT_NO_FATAL_FAILURE(set_up(LOG_COUNT));
++    ASSERT_NO_FATAL_FAILURE(generate_bases(LOG_COUNT));
++    ASSERT_NO_FATAL_FAILURE(generate_scalars(LOG_COUNT));
++    ASSERT_CUDA_SUCCESS(cudaMallocHost(&pinned_bases, size_t(COUNT) * sizeof(pa)));
++    ASSERT_CUDA_SUCCESS(cudaMemcpy(pinned_bases, d_bases, size_t(COUNT) * sizeof(pa), cudaMemcpyDeviceToHost));
++    // The production fallback may not retain a whole device G1 CRS. Drop this
++    // input-generation buffer before the pool is created or MSM begins.
++    ASSERT_CUDA_SUCCESS(cudaFree(d_bases));
++    d_bases = nullptr;
++    cudaPointerAttributes bases_type{};
++    cudaPointerAttributes scalar_type{};
++    auto *scalars = pinned_scalar_input ? h_scalars : d_scalars;
++    ASSERT_CUDA_SUCCESS(cudaPointerGetAttributes(&bases_type, pinned_bases));
++    ASSERT_CUDA_SUCCESS(cudaPointerGetAttributes(&scalar_type, scalars));
++    ASSERT_EQ(bases_type.type, cudaMemoryTypeHost);
++    ASSERT_EQ(scalar_type.type, pinned_scalar_input ? cudaMemoryTypeHost : cudaMemoryTypeDevice);
++    ASSERT_CUDA_SUCCESS(bc::mem_pool_create(owned_pool, 0));
++    ASSERT_CUDA_SUCCESS(cudaStreamCreate(&owned_stream));
++    size_t used_high = 0;
++    size_t reserved_high = 0;
++    ASSERT_CUDA_SUCCESS(cudaMemPoolGetAttribute(owned_pool, cudaMemPoolAttrUsedMemHigh, &used_high));
++    ASSERT_CUDA_SUCCESS(cudaMemPoolGetAttribute(owned_pool, cudaMemPoolAttrReservedMemHigh, &reserved_high));
++    ASSERT_EQ(used_high, size_t{0});
++    ASSERT_EQ(reserved_high, size_t{0});
++    execution_configuration cfg = {owned_pool, owned_stream, pinned_bases, scalars, d_results, LOG_COUNT};
++    // Default chunk20 must be tested, not a forced test-only alternate schedule.
++    ASSERT_FALSE(cfg.force_min_chunk_size);
++    ASSERT_FALSE(cfg.force_max_chunk_size);
++    ASSERT_CUDA_SUCCESS(execute_async(cfg));
++    ASSERT_CUDA_SUCCESS(cudaStreamSynchronize(owned_stream));
++    ASSERT_CUDA_SUCCESS(cudaMemPoolGetAttribute(owned_pool, cudaMemPoolAttrUsedMemHigh, &used_high));
++    ASSERT_CUDA_SUCCESS(cudaMemPoolGetAttribute(owned_pool, cudaMemPoolAttrReservedMemHigh, &reserved_high));
++    std::printf("SYSCOIN_MSM_HOST_BASES log_count=25 count=%u chunks=32 chunk_log=20 pinned_scalars=%u "
++                "host_base_bytes=%zu used_high_bytes=%zu reserved_high_bytes=%zu\n",
++                COUNT, pinned_scalar_input ? 1u : 0u, size_t(COUNT) * sizeof(pa), used_high, reserved_high);
++    EXPECT_LE(used_high, size_t{512} << 20);
++    EXPECT_LE(reserved_high, size_t{512} << 20);
++    // Exact retained reference: full-count sum of scalar*(base_index+1), then
++    // multiplication of G. The oracle never calls MSM or copies its result.
++    ASSERT_NO_FATAL_FAILURE(verify_result(cfg));
++  }
++};
++
++TEST_F(msm_host_bases_test, correctness_size_25_host_bases_device_scalars_bounded) {
++  host_bases_full25(false);
++}
++
++TEST_F(msm_host_bases_test, correctness_size_25_host_bases_pinned_scalars_bounded) {
++  host_bases_full25(true);
++}
+--- /dev/null
++++ b/tests/msm_memory_policy_test.cpp
+@@ -0,0 +1,53 @@
++#include "../src/msm_memory_policy.cuh"
++#include <cassert>
++#include <cstdint>
++#include <cstdio>
++#include <initializer_list>
++
++using msm::memory_policy::default_chunks;
++
++int main() {
++  static_assert(msm::memory_policy::WRAPPER_SCALARS_LOG == 25);
++  static_assert(msm::memory_policy::WRAPPER_WINDOW_BITS == 17);
++  static_assert(msm::memory_policy::WRAPPER_CHUNK_LOG == 20);
++  constexpr auto device = default_chunks(25, false, 25, 25);
++  constexpr auto pinned = default_chunks(25, false, 20, 24);
++  constexpr auto forced = default_chunks(25, true, 22, 25);
++  static_assert(device.minimum == 20 && device.maximum == 20);
++  static_assert(pinned.minimum == 20 && pinned.maximum == 20);
++  static_assert(forced.minimum == 22 && forced.maximum == 25);
++  for (unsigned domain = 0; domain < 32; ++domain) {
++    if (domain == 25) continue;
++    for (unsigned lower = 0; lower <= domain; ++lower) {
++      const auto unchanged = default_chunks(domain, false, lower, domain);
++      assert(unchanged.minimum == lower && unchanged.maximum == domain);
++    }
++  }
++  const auto smaller_start = default_chunks(25, false, 19, 25);
++  assert(smaller_start.minimum == 19 && smaller_start.maximum == 20);
++  // Mirror the unchanged production input-offset loop: no truncation to chunk size.
++  for (const auto limits : {device, pinned, smaller_start}) {
++    const std::uint64_t count = std::uint64_t{1} << 25;
++    std::uint64_t offset = 0;
++    unsigned loops = 0;
++    unsigned log_inputs_count = limits.minimum;
++    while (offset < count) {
++      const std::uint64_t chunk = std::uint64_t{1} << log_inputs_count;
++      const bool first = offset == 0;
++      assert(chunk <= (std::uint64_t{1} << 20));
++      assert(offset + chunk <= count);
++      offset += chunk;
++      ++loops;
++      if (!first && log_inputs_count < limits.maximum) ++log_inputs_count;
++    }
++    assert(offset == count);
++    assert(loops == (limits.minimum == 20 ? 32 : 33));
++  }
++  // Explicit fixed-array arithmetic. CUDA/CUB scratch is measured separately on Linux.
++  constexpr std::uint64_t windows = (254 - 1) / 17 + 1;
++  constexpr std::uint64_t buckets = windows * (std::uint64_t{1} << 16) * 128;
++  constexpr std::uint64_t pair_indexes = 2 * (windows + 1) * (std::uint64_t{1} << 20) * 4;
++  static_assert(windows == 15 && buckets == 125829120 && pair_indexes == 134217728);
++  std::printf("MSM pure policy PASS; full_count=33554432 chunks=32 bucket_bytes=%llu paired_index_bytes=%llu; CUDA not executed\n",
++              static_cast<unsigned long long>(buckets), static_cast<unsigned long long>(pair_indexes));
++}
+--- a/tests/msm_test.cu
++++ b/tests/msm_test.cu
+@@ -166,6 +166,36 @@
+     verify_result(cfg);
+     ASSERT_CUDA_SUCCESS(cudaStreamDestroy(stream));
+     ASSERT_CUDA_SUCCESS(cudaMemPoolDestroy(mem_pool));
++    tear_down();
++  }
++
++  // SYSCOIN: Real log25 correctness plus actual CUDA pool high-water measurement. This
++  // test uses a fresh pool and does not run service jobs, proofs or settlement.
++  void correctness_wrapper_log25(const bool pinned_scalars) {
++    constexpr unsigned log_count = 25;
++    set_up(log_count);
++    generate_bases(log_count);
++    generate_scalars(log_count);
++    cudaMemPool_t pool;
++    ASSERT_CUDA_SUCCESS(bc::mem_pool_create(pool, 0));
++    cudaStream_t stream;
++    ASSERT_CUDA_SUCCESS(cudaStreamCreate(&stream));
++    execution_configuration cfg = {
++        pool, stream, d_bases, pinned_scalars ? h_scalars : d_scalars, d_results, log_count};
++    ASSERT_CUDA_SUCCESS(execute_async(cfg));
++    ASSERT_CUDA_SUCCESS(cudaStreamSynchronize(stream));
++    size_t used_high = 0;
++    size_t reserved_high = 0;
++    ASSERT_CUDA_SUCCESS(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &used_high));
++    ASSERT_CUDA_SUCCESS(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemHigh, &reserved_high));
++    printf("SYSCOIN MSM_LOG25 pinned_scalars=%u used_high_bytes=%zu reserved_high_bytes=%zu\n",
++           pinned_scalars ? 1 : 0, used_high, reserved_high);
++    // Finite candidate scratch qualification, not a claim the complete wrapper fits32GiB.
++    EXPECT_LE(used_high, size_t{512} << 20);
++    EXPECT_LE(reserved_high, size_t{512} << 20);
++    verify_result(cfg);
++    ASSERT_CUDA_SUCCESS(cudaStreamDestroy(stream));
++    ASSERT_CUDA_SUCCESS(cudaMemPoolDestroy(pool));
+     tear_down();
+   }
+ 
+@@ -250,6 +280,10 @@
+ 
+ TEST_F(msm_test, correctness_size_20) { correctness(20); }
+ 
++TEST_F(msm_test, correctness_size_25_device_bounded) { correctness_wrapper_log25(false); }
++
++TEST_F(msm_test, correctness_size_25_pinned_bounded) { correctness_wrapper_log25(true); }
++
+ TEST_F(msm_test, benchmark_range) {
+   const unsigned min_log_count = 19;
+   const unsigned max_log_count = 26;

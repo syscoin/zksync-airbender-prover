@@ -132,6 +132,197 @@ def cargo_command(argv, manifest):
     return [*argv[:2], "--manifest-path", str(manifest), *argv[2:]]
 
 
+def require_airbender_only(source, argv, explicit_cpu=False):
+    """Reject GPU wrapping in this lane, using the selected source's features.
+
+    This is a conservative, pure Cargo-selection guard, not a second resolver.
+    Unknown selectors/feature routes fail closed before source materialization.
+    FRI GPU and explicit CPU CI remain valid; GPU wrapping requires --gpu32.
+    """
+    cargo_command(argv, Path("placeholder/Cargo.toml"))
+    root = read_toml(source / "Cargo.toml")
+    members = root.get("workspace", {}).get("members", [])
+    require(all(isinstance(p, str) and not any(c in p for c in "*?[") for p in members),
+            "ambiguous workspace selection; use a reviewed --gpu32 build")
+    manifests, directories = {}, {}
+    for relative in (["."] if "package" in root else []) + members:
+        directory = source / relative
+        require(directory.resolve().is_relative_to(source.resolve()) and not directory.is_symlink(),
+                "noncanonical selected package")
+        manifest = read_toml(directory / "Cargo.toml")
+        name = manifest["package"]["name"]
+        require(name not in manifests, "duplicate selected package")
+        manifests[name], directories[directory.resolve()] = manifest, name
+    require(manifests, "missing selected workspace packages")
+    options = argv[2:argv.index("--")] if "--" in argv else argv[2:]
+    packages, excluded, features, bins = [], [], [], []
+    workspace = no_default = all_features = False
+    index = 0
+    while index < len(options):
+        arg = options[index]
+        field = None
+        for short, long, target in (("-p", "--package", packages), ("-F", "--features", features),
+                                    (None, "--exclude", excluded), (None, "--bin", bins)):
+            if arg == short or arg == long:
+                index += 1
+                require(index < len(options), "missing Cargo selection value")
+                field = (target, options[index])
+                break
+            if arg.startswith(long + "="):
+                field = (target, arg[len(long) + 1:])
+                break
+            if short and arg.startswith(short) and len(arg) > len(short):
+                field = (target, arg[len(short):])
+                break
+        if field:
+            field[0].extend(re.split(r"[,\s]+", field[1]) if field[0] is features else [field[1]])
+        elif arg == "--workspace":
+            workspace = True
+        elif arg == "--all":
+            require(False, "deprecated --all selector is unsupported; use --workspace")
+        elif arg == "--no-default-features":
+            no_default = True
+        elif arg == "--all-features":
+            all_features = True
+        elif arg.startswith(("--package", "--features", "--exclude", "--bin=", "--workspace=",
+                             "--no-default-features=", "--all-features=")):
+            require(False, "ambiguous Cargo selection flag")
+        index += 1
+    require(not (workspace and packages), "ambiguous Cargo workspace/package selection")
+    require(all(p in manifests for p in packages + excluded), "unknown Cargo package selector")
+    require(not excluded or workspace, "Cargo exclusions require --workspace")
+    if packages:
+        selected = set(packages)
+    elif workspace:
+        selected = set(manifests)
+    elif "package" in root:
+        selected = {root["package"]["name"]}
+    else:
+        defaults = root.get("workspace", {}).get("default-members", members)
+        require(all((source / p).resolve() in directories for p in defaults), "unknown default workspace member")
+        selected = {directories[(source / p).resolve()] for p in defaults}
+    selected -= set(excluded)
+    if bins:
+        matching = set()
+        for binary in bins:
+            choices = {name for name in selected if binary in
+                       {entry["name"] for entry in manifests[name].get("bin", [])}
+                       or binary == name and manifests[name].get("package", {}).get("autobins", True)
+                       and any((path / "src/main.rs").is_file() for path, value in directories.items() if value == name)}
+            require(len(choices) == 1, "ambiguous Cargo binary selector")
+            matching.update(choices)
+        # --bin selects targets, not the package/feature scope. Keep all selected
+        # packages in the feature audit; only -p/--package narrows that scope.
+    require(selected, "empty Cargo package selection")
+    workspace_dependencies = root.get("workspace", {}).get("dependencies", {})
+
+    def dependencies(name):
+        result = {}
+        for section in ("dependencies", "build-dependencies", "dev-dependencies"):
+            for alias, value in manifests[name].get(section, {}).items():
+                spec = {"version": value} if isinstance(value, str) else copy.deepcopy(value)
+                if spec.pop("workspace", False):
+                    inherited = workspace_dependencies[alias]
+                    inherited = {"version": inherited} if isinstance(inherited, str) else copy.deepcopy(inherited)
+                    if "path" in inherited and "path" not in spec:
+                        inherited["_workspace_path"] = True
+                    spec["features"] = inherited.get("features", []) + spec.get("features", [])
+                    spec = {**inherited, **spec}
+                require(alias not in result or result[alias] == spec,
+                        "ambiguous dependency feature selection")
+                result[alias] = spec
+        # Target-specific feature forwarding cannot be guessed from the host.
+        require(not manifests[name].get("target"), "target-specific dependencies need --gpu32 review")
+        return result
+
+    deps = {name: dependencies(name) for name in manifests}
+    enabled, visited, active = set(), set(), set()
+
+    def local_target(name, spec):
+        if "path" not in spec:
+            return None
+        directory = next(path for path, value in directories.items() if value == name)
+        target = ((source if spec.get("_workspace_path") else directory) / spec["path"]).resolve()
+        require(target in directories, "unknown local dependency package")
+        return directories[target]
+
+    def activate_dependency(name, alias, feature=None):
+        require(alias in deps[name], "unknown dependency feature route")
+        spec = deps[name][alias]
+        dependency_name = spec.get("package", alias)
+        require(not (explicit_cpu and (feature == "gpu" or "gpu" in spec.get("features", []))),
+                "--cpu conflicts with selected GPU features")
+        require(not (dependency_name in {"zkos_wrapper", "zkos-wrapper"}
+                     and (feature == "gpu" or "gpu" in spec.get("features", []))),
+                "GPU wrapping requires --gpu32; CPU builds must disable GPU features")
+        if dependency_name in {"zkos_wrapper", "zkos-wrapper"}:
+            require(spec.get("default-features") is False, "ambiguous wrapper defaults require --gpu32")
+        target = local_target(name, spec)
+        if target:
+            activate_package(target, spec.get("default-features", True))
+            for item in spec.get("features", []):
+                activate_feature(target, item)
+            if feature:
+                activate_feature(target, feature)
+
+    def activate_feature(name, feature):
+        pair = (name, feature)
+        if pair in visited:
+            return
+        visited.add(pair)
+        require(not (feature == "gpu" and name in {"zksync_os_snark_prover", "zksync_os_prover_service"}),
+                "GPU wrapping requires --gpu32; CPU builds must disable GPU features")
+        table = manifests[name].get("features", {})
+        if feature not in table:
+            require(feature in deps[name] and deps[name][feature].get("optional"), "unknown selected feature")
+            activate_dependency(name, feature)
+            return
+        enabled.add(pair)
+        for item in table[feature]:
+            if item.startswith("dep:"):
+                activate_dependency(name, item[4:])
+            elif "/" in item:
+                alias, child = item.split("/", 1)
+                # Conditional optional-dependency forwarding is deliberately
+                # conservative: rejecting a possible wrapping GPU is safer.
+                activate_dependency(name, alias.rstrip("?"), child)
+            else:
+                activate_feature(name, item)
+
+    def activate_package(name, defaults):
+        if name not in active:
+            active.add(name)
+            for alias, spec in deps[name].items():
+                if not spec.get("optional", False):
+                    activate_dependency(name, alias)
+        if defaults and "default" in manifests[name].get("features", {}):
+            activate_feature(name, "default")
+
+    for name in selected:
+        activate_package(name, not no_default)
+        if all_features:
+            for feature in manifests[name].get("features", {}):
+                activate_feature(name, feature)
+    for feature in features:
+        if "/" in feature:
+            name, child = feature.split("/", 1)
+            if name in manifests:
+                require(name in selected, "feature selects an unselected workspace package")
+                activate_feature(name, child)
+            else:
+                for package in selected:
+                    activate_dependency(package, name, child)
+        else:
+            choices = [name for name in selected if feature in manifests[name].get("features", {})
+                       or feature in deps[name] and deps[name][feature].get("optional")]
+            require(choices, "unknown selected feature")
+            for name in choices:
+                activate_feature(name, feature)
+    if explicit_cpu:
+        require(not any(feature == "gpu" for _, feature in enabled),
+                "--cpu conflicts with selected GPU features")
+
+
 def copy_application(source, workspace):
     """Materialize only build inputs; reject links and retain every copied input hash."""
     files = [source / name for name in SOURCE_FILES]
@@ -199,12 +390,16 @@ def write_json_exclusive(path, value):
 
 
 def main(argv):
+    explicit_cpu = bool(argv and argv[0] == "--cpu")
+    if explicit_cpu:
+        argv = argv[1:]
     require(len(argv) >= 4 and argv[1] == "--", "usage: LABEL -- cargo COMMAND --locked ...")
     label = argv[0]
     require(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", label), "invalid build label")
     # Validate before cloning, copying, or creating any build directory.
     cargo_command(argv[2:], Path("placeholder/Cargo.toml"))
     source = Path(os.environ.get("PROVER_SOURCE_DIR", TOOLING_ROOT)).resolve(strict=True)
+    require_airbender_only(source, argv[2:], explicit_cpu)
     pins = json.loads(PIN_PATH.read_text())
     require(pins["schema_version"] == 1, "unsupported pin schema")
     patch = PIN_PATH.parent / pins["patch_file"]

@@ -18,9 +18,18 @@ rustup_sha256="$(jq -er '.rustup_init.sha256' "${pins}")"
 cmake_version="$(jq -er '.cmake.version' "${pins}")"
 cmake_sha256="$(jq -er '.cmake.sha256' "${pins}")"
 grep -Fqx "channel = \"${rust_toolchain}\"" /usr/src/zksync/rust-toolchain.toml
-if [ -n "${CUDAARCHS:-}" ]; then
-    test "${CUDAARCHS}" = "$(jq -er '.cuda_architectures' "${pins}")"
-fi
+case "${PROVER_GPU_ROLE:-fri}" in
+    fri)
+        if [ -n "${CUDAARCHS:-}" ]; then
+            test "${CUDAARCHS}" = "$(jq -er '.cuda_architectures' "${pins}")"
+        fi
+        ;;
+    snark|combined)
+        test -n "${CUDAARCHS:-}"
+        test "${CUDAARCHS}" = "$(jq -er '.snark_cuda_architectures' "${pins}")"
+        ;;
+    *) echo "Unknown GPU build role: ${PROVER_GPU_ROLE}" >&2; exit 1 ;;
+esac
 
 curl --proto '=https' --tlsv1.2 --fail --location --retry 5 \
     --output /tmp/rustup-init \

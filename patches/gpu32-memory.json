@@ -1,0 +1,119 @@
+{
+  "bellman": {
+    "changed_files": {
+      "src/ff.cu": {
+        "postimage_sha256": "13e022d0078c9c49496c8808729c27b463216421006653172658058a485b8c29",
+        "postimage_size": 15362,
+        "preimage_sha256": "eb226d9d14fdb342630e88e6908cebfdf6dd22b5b52ceb2a26f08f5e1ed8518d"
+      },
+      "src/ff_kernels.cu": {
+        "postimage_sha256": "4ec81224687ec11bb58026697abb9a5523c5c64a4e4b5a7f0a7a2a32f6ab5843",
+        "postimage_size": 41551,
+        "preimage_sha256": "a8b655412ae5c8b16878266d9573d89077496af3813f58f983b78b619b550719"
+      },
+      "src/ff_kernels.cuh": {
+        "postimage_sha256": "2fd3d6c9bd9dd7c9211e8db5368bf9db76ae303b00c69dc38071f4693a4d9ffb",
+        "postimage_size": 6592,
+        "preimage_sha256": "9b495885d2ba65755bbc5cc04c5da62bd9342801ffa1e459fb203a2bff049e4c"
+      },
+      "src/msm.cu": {
+        "postimage_sha256": "4b0089412e9fa6de49d67eec589bfc14aae370d881f213d3ebb5f6d3d842e145",
+        "postimage_size": 24361,
+        "preimage_sha256": "1e45dd2f79f35941e63072e3e94d8f90bbbc50a48296e8b46e46e9ebd001e8cf"
+      },
+      "src/msm_memory_policy.cuh": {
+        "postimage_sha256": "c428bc60b26e7bfeb4463ed85803a33bbc72006eb12c7fc715b607e17de8ed6b",
+        "postimage_size": 1121,
+        "preimage_sha256": null
+      },
+      "tests/ff_chunk_reference.py": {
+        "postimage_sha256": "4b0d53f516773eed18988ba1968162ba8b0e7aaef1fbbf9953078998be1fab06",
+        "postimage_size": 5292,
+        "preimage_sha256": null
+      },
+      "tests/ff_memory_correctness.cu": {
+        "postimage_sha256": "e84a7cbbbb03b6a599e3064b64d2ca35b374fa01b223a322a6f3cbe744378524",
+        "postimage_size": 12657,
+        "preimage_sha256": null
+      },
+      "tests/msm_host_bases_test.cu": {
+        "postimage_sha256": "2a7a076b5b87aa90c45391af7b4f0ddf7065f0d40fe19209fcd667bddb7716f0",
+        "postimage_size": 4830,
+        "preimage_sha256": null
+      },
+      "tests/msm_memory_policy_test.cpp": {
+        "postimage_sha256": "b55cc0f1367da2073fe0698d5e04dba3411a1db5251c9cc99d89a0bb4b118e80",
+        "postimage_size": 2551,
+        "preimage_sha256": null
+      },
+      "tests/msm_test.cu": {
+        "postimage_sha256": "70f7ba011ea68c9596d987c12c8757dc2e6986e215a12bcc517e2cfed5b45a3e",
+        "postimage_size": 17712,
+        "preimage_sha256": "ca6a9dff0e303b0b4e3b8747b044b5bc4668cf65672ab9c114e45634f4fe451c"
+      }
+    },
+    "patched_tree": "6e403e5a75ed91ca75c0bec533dbc73f82541ce2",
+    "patch_file": "bellman-gpu32-memory.patch",
+    "patch_sha256": "4fd50f537905f38666a8298f8c766440d6594fd2110cbd3dcfd08081a65961ed",
+    "upstream_commit": "d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206",
+    "upstream_tree": "fa1ab78c59f9cdba2fedf4a00813dcf1c4c92d5c",
+    "upstream_url": "https://github.com/matter-labs/era-bellman-cuda.git"
+  },
+  "crypto": {
+    "changed_files": {
+      "crates/gpu-prover/src/cuda_bindings/context.rs": {
+        "postimage_sha256": "3395819a697542e16c954aeddb4d54e029b2ddddec2df1f5732e179785e8d761",
+        "postimage_size": 12002,
+        "preimage_sha256": "a8702c5ddfe4cafa9636043965ce81a666bcecb539e210180aa9dc46e433db60"
+      },
+      "crates/gpu-prover/src/proof.rs": {
+        "postimage_sha256": "feea55a4c6d6f1c2b43d3ef79b02279dca03b485bb437509c6066ae8d83e0b58",
+        "postimage_size": 4581,
+        "preimage_sha256": "664dd5aaa3111291df6f2141b8437c55f205e5252db720f8de8a5e55a5c6c0a5"
+      },
+      "crates/gpu-prover/src/setup_precomputations.rs": {
+        "postimage_sha256": "e56e825907979f891721108644fbab981d3ed7475685cedcf53a87ef47fc5f9f",
+        "postimage_size": 23332,
+        "preimage_sha256": "240a9ed8aa49a911446038e405f512b4772d7ed50f3e2092b90cbb7d2a095e0a"
+      }
+    },
+    "patched_tree": "8c754adf137ab81dd531100dc470f6c7d019920b",
+    "patch_file": "crypto-gpu32-memory.patch",
+    "patch_sha256": "1c9811acb3ac699b4a0a16fcc60822ff1a395fe2acc3405e7132a1dda79e879c",
+    "upstream_commit": "845905b2aae49215e3d4ad0b71998b4a6b5abebf",
+    "upstream_edge_source": "git+https://github.com/matter-labs/zksync-crypto-gpu.git?branch=oh_for_wrapper",
+    "upstream_lock_source": "git+https://github.com/matter-labs/zksync-crypto-gpu.git?branch=oh_for_wrapper#845905b2aae49215e3d4ad0b71998b4a6b5abebf",
+    "upstream_tree": "9284de2a103f6aa1a1cc8f9a9df30f8d6c5af20c",
+    "upstream_url": "https://github.com/matter-labs/zksync-crypto-gpu.git"
+  },
+  "crypto_dependency_edges": {
+    "boojum-cuda": [
+      "era_cudart",
+      "era_cudart_sys"
+    ],
+    "era_cudart": [
+      "era_cudart_sys"
+    ],
+    "shivini": [
+      "era_cudart",
+      "era_cudart_sys"
+    ],
+    "zksync-gpu-ffi": [
+      "era_cudart_sys"
+    ]
+  },
+  "crypto_packages": {
+    "boojum-cuda": "0.156.0",
+    "era_cudart": "0.156.0",
+    "era_cudart_sys": "0.156.0",
+    "fflonk-cuda": "0.156.0",
+    "proof-compression": "0.156.0",
+    "shivini": "0.156.0",
+    "zksync-gpu-ffi": "0.156.0",
+    "zksync-gpu-prover": "0.156.0"
+  },
+  "domain_log": 25,
+  "polynomial_slots": 29,
+  "schema_version": 1,
+  "security_bits": 100
+}

@@ -2,7 +2,11 @@
 
 ## Resource requirements
 
-Assuming you want to run the entire stack (sequencer & prover), you'll need a machine with some modern CPU (aim for at least 8 cores), ~80GB of RAM and >= 20 GB of VRAM (more is marginally better, but not required for development). Assumption is you'll run some modern Ubuntu (currently we're developing against 24.04).
+Use a modern Ubuntu host (the GPU recipes use 24.04), with resources qualified for the selected
+backend and the entire sequencer/prover workload. The retained GPU32 experiment measured
+29.91 GiB sampled VRAM and 43.61 GiB sampled host RSS for final wrapping alone; it does not
+qualify full-service peak memory or make a 20 GiB GPU sufficient. See the [README](../README.md)
+for the proof boundary and explicit CPU fallback.
 
 ## Setting up the machine
 
@@ -19,7 +23,7 @@ source ~/.bashrc
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential libssl-dev pkg-config clang cmake python3 python3-tomli
+sudo apt-get install -y build-essential libssl-dev pkg-config clang cmake python3 python3-tomli jq
 ```
 
 ### 3. Install foundry
@@ -31,6 +35,9 @@ foundryup
 ```
 
 ### 4. Install CUDA
+
+The GPU SNARK/combined recipes include SM120 and require NVCC 12.9 or newer. The retained
+GPU32 experiment used an RTX5090; other listed build architectures are not a hardware validation.
 
 ```bash
 # either follow https://developer.nvidia.com/cuda-12-9-0-download-archive?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=24.04&target_type=deb_network or simply run the commands below
@@ -50,27 +57,31 @@ export PATH=$PATH:$CUDA_HOME/bin
 source ~/.bashrc
 ```
 
-### 5. Compile era-bellman-cuda
+### 5. Clone repos
+
+Use the Syscoin repositories: the GPU32 preparer and pinned build helpers below are not in the
+upstream Matter Labs checkout. Until prover PR9 is merged, select its reviewed branch explicitly;
+after it is merged, use the merged default branch instead.
 
 ```bash
-# needed for GPU SNARK / combined workers, not the package-scoped FRI worker
-git clone https://github.com/matter-labs/era-bellman-cuda.git
-# SYSCOIN: Match the immutable CUDA source used by production release artifacts.
-git -C era-bellman-cuda checkout --detach d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206
-cmake -Bera-bellman-cuda/build -Sera-bellman-cuda/ -DCMAKE_BUILD_TYPE=Release
+git clone https://github.com/syscoin/zksync-os-server.git # sequencer
+git clone --branch codex/gpu32-default-snark https://github.com/syscoin/zksync-airbender-prover.git # prover PR9
+```
+
+### 6. Compile era-bellman-cuda
+
+```bash
+# needed for GPU SNARK / combined workers, not FRI or explicit CPU fallback.
+# From the parent directory of the repositories cloned in step 5. This creates a
+# fresh pinned GPU32 source directory and source record, never modifies a shared backend clone.
+python3 zksync-airbender-prover/scripts/prepare-patched-gpu-backends.py --prepare-bellman "$PWD/era-bellman-cuda"
+cmake -Bera-bellman-cuda/build -Sera-bellman-cuda/ -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES='80;89;90;120'
 cmake --build era-bellman-cuda/build/
 # and the following in your ~/.bashrc
 ---
 export BELLMAN_CUDA_DIR=<PATH_TO>/era-bellman-cuda
 ---
 source ~/.bashrc
-```
-
-### 6. Clone repos
-
-```bash
-git clone https://github.com/matter-labs/zksync-os-server.git # sequencer
-git clone https://github.com/matter-labs/zksync-airbender-prover.git # prover
 ```
 
 ### 7. Download CRS file
@@ -128,7 +139,7 @@ cargo run --release -- --rpc-url 'http://127.0.0.1:3050' --rich-privkey 0x772682
 ```bash
 # in same terminal session as the FRI prover, but first cancel FRI prover
 ulimit -s 300000
-RUST_BACKTRACE=full RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-url http://localhost:3124 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
+RUST_BACKTRACE=full RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-url http://localhost:3124 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 ```
 
 > NOTE: Even if you have enough VRAM to run both processes, by default, the provers will simply consume all the VRAM available. You can either run SNARK or FRI at any one given time. There's also the intermitent (that runs some FRIs, then a SNARK, etc.), you can read more in the main [README](https://github.com/matter-labs/zksync-airbender-prover), under [Usage section](https://github.com/matter-labs/zksync-airbender-prover?tab=readme-ov-file#usage). Look for `ZKsync OS Prover Service`.

@@ -31,9 +31,13 @@ readonly tooling_files=(
     docker/fetch-verified-crs.sh
     scripts/cargo-with-patched-airbender.sh
     scripts/prepare-patched-airbender.py
+    scripts/prepare-patched-gpu-backends.py
     patches/airbender-cuda-device-diagnostics.patch
     patches/airbender-cuda-device-diagnostics.json
     patches/airbender.Cargo.lock
+    patches/gpu32-memory.json
+    patches/crypto-gpu32-memory.patch
+    patches/bellman-gpu32-memory.patch
     docker/zksync-airbender-prover/Dockerfile
     docker/zksync-airbender-prover/entrypoint.sh
     docker/zksync-os-prover-fri/Dockerfile
@@ -59,6 +63,9 @@ readonly tooling_data_files=(
     patches/airbender-cuda-device-diagnostics.patch
     patches/airbender-cuda-device-diagnostics.json
     patches/airbender.Cargo.lock
+    patches/gpu32-memory.json
+    patches/crypto-gpu32-memory.patch
+    patches/bellman-gpu32-memory.patch
 )
 for path in "${tooling_data_files[@]}"; do
     install -d "${output_dir}/$(dirname "${path}")"
@@ -70,6 +77,7 @@ readonly tooling_executables=(
     docker/fetch-verified-crs.sh
     scripts/cargo-with-patched-airbender.sh
     scripts/prepare-patched-airbender.py
+    scripts/prepare-patched-gpu-backends.py
     docker/zksync-airbender-prover/entrypoint.sh
     docker/zksync-os-prover-snark/entrypoint.sh
 )

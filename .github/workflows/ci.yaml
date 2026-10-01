@@ -47,9 +47,14 @@ jobs:
       - name: Check isolated Airbender source overlay
         run: python3 -B .github/scripts/test_patched_airbender_build.py
 
-      # no-default-features is set because the code is a mix of GPU/non-GPU compliant code
-      # the flag needs to be removed once we allow both version to be build and control it via env var
-      # these changes will be removed once https://github.com/matter-labs/prover-subsystem-internal/issues/49 is done
+      - name: Check isolated GPU32 backend source overlay
+        run: python3 -B .github/scripts/test_patched_gpu_backends.py
+
+      - name: Check image and GPU backend provenance
+        run: python3 -B .github/scripts/test_image_sbom_identity.py
+
+      # SYSCOIN: This public CPU lane explicitly disables the default GPU SNARK
+      # feature. It tests source/overlay policy, not a CUDA build or service proof.
       - name: Run Clippy
         run: bash scripts/cargo-with-patched-airbender.sh ci-clippy -- cargo clippy --locked --no-default-features -- -D warnings
 

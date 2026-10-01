@@ -231,6 +231,10 @@ class MaterializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_application(root)
+            # This main-entry test now crosses the pure selected-feature guard;
+            # unlike copy-only fixtures, its Cargo manifests must be valid TOML.
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/example"]\n')
+            (root / "crates/example/Cargo.toml").write_text('[package]\nname = "example"\nversion = "0.1.0"\n')
             (root / "Cargo.lock").write_bytes(parent_lock_bytes())
             before = {name: (root / name).read_bytes() for name in HELPER.SOURCE_FILES}
             with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \
@@ -248,6 +252,8 @@ class MaterializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_application(root)
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/example"]\n')
+            (root / "crates/example/Cargo.toml").write_text('[package]\nname = "example"\nversion = "0.1.0"\n')
             (root / "Cargo.lock").write_bytes(parent_lock_bytes().replace(
                 b"03454c7a41053a4b88bb421e97fb9efe893a92f5", b"f" * 40))
             with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \

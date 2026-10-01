@@ -10,6 +10,7 @@
     "sha256": "5a6c61cb62b38e153148a2c8d4af7b3d387f0c8c32b6dbceb5eb4af113efd65a"
   },
   "cuda_architectures": "80;89;90",
+  "snark_cuda_architectures": "80;89;90;120",
   "bellman_cuda": {
     "repository": "https://github.com/matter-labs/era-bellman-cuda.git",
     "commit": "d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206"

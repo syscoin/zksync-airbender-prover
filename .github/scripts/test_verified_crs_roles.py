@@ -6,6 +6,7 @@ count, and SHA-256 verification run against distinct tiny, explicitly synthetic 
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -163,14 +164,21 @@ if mutation == 'curl-failure':
 
     def test_docker_crs_roles_and_runtime_paths_match(self):
         for image, role, filename in (
-            ("zksync-os-prover-snark", "cpu-snark", "setup_2^25.key"),
+            ("zksync-os-prover-snark", "gpu-snark", "setup_compact.key"),
             ("zksync-airbender-prover", "gpu-snark", "setup_compact.key"),
         ):
             source = (ROOT / "docker" / image / "Dockerfile").read_text()
             self.assertIn(f"fetch-verified-crs {role} /{filename}", source)
             self.assertIn(f"COPY --from=builder /{filename} /{filename}", source)
             other = "setup_compact.key" if role == "cpu-snark" else "setup_2^25.key"
-            self.assertNotIn(other, source)
+            if image == "zksync-os-prover-snark":
+                cpu, gpu = source.split("# SYSCOIN: Match the tested GPU32 backend's CUDA ABI", 1)
+                self.assertNotIn(other, gpu)
+                self.assertIn("fetch-verified-crs cpu-snark /setup_2^25.key", cpu)
+                self.assertIn("COPY --from=cpu-builder /setup_2^25.key /setup_2^25.key", cpu)
+                self.assertNotIn("setup_compact.key", cpu)
+            else:
+                self.assertNotIn(other, source)
         fri = (ROOT / "docker/zksync-os-prover-fri/Dockerfile").read_text()
         for forbidden in ("fetch-verified-crs", "setup_compact.key", "setup_2^25.key"):
             self.assertNotIn(forbidden, fri)
@@ -190,8 +198,8 @@ if mutation == 'curl-failure':
                 self.assertIn("gpu", tokens)
                 self.assertEqual(path, "crs/setup_compact.key")
                 gpu_count += 1
-        self.assertEqual(cpu_count, 3)
-        self.assertEqual(gpu_count, 1)
+        self.assertEqual(cpu_count, 1)
+        self.assertEqual(gpu_count, 4)
 
     def test_image_pin_validation_requires_both_verified_formats(self):
         expression = workflow_filter('build_pins="$(jq -ce \'',
@@ -209,6 +217,8 @@ if mutation == 'curl-failure':
             self.assertNotEqual(validate({**PINS, "cpu_snark_crs": {
                 **PINS["cpu_snark_crs"], "g1_count": count,
             }}).returncode, 0)
+        for arch in (None, "80;89;90", "120", "anything"):
+            self.assertNotEqual(validate({**PINS, "snark_cuda_architectures": arch}).returncode, 0)
 
     def test_cpu_header_capacity_is_checked_even_with_matching_size_and_hash(self):
         for header in ((1 << 24).to_bytes(8, "big"), (1 << 26).to_bytes(8, "big"),
@@ -239,16 +249,22 @@ if mutation == 'curl-failure':
         airbender = {"manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
                      "pins": json.loads(manifest.read_text())}
         args += ["--argjson", "airbender", json.dumps(airbender)]
+        spec = importlib.util.spec_from_file_location("gpu_image_identity", ROOT / ".github/scripts/image-sbom-identity.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        gpu = helper.gpu_backend_build_pins(ROOT / "patches/gpu32-memory.json", ROOT / "Cargo.lock")
         for name in ("source_uri", "source_sha", "tooling_uri", "tooling_repository", "tooling_sha",
                      "app_bin_sha256", "app_text_sha256"):
             args += ["--arg", name, "offline-fixture"]
         for name in ("app_bin_size", "app_text_size"):
             args += ["--argjson", name, "1"]
-        for component, crs in (("zksync-os-prover-snark", PINS["cpu_snark_crs"]),
+        for component, crs in (("zksync-os-prover-snark", PINS["crs"]),
                                ("zksync-airbender-prover", PINS["crs"]),
                                ("zksync-os-prover-fri", None), ("unknown", None)):
             with self.subTest(component=component):
-                result = subprocess.run(args + ["--arg", "component", component, expression],
+                role_gpu = gpu if crs is not None else None
+                result = subprocess.run(args + ["--arg", "component", component,
+                    "--argjson", "gpu_backend", json.dumps(role_gpu), expression],
                                         input=json.dumps(base), text=True, capture_output=True)
                 if component == "unknown":
                     self.assertNotEqual(result.returncode, 0)
@@ -256,6 +272,13 @@ if mutation == 'curl-failure':
                 self.assertEqual(result.returncode, 0, result.stderr)
                 definition = json.loads(result.stdout)["buildDefinition"]
                 trusted = definition["internalParameters"]["syscoinProverImage"]["trustedSetup"]
+                image = definition["internalParameters"]["syscoinProverImage"]
+                self.assertEqual(image["gpuBackendBuild"], role_gpu)
+                self.assertEqual(image["cudaArchitectures"], PINS["cuda_architectures"]
+                                 if component == "zksync-os-prover-fri" else PINS["snark_cuda_architectures"])
+                self.assertEqual(image["snarkBackend"], None if crs is None else "gpu")
+                self.assertEqual(image["bellmanCudaCommit"], PINS["bellman_cuda"]["commit"]
+                                 if crs is not None else None)
                 self.assertEqual(definition["internalParameters"]["syscoinProverImage"]["airbenderBuild"],
                                  airbender)
                 crs_dependencies = [dep for dep in definition["resolvedDependencies"]
@@ -267,6 +290,17 @@ if mutation == 'curl-failure':
                     self.assertEqual(trusted, {"sha256": crs["sha256"], "size": crs["size"]})
                     self.assertEqual(crs_dependencies,
                                      [{"uri": crs["url"], "digest": {"sha256": crs["sha256"]}}])
+                    gpu_digests = [dependency["digest"] for dependency in definition["resolvedDependencies"]]
+                    for value in (gpu["manifest_sha256"], gpu["pins"]["crypto"]["patch_sha256"],
+                                  gpu["pins"]["bellman"]["patch_sha256"], gpu["selected_lock"]["combined_overlay_lock_sha256"]):
+                        self.assertIn({"sha256": value}, gpu_digests)
+                # A missing GPU closure or falsely attributed FRI closure fails closed.
+                if component != "unknown":
+                    wrong = None if crs is not None else gpu
+                    result = subprocess.run(args + ["--arg", "component", component,
+                        "--argjson", "gpu_backend", json.dumps(wrong), expression],
+                        input=json.dumps(base), text=True, capture_output=True)
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_ci_runs_offline_crs_tests(self):
         self.assertIn("run: python3 -B .github/scripts/test_verified_crs_roles.py",

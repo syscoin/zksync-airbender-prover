@@ -214,10 +214,18 @@ jobs:
           [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git -C .sbom-image-source rev-parse HEAD)" == "${SOURCE_SHA}" ]]
           [[ -z "$(git -C .sbom-image-source status --porcelain --untracked-files=all)" ]]
+          gpu_args=()
+          if [[ "${COMPONENT}" != zksync-os-prover-fri ]]; then
+            gpu_args=(--gpu-backend-pins .sbom-tooling/patches/gpu32-memory.json)
+            python3 .sbom-tooling/.github/scripts/image-sbom-identity.py gpu-backend-pins \
+              .sbom-tooling/patches/gpu32-memory.json --source-lock .sbom-image-source/Cargo.lock \
+              > gpu-backend-build-pins.json
+          fi
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py bind \
             "${COMPONENT}" "${IMAGE_DIGEST}" "bom-${COMPONENT}-image.cdx.json" \
             --airbender-pins .sbom-tooling/patches/airbender-cuda-device-diagnostics.json \
             --source-lock .sbom-image-source/Cargo.lock \
+            "${gpu_args[@]}" \
             > "bom-${COMPONENT}-image.bound.cdx.json"
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
             .sbom-tooling/patches/airbender-cuda-device-diagnostics.json \
@@ -233,6 +241,7 @@ jobs:
             bom-${{ matrix.app }}-image.bound.cdx.json
             image-identity.json
             airbender-build-pins.json
+            gpu-backend-build-pins.json
           if-no-files-found: error
 
       - name: Upload CycloneDX file to Dependency Track

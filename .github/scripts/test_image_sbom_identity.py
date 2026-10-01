@@ -212,6 +212,57 @@ class ImageIdentityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "hash mismatch"):
                     identity.airbender_build_pins(directory / "airbender-cuda-device-diagnostics.json")
 
+    def test_gpu_backend_pins_and_cli_bind_exact_tested_manifest(self):
+        manifest = ROOT / "patches/gpu32-memory.json"
+        result = identity.gpu_backend_build_pins(manifest, ROOT / "Cargo.lock")
+        self.assertEqual(result["manifest_sha256"], hashlib.sha256(manifest.read_bytes()).hexdigest())
+        self.assertEqual(result["pins"]["security_bits"], 100)
+        self.assertEqual(result["pins"]["domain_log"], 25)
+        self.assertEqual(result["pins"]["polynomial_slots"], 29)
+        self.assertEqual(result["pins"]["crypto"]["upstream_commit"],
+                         "845905b2aae49215e3d4ad0b71998b4a6b5abebf")
+        selected = result["selected_lock"]
+        self.assertEqual(selected["derivation"], "airbender-and-crypto-gpu-source-identity-only-v1")
+        self.assertEqual(selected["canonical_lock_sha256"], hashlib.sha256((ROOT / "Cargo.lock").read_bytes()).hexdigest())
+        self.assertNotEqual(selected["combined_overlay_lock_sha256"], selected["airbender_overlay_lock_sha256"])
+        self.assertEqual(json.loads(self.cli("gpu-backend-pins", str(manifest), "--source-lock", str(ROOT / "Cargo.lock"))), result)
+        for component in ("zksync-airbender-prover", "zksync-os-prover-snark"):
+            record = identity.image_record(self.context, component, self.digests[component])
+            bound = identity.bind_sbom({"bomFormat": "CycloneDX", "specVersion": "1.6"}, record, gpu_backend=result)
+            props = {prop["name"]: prop["value"] for prop in bound["metadata"]["properties"]}
+            self.assertEqual(json.loads(props["io.syscoin.prover.gpu-backend-build.inputs"]), result)
+            # Duplicate GPU evidence is rejected independently of the image property checks.
+            gpu_only = {"bomFormat": "CycloneDX", "specVersion": "1.6", "metadata": {"properties": [
+                {"name": "io.syscoin.prover.gpu-backend-build.inputs", "value": "old"}]}}
+            with self.assertRaisesRegex(ValueError, "already contains GPU"):
+                identity.bind_sbom(gpu_only, record, gpu_backend=result)
+        fri = identity.image_record(self.context, "zksync-os-prover-fri", self.digests["zksync-os-prover-fri"])
+        with self.assertRaisesRegex(ValueError, "FRI-only"):
+            identity.bind_sbom({"bomFormat": "CycloneDX", "specVersion": "1.6"}, fri, gpu_backend=result)
+
+    def test_gpu_backend_changed_patch_fails_before_evidence(self):
+        for filename in ("crypto-gpu32-memory.patch", "bellman-gpu32-memory.patch"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                for original in (ROOT / "patches").iterdir():
+                    if original.is_file():
+                        shutil.copyfile(original, directory / original.name)
+                (directory / filename).write_bytes(b"changed GPU source input")
+                with self.assertRaises(ValueError):
+                    identity.gpu_backend_build_pins(directory / "gpu32-memory.json", ROOT / "Cargo.lock")
+
+    def test_gpu_backend_cli_roundtrip_retains_only_gpu_role_origin(self):
+        manifest = ROOT / "patches/gpu32-memory.json"
+        gpu = identity.gpu_backend_build_pins(manifest, ROOT / "Cargo.lock")
+        bom = self.directory / "gpu-bom.json"
+        bom.write_text(json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.6"}))
+        component = "zksync-os-prover-snark"
+        bound = json.loads(self.cli("bind", component, self.digests[component], str(bom),
+                                   "--airbender-pins", str(ROOT / "patches/airbender-cuda-device-diagnostics.json"),
+                                   "--gpu-backend-pins", str(manifest), "--source-lock", str(ROOT / "Cargo.lock")))
+        props = {prop["name"]: prop["value"] for prop in bound["metadata"]["properties"]}
+        self.assertEqual(json.loads(props["io.syscoin.prover.gpu-backend-build.inputs"]), gpu)
+
     def test_selected_parent_lock_is_bound_separately_in_cli_and_sbom(self):
         manifest = ROOT / "patches/airbender-cuda-device-diagnostics.json"
         lock = self.directory / "Cargo.lock"
@@ -250,6 +301,14 @@ class ImageIdentityTests(unittest.TestCase):
         self.assertIn("--source-lock .sbom-image-source/Cargo.lock", reusable)
         self.assertIn('"$(git -C .sbom-image-source rev-parse HEAD)" == "${SOURCE_SHA}"', reusable)
         self.assertIn("            airbender-build-pins.json", reusable)
+        self.assertIn("--gpu-backend-pins .sbom-tooling/patches/gpu32-memory.json", reusable)
+        self.assertIn("            gpu-backend-build-pins.json", reusable)
+        self.assertIn('if [[ "${COMPONENT}" != zksync-os-prover-fri ]]; then', reusable)
+        for workflow in (stage, (ROOT / ".github/workflows/release-bins.yml").read_text()):
+            self.assertIn("$gpu_backend.manifest_sha256", workflow)
+            self.assertIn("$gpu_backend.pins.crypto.patch_sha256", workflow)
+            self.assertIn("$gpu_backend.pins.bellman.patch_sha256", workflow)
+            self.assertIn("$gpu_backend.selected_lock.combined_overlay_lock_sha256", workflow)
 
     @unittest.skipUnless(shutil.which("jq"), "jq is required")
     def test_actual_release_provenance_filter_binds_role_records(self):
@@ -261,12 +320,14 @@ class ImageIdentityTests(unittest.TestCase):
         lock.write_bytes(LOCK_FIXTURE.parent_lock_bytes())
         pins = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json", lock)
         records = {role: {"sha256": str(index) * 64}
-                   for index, role in enumerate(("combined", "fri", "snark"), 1)}
+                   for index, role in enumerate(("combined", "fri", "snark", "snark-cpu"), 1)}
+        gpu = identity.gpu_backend_build_pins(ROOT / "patches/gpu32-memory.json", lock)
         source_uri = "git+https://example.invalid/source@refs/tags/fixture"
         args = ["jq", "-ce", "--arg", "source_uri", source_uri,
                 "--arg", "source_sha", "a" * 40, "--arg", "tooling_uri", "git+https://example.invalid/tooling",
                 "--arg", "tooling_sha", "b" * 40, "--argjson", "airbender", json.dumps(pins),
-                "--argjson", "airbender_records", json.dumps(records), expression]
+                "--argjson", "airbender_records", json.dumps(records),
+                "--argjson", "gpu_backend", json.dumps(gpu), expression]
         base = {"buildDefinition": {"buildType": "https://actions.github.io/buildtypes/workflow/v1",
                                    "externalParameters": {"workflow": {}}, "internalParameters": {},
                                    "resolvedDependencies": []},
@@ -276,6 +337,8 @@ class ImageIdentityTests(unittest.TestCase):
         definition = json.loads(result.stdout)["buildDefinition"]
         self.assertEqual(definition["internalParameters"]["syscoinAirbenderBuild"],
                          {"inputs": pins, "roleInputRecords": records, "cargoLocked": True})
+        self.assertEqual(definition["internalParameters"]["syscoinGpuBackendBuild"],
+                         {"inputs": gpu, "roles": ["combined", "snark"]})
         digests = [entry["digest"] for entry in definition["resolvedDependencies"]]
         self.assertIn({"gitCommit": pins["pins"]["upstream_commit"]}, digests)
         for value in (pins["manifest_sha256"], pins["pins"]["patch_sha256"], pins["pins"]["overlay_lock_sha256"]):
@@ -283,8 +346,11 @@ class ImageIdentityTests(unittest.TestCase):
         for key in ("canonical_lock_sha256", "overlay_lock_sha256"):
             self.assertIn({"sha256": pins["selected_lock"][key]}, digests)
         generated = next(item for item in definition["resolvedDependencies"]
-                         if item["uri"].startswith("syscoin:generated-lock:"))
+                         if item["uri"] == "syscoin:generated-lock:airbender-source-identity-only-v1")
         self.assertEqual(generated["digest"], {"sha256": pins["selected_lock"]["overlay_lock_sha256"]})
+        for value in (gpu["manifest_sha256"], gpu["pins"]["crypto"]["patch_sha256"],
+                      gpu["pins"]["bellman"]["patch_sha256"], gpu["selected_lock"]["combined_overlay_lock_sha256"]):
+            self.assertIn({"sha256": value}, digests)
         base["buildDefinition"]["resolvedDependencies"] = [
             {"uri": source_uri, "digest": {"gitCommit": "c" * 40}}]
         self.assertNotEqual(subprocess.run(args, input=json.dumps(base), capture_output=True,

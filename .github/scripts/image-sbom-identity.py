@@ -77,6 +77,15 @@ def airbender_build_pins(path, source_lock=None):
     return result
 
 
+def gpu_backend_build_pins(path, source_lock=None):
+    """Use the backend preparer's pure, hash-checked metadata API; never build or clone."""
+    wrapper = Path(__file__).resolve().parents[2] / "scripts/prepare-patched-gpu-backends.py"
+    spec = importlib.util.spec_from_file_location("selected_gpu_backend_pins", wrapper)
+    helper = importlib.util.module_from_spec(spec)
+    exec(compile(wrapper.read_bytes(), str(wrapper), "exec"), helper.__dict__)
+    return helper.gpu_backend_pins(path, source_lock)
+
+
 def build_identity(env):
     identity = {
         "schema": "syscoin-prover-image-digest-v1",
@@ -150,7 +159,7 @@ def image_matrix(digests, identity):
     ]}
 
 
-def bind_sbom(bom, record, airbender=None):
+def bind_sbom(bom, record, airbender=None, gpu_backend=None):
     require(isinstance(bom, dict) and bom.get("bomFormat") == "CycloneDX"
             and bom.get("specVersion") == "1.6", "expected a CycloneDX 1.6 SBOM")
     metadata = bom.setdefault("metadata", {})
@@ -170,6 +179,14 @@ def bind_sbom(bom, record, airbender=None):
                 "SBOM already contains Airbender build inputs")
         properties.append({"name": name, "value": json.dumps(
             airbender, separators=(",", ":"), sort_keys=True)})
+    if gpu_backend is not None:
+        require(record["component"] in {"zksync-airbender-prover", "zksync-os-prover-snark"},
+                "GPU32 backend evidence cannot be attributed to the FRI-only image")
+        name = "io.syscoin.prover.gpu-backend-build.inputs"
+        require(not any(isinstance(prop, dict) and prop.get("name") == name for prop in properties),
+                "SBOM already contains GPU backend build inputs")
+        properties.append({"name": name, "value": json.dumps(
+            gpu_backend, separators=(",", ":"), sort_keys=True)})
     return bom
 
 
@@ -187,13 +204,20 @@ def main():
     bind.add_argument("digest")
     bind.add_argument("bom", type=Path)
     bind.add_argument("--airbender-pins", type=Path)
+    bind.add_argument("--gpu-backend-pins", type=Path)
     bind.add_argument("--source-lock", type=Path)
     pins = commands.add_parser("airbender-pins")
     pins.add_argument("manifest", type=Path)
     pins.add_argument("--source-lock", type=Path)
+    gpu_pins = commands.add_parser("gpu-backend-pins")
+    gpu_pins.add_argument("manifest", type=Path)
+    gpu_pins.add_argument("--source-lock", type=Path)
     args = parser.parse_args()
     if args.command == "airbender-pins":
         print(json.dumps(airbender_build_pins(args.manifest, args.source_lock), separators=(",", ":"), sort_keys=True))
+        return
+    if args.command == "gpu-backend-pins":
+        print(json.dumps(gpu_backend_build_pins(args.manifest, args.source_lock), separators=(",", ":"), sort_keys=True))
         return
     identity = build_identity(os.environ)
     if args.command == "record":
@@ -208,7 +232,9 @@ def main():
         result = bind_sbom(parse_json(args.bom.read_text()),
                            image_record(identity, args.component, args.digest),
                            airbender_build_pins(args.airbender_pins, args.source_lock)
-                           if args.airbender_pins else None)
+                           if args.airbender_pins else None,
+                           gpu_backend_build_pins(args.gpu_backend_pins, args.source_lock)
+                           if args.gpu_backend_pins else None)
     print(json.dumps(result, separators=(",", ":"), sort_keys=True))
 
 

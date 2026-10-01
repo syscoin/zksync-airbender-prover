@@ -19,7 +19,9 @@ protocol_version.workspace = true
 zksync_sequencer_proof_client.workspace = true
 # TODO: fix this, should be done together with moving all code base to a single binary
 zksync_os_fri_prover = { path = "../zksync_os_fri_prover" }
-zksync_os_snark_prover = { path = "../zksync_os_snark_prover" }
+# SYSCOIN: Combined-role feature selection must remain explicit; otherwise the
+# standalone SNARK GPU default silently enables CUDA in CPU-only workspace CI.
+zksync_os_snark_prover = { path = "../zksync_os_snark_prover", default-features = false }
 
 tokio = { workspace = true, features = ["signal", "sync", "time"] }
 serde_json.workspace = true
@@ -37,4 +39,7 @@ vise.workspace = true
 vise-exporter.workspace = true
 
 [features]
+# SYSCOIN: Normal combined builds use the same GPU wrapping lane. CPU-only
+# workspace checks must explicitly pass --no-default-features.
+default = ["gpu"]
 gpu = ["zksync_os_fri_prover/gpu", "zksync_os_snark_prover/gpu"]

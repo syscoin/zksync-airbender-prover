@@ -1,0 +1,306 @@
+--- a/crates/gpu-prover/src/cuda_bindings/context.rs
++++ b/crates/gpu-prover/src/cuda_bindings/context.rs
+@@ -7,8 +7,10 @@
+ pub struct GpuContext {
+     device_id: usize,
+     pub(crate) mem_pool: Option<bc_mem_pool>,
+-    pub(crate) bases: Option<*const c_void>, // addr of bases on gpu device
++    pub(crate) bases: Option<*const c_void>, // context-owned device or pinned-host bases
+     pub(crate) bases_len: usize,
++    bases_on_host: bool,
++    msm_initialized: bool,
+ 
+     pub(crate) ff: bool,
+     pub(crate) ntt: bool,
+@@ -20,8 +22,16 @@
+     affinity: Vec<usize>,
+ }
+ 
+-const POWERS_OF_OMEGA_COARSE_LOG_COUNT: u32 = 25;
++const POWERS_OF_OMEGA_COARSE_LOG_COUNT: u32 = 14;
+ const POWERS_OF_COSET_OMEGA_COARSE_LOG_COUNT: u32 = 14;
++const HOST_BASES_LOG_COUNT: usize = 25;
++
++// cudart is already linked by gpu-ffi. A failed asynchronous MSM can leave an
++// internal copy stream unjoined, so host storage must outlive a device-wide
++// completion barrier, not merely the context's three public streams.
++extern "C" {
++    fn cudaDeviceSynchronize() -> i32;
++}
+ 
+ impl GpuContext {
+     pub fn new_full(device_id: usize, bases: &[CompactG1Affine]) -> GpuResult<Self> {
+@@ -70,6 +80,8 @@
+             mem_pool: None,
+             bases: None,
+             bases_len: 0,
++            bases_on_host: false,
++            msm_initialized: false,
+             ff: false,
+             ntt: false,
+             pn: false,
+@@ -112,6 +124,8 @@
+             mem_pool: None,
+             bases: None,
+             bases_len: 0,
++            bases_on_host: false,
++            msm_initialized: false,
+             ff: false,
+             ntt: false,
+             pn: false,
+@@ -124,30 +138,51 @@
+ 
+     pub fn set_up_msm(&mut self, bases: &[CompactG1Affine]) -> GpuResult<()> {
+         assert!(self.mem_pool.is_none(), "Can't set up msm with mem pool");
++        assert!(self.bases.is_none() && !self.msm_initialized, "msm is already set up");
+         set_device(self.device_id)?;
+ 
+-        self.bases_len = bases.len();
+-
+-        let bases = transmute_values(bases.as_ref().as_ref());
+-
++        let bases_len = bases.len();
++        let host_bases = bases_len == 1usize << HOST_BASES_LOG_COUNT;
++        let bases = transmute_values(bases);
+         let len = bases.len() as u64;
+-        let mut d_bases_ptr = std::ptr::null_mut();
++        let mut bases_ptr = std::ptr::null_mut();
+ 
+         unsafe {
+-            let result = unsafe { bc_malloc(std::ptr::addr_of_mut!(d_bases_ptr), len) };
++            let result = if host_bases {
++                bc_malloc_host(std::ptr::addr_of_mut!(bases_ptr), len)
++            } else {
++                bc_malloc(std::ptr::addr_of_mut!(bases_ptr), len)
++            };
+             if result != 0 {
+                 return Err(GpuError::CreateContextErr(result));
+             }
+-            let result = bc_memcpy(d_bases_ptr, bases.as_ptr() as *const c_void, len);
++
++            // Attach ownership immediately: both copy and setup failure paths
++            // are then cleaned by Drop with the correct CUDA allocator.
++            self.bases = Some(bases_ptr);
++            self.bases_len = bases_len;
++            self.bases_on_host = host_bases;
++            if host_bases {
++                // This owns a distinct pinned copy, never a pointer borrowed
++                // from the caller's CRS slice. Bellman uploads all inputs in
++                // its existing log25/chunk20 host-bases MSM path.
++                std::ptr::copy_nonoverlapping(
++                    bases.as_ptr(),
++                    bases_ptr as *mut u8,
++                    bases.len(),
++                );
++            } else {
++                let result = bc_memcpy(bases_ptr, bases.as_ptr() as *const c_void, len);
++                if result != 0 {
++                    return Err(GpuError::CreateContextErr(result));
++                }
++            }
++
++            let result = msm_set_up();
+             if result != 0 {
+                 return Err(GpuError::CreateContextErr(result));
+             }
+-
+-            self.bases = Some(d_bases_ptr);
+-            let result = msm_set_up();
+-            if result != 0 {
+-                return Err(GpuError::CreateContextErr(result));
+-            }
++            self.msm_initialized = true;
+         }
+ 
+         Ok(())
+@@ -283,6 +318,14 @@
+ 
+ impl Drop for GpuContext {
+     fn drop(&mut self) {
++        if self.bases_on_host {
++            set_device(self.device_id).unwrap();
++            // Includes internal host-copy streams even after a partial MSM
++            // scheduling error. Never free pinned memory if completion fails.
++            if unsafe { cudaDeviceSynchronize() } != 0 {
++                panic!("couldn't synchronize pinned bases");
++            }
++        }
+         self.sync().unwrap();
+ 
+         if let Some(mem_pool) = self.mem_pool {
+@@ -292,12 +335,19 @@
+         }
+ 
+         if let Some(bases) = self.bases {
+-            if unsafe { bc_free(bases as *mut c_void) } != 0 {
++            let result = unsafe {
++                if self.bases_on_host {
++                    bc_free_host(bases as *mut c_void)
++                } else {
++                    bc_free(bases as *mut c_void)
++                }
++            };
++            if result != 0 {
+                 panic!("couldn't free bases");
+             }
+-            if unsafe { msm_tear_down() } != 0 {
+-                panic!("couldn't tear down msm");
+-            }
++        }
++        if self.msm_initialized && unsafe { msm_tear_down() } != 0 {
++            panic!("couldn't tear down msm");
+         }
+ 
+         if self.pn {
+--- a/crates/gpu-prover/src/proof.rs
++++ b/crates/gpu-prover/src/proof.rs
+@@ -20,7 +20,31 @@
+     //     assign_cs_variables(manager, assembly, worker)?;
+     // }
+ 
+-    compute_assigments_and_permutations(manager, assembly, worker)?;
++    if MC::FULL_SLOT_SIZE_LOG == 25 {
++        // SYSCOIN: Hybrid CPU setup cache, GPU assignments and unchanged proof rounds.
++        // A deserialized/empty setup has no runtime cache: reject before touching GPU
++        // state rather than falling back to the oversized PN sort allocation.
++        let permutations = setup.log25_permutation_values.as_ref()
++            .ok_or(SynthesisError::AssignmentMissing)?;
++        if assembly.n() + 1 != MC::FULL_SLOT_SIZE
++            || assembly.num_input_gates != permutations.num_input_gates
++            || assembly.num_aux_gates != permutations.num_aux_gates
++            || permutations.values.iter().any(|poly| poly.len() != MC::FULL_SLOT_SIZE) {
++            return Err(SynthesisError::AssignmentMissing.into());
++        }
++        assign_cs_variables(manager, assembly, worker)?;
++        for (i, values) in permutations.values.iter().enumerate() {
++            manager.copy_to_device_with_host_slot(
++                worker, values.as_slice(), PolyId::Sigma(i), PolyForm::Values,
++            )?;
++            if i > 0 {
++                manager.free_host_slot(PolyId::Sigma(i - 1), PolyForm::Values);
++            }
++        }
++        manager.free_host_slot(PolyId::Sigma(3), PolyForm::Values);
++    } else {
++        compute_assigments_and_permutations(manager, assembly, worker)?;
++    }
+ 
+     let (mut proof, mut transcript, mut constants, input_values) =
+         create_initial_variables::<S, C, T, MC>(assembly, transcript_params);
+--- a/crates/gpu-prover/src/setup_precomputations.rs
++++ b/crates/gpu-prover/src/setup_precomputations.rs
+@@ -26,6 +26,12 @@
+ 
+ use cfg_if::*;
+ 
++pub(crate) struct Log25PermutationValues {
++    pub(crate) values: [Vec<Fr>; NUM_PERMUTATION_POLYS],
++    pub(crate) num_input_gates: usize,
++    pub(crate) num_aux_gates: usize,
++}
++
+ cfg_if! {
+     if #[cfg(feature = "allocator")]{
+         pub struct AsyncSetup<A: Allocator + Default = CudaAllocator> {
+@@ -35,6 +41,8 @@
+             pub lookup_selector_bitvec: BitVec,
+             pub lookup_tables_values: [AsyncVec<Fr, A>; NUM_LOOKUP_TABLE_POLYS], // Could have smaller size
+             pub lookup_table_type_monomial: AsyncVec<Fr, A>,
++            // SYSCOIN: Runtime-only CPU setup cache; never part of the serialized setup.
++            pub(crate) log25_permutation_values: Option<Log25PermutationValues>,
+         }
+ 
+         unsafe impl<A: Allocator + Default> Send for AsyncSetup<A> {}
+@@ -47,6 +55,8 @@
+             pub lookup_selector_bitvec: BitVec,
+             pub lookup_tables_values: [AsyncVec<Fr>; NUM_LOOKUP_TABLE_POLYS], // Could have smaller size
+             pub lookup_table_type_monomial: AsyncVec<Fr>,
++            // SYSCOIN: Runtime-only CPU setup cache; never part of the serialized setup.
++            pub(crate) log25_permutation_values: Option<Log25PermutationValues>,
+         }
+ 
+         unsafe impl Send for AsyncSetup {}
+@@ -89,10 +99,12 @@
+                 lookup_selector_bitvec: BitVec::with_capacity(length),
+                 lookup_tables_values: lookup_tables_values.try_into().unwrap(),
+                 lookup_table_type_monomial: AsyncVec::allocate_new(length),
++                log25_permutation_values: None,
+             }
+         }
+ 
+         pub fn zeroize(&mut self){
++            self.log25_permutation_values = None;
+             for poly in self.gate_setup_monomials.iter_mut() {
+                 poly.zeroize();
+             }
+@@ -138,6 +150,7 @@
+             &mut self,
+             mut reader: R,
+         ) -> GpuResult<()> {
++            self.log25_permutation_values = None;
+             for poly in self.gate_setup_monomials.iter_mut() {
+                 poly.read(&mut reader)?;
+             }
+@@ -167,6 +180,7 @@
+             &mut self,
+             src: &[u8],
+         ) -> GpuResult<()> {
++            self.log25_permutation_values = None;
+             let mut start = 0;
+             let poly_byte_len = self.gate_setup_monomials[0].len() * FIELD_ELEMENT_LEN;
+             let tables_poly_byte_len = self.lookup_tables_values[0].len() * FIELD_ELEMENT_LEN;
+@@ -248,6 +262,7 @@
+             assembly: &DefaultAssembly<S>,
+             manager: &mut DeviceMemoryManager<Fr, MC>,
+         ) -> Result<(), ProvingError> {
++            self.log25_permutation_values = None;
+             assert!(assembly.is_finalized);
+             assert!(S::PRODUCE_SETUP);
+ 
+@@ -344,6 +359,22 @@
+             manager.free_host_slot(PolyId::Enumerated(0), PolyForm::Values);
+             manager.free_host_slot(PolyId::Enumerated(0), PolyForm::Monomial);
+             manager.free_slot(PolyId::Enumerated(0), PolyForm::Monomial);
++
++            if MC::FULL_SLOT_SIZE_LOG == 25 {
++                // Canonical setup-only Bellman permutation computation. The witness-only
++                // assembly cannot derive these; retain Values from this same finalized
++                // setup assembly for the existing GPU proof rounds instead of PN sort.
++                assert_eq!(assembly.n() + 1, MC::FULL_SLOT_SIZE);
++                let values: Vec<Vec<Fr>> = assembly.make_permutations(worker)?
++                    .into_iter().map(|poly| poly.into_coeffs()).collect();
++                assert_eq!(values.len(), NUM_PERMUTATION_POLYS);
++                assert!(values.iter().all(|poly| poly.len() == MC::FULL_SLOT_SIZE));
++                self.log25_permutation_values = Some(Log25PermutationValues {
++                    values: values.try_into().unwrap(),
++                    num_input_gates: assembly.num_input_gates,
++                    num_aux_gates: assembly.num_aux_gates,
++                });
++            }
+ 
+             Ok(())
+         }
+@@ -416,9 +447,20 @@
+ 
+     let mut msm_handles = vec![];
+ 
+-    compute_permutation_polynomials(manager, &assembly, &worker)?;
+-    for i in 0..4 {
+-        manager.multigpu_ifft_to_free_slot(PolyId::Sigma(i), false)?;
++    // SYSCOIN: The log25 wrapper reuses the existing CPU permutation generator and
++    // guarded host-slot uploader. The helper includes all four IFFTs; do not repeat them.
++    if MC::FULL_SLOT_SIZE_LOG == 25 {
++        copy_permutations_to_device_from_assembly::<
++            P,
++            SelectorOptimizedWidth4MainGateWithDNext,
++            S,
++            MC,
++        >(manager, assembly, &worker)?;
++    } else {
++        compute_permutation_polynomials(manager, &assembly, &worker)?;
++        for i in 0..4 {
++            manager.multigpu_ifft_to_free_slot(PolyId::Sigma(i), false)?;
++        }
+     }
+ 
+     // GATE SETUP
