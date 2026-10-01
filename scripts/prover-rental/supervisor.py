@@ -507,11 +507,61 @@ class Supervisor:
         with self.provider.lock():
             controller = self.controller()
             controller.finish_warm_job(active["rental_operation"], disposition)
+        if active["kind"] == "native":
+            source = self.source(active["source"])
+            sentry.compact_native(self.directory(active), self.provider, active["rental_operation"],
+                                  self.native_completion_expected(active["id"], active["stage"], source,
+                                                                  active["chain_binding"]))
         self.state["session"]["jobs"] += 1
         self.state["completed_jobs"] += 1
         self.state["active"], self.state["idle_since"] = None, None
         self.save()
         return True
+
+    def native_completion_expected(self, identifier, stage, source, binding):
+        require(re.fullmatch(r"[0-9a-f]{32}", identifier) and stage in source["stages"],
+                "native_completion_identity_changed")
+        job.validate_chain_binding(binding)
+        require(binding["lane"] == source["lane"]
+                and binding["origin_endpoint_sha256"] == job.hash_bytes(source["endpoint"].encode())
+                and all(binding[key] == value for key, value in source["identity"].items()),
+                "native_completion_identity_changed")
+        return {"job_id": self.state["supervisor_id"] + ":" + identifier, "stage": stage,
+                "endpoint": source["endpoint"], "release_sha256": self.settings["releases"][stage],
+                "chain_binding": binding}
+
+    def compact_completed(self, execute=False):
+        require(type(execute) is bool, "invalid_compaction_mode")
+        completed, skipped = [], 0
+        active = self.state["active"]
+        for directory in sorted((self.store.root / "jobs").iterdir()):
+            identifier = directory.name
+            if (not re.fullmatch(r"[0-9a-f]{32}", identifier)
+                    or active is not None and identifier == active["id"]
+                    or any(os.path.lexists(self.store.root / kind / (identifier + ".json"))
+                           for kind in ("expired", "retired"))):
+                skipped += 1
+                continue
+            sentry.private_directory(directory)
+            if not os.path.lexists(directory / "authority.json"):
+                skipped += 1
+                continue
+            authority = sentry.native_completion_authority(directory)
+            if (authority.get("job_id") != self.state["supervisor_id"] + ":" + identifier
+                    or authority.get("status") not in ("accepted", "rejected")):
+                skipped += 1
+                continue
+            sources = [entry for entry in self.settings["sequencers"] if entry["endpoint"] == authority["endpoint"]]
+            require(len(sources) == 1, "native_completion_source_changed")
+            expected = self.native_completion_expected(identifier, authority["stage"], sources[0],
+                                                       authority["chain_binding"])
+            present = {name for name in ("picked-wire.json", "payload.json", "evidence.json", "submission.json")
+                       if os.path.lexists(directory / name)}
+            record = sentry.compact_native(directory, self.provider, identifier, expected, execute=execute)
+            completed.append({"operation_id": identifier, "disposition": authority["status"],
+                              "intermediate_bytes": sum(record["files"][name]["bytes"] for name in present)})
+        return {"action": "native_history_compacted" if execute else "plan_native_history_compaction",
+                "jobs": completed, "skipped": skipped}
 
     def stop_session(self):
         session = self.state["session"]
@@ -754,6 +804,7 @@ def main(argv=None):
     commands.add_parser("status")
     commands.add_parser("recover")
     commands.add_parser("expire-active")
+    commands.add_parser("compact-completed")
     commands.add_parser("drain")
     args = parser.parse_args(argv)
     try:
@@ -773,8 +824,14 @@ def main(argv=None):
                 atomic_json(store.root / "drain.json", {"schema_version": 1, "drain": True})
             print(job.encode({"action": "drain_requested" if args.execute else "plan_drain"}).decode())
             return 0
+        if args.command == "compact-completed" and not args.execute:
+            print(job.encode(Supervisor(store).compact_completed()).decode())
+            return 0
         with store.lock("supervisor.lock", blocking=False):
             supervisor = Supervisor(store)
+            if args.command == "compact-completed":
+                print(job.encode(supervisor.compact_completed(execute=args.execute)).decode())
+                return 0
             if args.command == "status" or not args.execute:
                 action = args.command if args.execute else "plan_expire_active" if args.command == "expire-active" else "dry_run"
                 print(job.encode({"action": action, **supervisor.status()}).decode())

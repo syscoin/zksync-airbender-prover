@@ -3,6 +3,8 @@
 
 import argparse
 import base64
+from contextlib import nullcontext
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -11,10 +13,182 @@ import sys
 import urllib.parse
 
 import job
-from runpod import (Controller, Error, Store, atomic_json, exact_fields, https_url,
-                    read_private_json, require, sync_dir)
+from runpod import (Controller, Error, JSON_LIMIT, Store, TERMINAL, atomic_json, exact_fields, https_url,
+                    read_private_json, require, sha256, sync_dir)
 
 MAX_EVIDENCE = 2 * 1024 * 1024
+NATIVE_COMPLETION = "native-completion.json"
+NATIVE_BULK = ("picked-wire.json", "payload.json", "evidence.json", "submission.json")
+NATIVE_RETAINED = ("authority.json", "controller-job.json", "manifest.json", "release.json")
+
+
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _native_file(path, maximum, capture=False):
+    digest, count, parts = hashlib.sha256(), 0, []
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and not info.st_mode & 0o077 and info.st_nlink == 1, "unsafe_native_completion_file")
+        require(0 < info.st_size <= maximum, "native_completion_file_size")
+        while part := source.read(min(64 * 1024, maximum - count + 1)):
+            count += len(part)
+            require(count <= maximum, "native_completion_file_size")
+            digest.update(part)
+            if capture:
+                parts.append(part)
+        require(count == info.st_size and _file_identity(os.fstat(source.fileno())) == _file_identity(info),
+                "native_completion_file_changed")
+    return {"sha256": digest.hexdigest(), "bytes": count}, _file_identity(info), b"".join(parts)
+
+
+def _native_unchanged(path, identity):
+    require(_file_identity(path.lstat()) == identity, "native_completion_file_changed")
+
+
+def native_completion_authority(directory):
+    _, _, raw = _native_file(Path(directory) / "authority.json", JSON_LIMIT, True)
+    return job.decode(raw)
+
+
+def compact_native(directory, controller_store, operation_id, expected, execute=True):
+    """Archive a definitive native disposition before pruning its redundant bulk input files."""
+    require(type(execute) is bool, "invalid_execute_flag")
+    exact_fields(expected, ("job_id", "stage", "endpoint", "release_sha256", "chain_binding"))
+    require(isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id), "invalid_operation_id")
+    require(isinstance(expected["job_id"], str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", expected["job_id"])
+            and expected["stage"] in job.BINARIES, "invalid_native_completion_identity")
+    require(endpoint_url(expected["endpoint"]) == expected["endpoint"], "native_endpoint_changed")
+    sha256(expected["release_sha256"])
+    binding = job.validate_chain_binding(expected["chain_binding"])
+    require(binding["origin_endpoint_sha256"] == job.hash_bytes(expected["endpoint"].encode()),
+            "native_endpoint_changed")
+    directory = private_directory(directory)
+    marker = directory / NATIVE_COMPLETION
+    limits = {"picked-wire.json": job.MAX_PICK[expected["stage"]], "payload.json": job.MAX_PICK[expected["stage"]],
+              "evidence.json": MAX_EVIDENCE, "submission.json": job.MAX_SUBMIT}
+    # A preview only reads immutable terminal history; even creating a lock would violate its contract.
+    with controller_store.lock() if execute else nullcontext():
+        retained, identities, values, raw_values = {}, {}, {}, {}
+        for name in NATIVE_RETAINED:
+            retained[name], identities[name], raw_values[name] = _native_file(
+                directory / name, job.MAX_MANIFEST if name == "release.json" else JSON_LIMIT, True)
+            values[name] = job.decode(raw_values[name])
+        authority = values["authority.json"]
+        fields = ("schema_version", "status", "endpoint", "job_id", "stage", "release_sha256", "vk_hash", "lease_token",
+                  "manifest_sha256", "operation_id", "submission_sha256", "bounds", "chain_binding")
+        exact_fields(authority, fields + tuple(key for key in ("expected_bounds", "imported_artifact_sha256") if key in authority))
+        require(authority["schema_version"] == 1 and authority["status"] in ("accepted", "rejected")
+                and authority["operation_id"] == operation_id and all(authority[key] == value for key, value in expected.items()),
+                "native_completion_authority_changed")
+        job.b256(authority["lease_token"])
+        sha256(authority["manifest_sha256"])
+        sha256(authority["submission_sha256"])
+        release = job.release_identity(raw_values["release.json"])
+        require(retained["release.json"]["sha256"] == expected["release_sha256"]
+                and release["stage"] == expected["stage"] and release["vk_hash"] == authority["vk_hash"] == binding["vk_hash"],
+                "native_completion_release_changed")
+        bounds = ("batch_number",) if expected["stage"] == "FRI" else ("from_batch_number", "to_batch_number")
+        exact_fields(authority["bounds"], bounds)
+        require(all(type(value) is int and 0 < value < 2**32 for value in authority["bounds"].values()),
+                "invalid_native_completion_bounds")
+        if expected["stage"] == "SNARK":
+            validate_expected_range("SNARK", tuple(authority["bounds"][key] for key in bounds))
+        archive_name = "operation-" + operation_id + ".json"
+        history = controller_store.history_directory()
+        archive_identity, archive_record = None, None
+        if history is not None and os.path.lexists(history / archive_name):
+            # The controller's JSON reader assumes a regular file; reject special files before it opens history.
+            _, archive_identity, archive_raw = _native_file(history / archive_name, JSON_LIMIT, True)
+            archive_record = job.decode(archive_raw)
+        controller = Controller(controller_store, None)
+        operation = controller.operation(operation_id)
+        controller_id = controller.state["controller_id"]
+        require(operation.get("kind") == "warm_job" and operation["status"] in TERMINAL
+                and operation["disposition"] == authority["status"] and operation["stage"] == authority["stage"]
+                and operation["command"]["body"]["attempt_id"] == operation_id
+                and operation["job"] == values["controller-job.json"]
+                and operation["job"]["job_id"] == authority["job_id"]
+                and operation["job"]["manifest_sha256"] == authority["manifest_sha256"],
+                "native_completion_provider_changed")
+        archive = controller_store.archived_operation(operation_id, controller_id)
+        operation_digest = job.hash_bytes(job.encode(operation))
+        if archive is None:
+            require(not os.path.lexists(marker), "native_completion_history_missing_or_changed")
+            history, archive_identity, archive_record = None, None, None
+        else:
+            require(archive == operation, "native_completion_history_missing_or_changed")
+            require(archive_record is not None and archive_record["operation_sha256"] == operation_digest,
+                    "native_completion_history_changed")
+        proof, _, _ = _native_file(controller_store.root / (operation_id + ".proof"), job.MAX_SUBMIT)
+        require(proof == {key: operation["receipt"][key] for key in ("sha256", "bytes")},
+                "native_completion_artifact_changed")
+        controller.verify_receipt(operation_id)
+        previous = None
+        if os.path.lexists(marker):
+            _, marker_identity, marker_raw = _native_file(marker, JSON_LIMIT, True)
+            previous = job.decode(marker_raw)
+            exact_fields(previous, ("schema_version", "kind", "operation_id", "controller_id", "operation_sha256",
+                                    "authority", "files", "retained"))
+            exact_fields(previous["files"], NATIVE_BULK)
+            exact_fields(previous["retained"], NATIVE_RETAINED)
+        files = {}
+        for name, maximum in limits.items():
+            if previous is not None:
+                metadata = previous["files"][name]
+                exact_fields(metadata, ("sha256", "bytes"))
+                sha256(metadata["sha256"])
+                require(type(metadata["bytes"]) is int and 0 < metadata["bytes"] <= maximum,
+                        "invalid_native_completion_archive_size")
+                files[name] = metadata
+                if not os.path.lexists(directory / name):
+                    continue
+            observed, identities[name], _ = _native_file(directory / name, maximum)
+            require(previous is None or observed == files[name], "native_completion_bulk_changed")
+            files[name] = observed
+        require(files["payload.json"]["sha256"] == binding["payload_sha256"]
+                and files["evidence.json"]["sha256"] == binding["evidence_sha256"]
+                and files["submission.json"]["sha256"] == authority["submission_sha256"],
+                "native_completion_bulk_binding_changed")
+        manifest = values["manifest.json"]
+        require(retained["manifest.json"]["sha256"] == authority["manifest_sha256"]
+                and manifest["job_id"] == authority["job_id"] and manifest["stage"] == authority["stage"]
+                and manifest["release_sha256"] == authority["release_sha256"] and manifest["chain_binding"] == binding
+                and manifest["payload"]["sha256"] == files["payload.json"]["sha256"]
+                and manifest["payload"]["bytes"] == files["payload.json"]["bytes"], "native_completion_manifest_changed")
+        record = {"schema_version": 1, "kind": "native_completion", "operation_id": operation_id,
+                  "controller_id": controller_id, "operation_sha256": operation_digest, "authority": authority,
+                  "files": files, "retained": retained}
+        require(previous is None or previous == record, "native_completion_archive_changed")
+        if not execute:
+            return record
+        for name, identity in identities.items():
+            _native_unchanged(directory / name, identity)
+        if archive is None:
+            # Older terminal jobs can still be inline. Preserve their exact history without changing live state.
+            require(controller_store.archive_operation(operation_id, operation, controller_id) == operation_digest,
+                    "native_completion_history_changed")
+        else:
+            _native_unchanged(history / archive_name, archive_identity)
+            # An existing archive may have survived a rename whose directory fsync was interrupted.
+            controller_store.retain_history(archive_name, archive_record)
+        if previous is None:
+            atomic_json(marker, record)
+        else:
+            _native_unchanged(marker, marker_identity)
+        sync_dir(directory)
+        sync_dir(directory.parent)
+        for name in NATIVE_BULK:
+            if name in identities:
+                _native_unchanged(directory / name, identities[name])
+                (directory / name).unlink()
+        # Re-establish the deletion barrier even when a restart observes every file already absent.
+        sync_dir(directory)
+        return record
 
 
 def endpoint_url(value):

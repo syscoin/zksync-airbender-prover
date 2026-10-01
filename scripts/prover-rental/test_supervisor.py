@@ -1,10 +1,14 @@
 import argparse
+import base64
 from contextlib import redirect_stdout
 import copy
 import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -142,6 +146,63 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(self.pod().tick(), "completed")
         self.instance.tick()
         self.assertIsNone(self.instance.state["active"])
+
+    def assert_native_compacted(self, active, disposition, submission, proof=None):
+        directory = self.instance.directory(active)
+        for name in ("picked-wire.json", "payload.json", "evidence.json", "submission.json"):
+            self.assertFalse((directory / name).exists(), name)
+        for name in ("authority.json", "controller-job.json", "manifest.json", "release.json"):
+            self.assertTrue((directory / name).is_file(), name)
+        authority = runpod.read_private_json(directory / "authority.json")
+        self.assertEqual(authority["status"], disposition)
+        self.assertEqual(authority["submission_sha256"], job.hash_bytes(submission))
+        self.assertEqual(authority["operation_id"], active["rental_operation"])
+        archive = runpod.read_private_json(self.provider.root / "history" / ("operation-" + active["id"] + ".json"))
+        self.assertEqual(archive["operation"]["disposition"], disposition)
+        self.assertIsNotNone(archive["operation"]["receipt"])
+        self.assertEqual(archive["operation_sha256"], job.hash_bytes(runpod.json_bytes(archive["operation"])))
+        compact = runpod.read_private_json(directory / "native-completion.json")
+        self.assertEqual(compact["operation_id"], active["rental_operation"])
+        self.assertEqual(compact["operation_sha256"], archive["operation_sha256"])
+        self.assertEqual(compact["files"]["submission.json"], {"sha256": job.hash_bytes(submission), "bytes": len(submission)})
+        self.assertEqual(set(compact["files"]), {"picked-wire.json", "payload.json", "evidence.json", "submission.json"})
+        self.assertEqual(set(path.name for path in directory.iterdir()),
+                         {"authority.json", "controller-job.json", "manifest.json", "release.json", "native-completion.json"})
+        proof_path = self.provider.root / (active["id"] + ".proof")
+        self.assertTrue(proof_path.is_file())
+        if proof is not None:
+            self.assertEqual(proof_path.read_bytes(), proof)
+
+    def test_native_completions_keep_small_recoverable_directories_for_both_stages_and_dispositions(self):
+        original_payload = payload
+        def large_payload(stage):
+            value = original_payload(stage)
+            encoded = base64.b64encode(b"input" * 65536).decode()
+            value.update({"prover_input": encoded} if stage == "FRI" else {"fri_proofs": [encoded, encoded]})
+            return value
+        completed = []
+        with patch(__name__ + ".payload", side_effect=large_payload):
+            for disposition in ("accepted", "rejected"):
+                for stage in ("FRI", "SNARK"):
+                    with self.subTest(disposition=disposition, stage=stage):
+                        self.native.ready.add(("child", stage))
+                        self.native.submit_response = (204 if disposition == "accepted" else 422,
+                            {"x-syscoin-prover-disposition": disposition}, b"")
+                        self.reload().tick()
+                        active = copy.deepcopy(self.instance.state["active"])
+                        directory = self.instance.directory(active)
+                        self.assertGreater((directory / "payload.json").stat().st_size, 400000)
+                        self.complete()
+                        submission = [call[2] for call in self.native.calls if "/submit?" in call[0]][-1]
+                        self.assert_native_compacted(active, disposition, submission)
+                        self.assertLess(sum(path.stat().st_size for path in directory.iterdir()), 32768)
+                        completed.append(directory)
+                        self.assertEqual(set((self.store.root / "jobs").iterdir()), set(completed))
+                        self.assertEqual(self.instance.state["completed_jobs"], len(completed))
+                        self.assertEqual(self.instance.state["session"]["jobs"], len(completed))
+        self.assertEqual(self.count("create"), 1)
+        self.assertEqual(len(self.seen), 4)
+        self.assertEqual(len([call for call in self.native.calls if "/submit?" in call[0]]), 4)
 
     def test_actual_snark_pick_precedes_fri_and_same_gpu_reuses_both_stages(self):
         self.native.ready.update({("child", "FRI"), ("gateway", "SNARK")})
@@ -613,16 +674,26 @@ class SupervisorTests(unittest.TestCase):
         self.native.submit_response = (503, {}, b"")
         with self.assertRaisesRegex(runpod.Error, "submission_retained"):
             self.instance.tick()
-        retained = job.read_file(self.instance.directory() / "submission.json", job.MAX_SUBMIT, private=True)
+        active = copy.deepcopy(self.instance.state["active"])
+        directory = self.instance.directory(active)
+        originals = {name: (directory / name).read_bytes() for name in
+                     ("picked-wire.json", "payload.json", "evidence.json", "submission.json")}
+        retained = originals["submission.json"]
+        with self.assertRaisesRegex(runpod.Error, "submission_retained"):
+            self.reload().tick()
+        self.assertEqual({name: (directory / name).read_bytes() for name in originals}, originals)
+        self.assertFalse((directory / "native-completion.json").exists())
+        self.assertEqual(self.instance.state["completed_jobs"], 0)
         count = len(self.picks())
         self.native.submit_response = (204, {"x-syscoin-prover-disposition": "accepted"}, b"")
         self.reload().tick()
         submissions = [call[2] for call in self.native.calls if "/submit?" in call[0]]
-        self.assertEqual(submissions, [retained, retained])
+        self.assertEqual(submissions, [retained, retained, retained])
         self.assertEqual(len(self.picks()), count)
         self.assertEqual(len(self.seen), 1)
         self.assertEqual(self.count("create"), 1)
         self.assertEqual(self.instance.state["completed_jobs"], 1)
+        self.assert_native_compacted(active, "accepted", retained)
 
     def test_mailbox_ambiguity_republishes_same_job_and_plan_after_restart(self):
         self.native.ready.add(("child", "FRI"))
@@ -855,8 +926,128 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.native.calls if "/submit?" in call[0]]), 1)
         self.assertEqual(self.count("create"), 1)
         self.assertEqual(len(self.seen), 1)
-        self.assertEqual((self.provider.root / (active["id"] + ".proof")).read_bytes(), proof)
-        self.assertEqual((self.instance.directory(active) / "submission.json").read_bytes(), submission)
+        self.assert_native_compacted(active, "accepted", submission, proof)
+
+    def interrupted_native_cleanup(self, after_cleanup):
+        stage = "FRI" if after_cleanup else "SNARK"
+        self.native.ready.add(("child", stage))
+        self.instance.tick()
+        active = copy.deepcopy(self.instance.state["active"])
+        directory = self.instance.directory(active)
+        self.assertEqual(self.pod().tick(), "completed")
+        unlink, save = Path.unlink, supervisor.Supervisor.save
+        def interrupted_unlink(path, *args, **kwargs):
+            unlink(path, *args, **kwargs)
+            if not after_cleanup and path == directory / "payload.json":
+                raise KeyboardInterrupt
+        def interrupted_save(instance):
+            if after_cleanup and instance.state["active"] is None:
+                self.assertFalse((directory / "submission.json").exists())
+                self.assertTrue((directory / "native-completion.json").exists())
+                raise KeyboardInterrupt
+            save(instance)
+        with patch.object(Path, "unlink", interrupted_unlink), \
+                patch.object(supervisor.Supervisor, "save", interrupted_save), self.assertRaises(KeyboardInterrupt):
+            self.instance.tick()
+        self.reload()
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(self.instance.state["completed_jobs"], 0)
+        self.assertEqual(self.instance.state["session"]["jobs"], 0)
+        self.assertFalse((directory / "payload.json").exists())
+        compact = (directory / "native-completion.json").read_bytes()
+        archive = (self.provider.root / "history" / ("operation-" + active["id"] + ".json")).read_bytes()
+        proof = (self.provider.root / (active["id"] + ".proof")).read_bytes()
+        submissions = [call[2] for call in self.native.calls if "/submit?" in call[0]]
+        self.assertEqual(len(submissions), 1)
+        picks = len(self.picks())
+        self.instance.tick()
+        self.reload().tick(acquire=False)
+        self.assertIsNone(self.instance.state["active"])
+        self.assertEqual(self.instance.state["completed_jobs"], 1)
+        self.assertEqual(self.instance.state["session"]["jobs"], 1)
+        self.assertEqual(len(self.picks()), picks)
+        self.assertEqual(self.count("create"), 1)
+        self.assertEqual(len(self.seen), 1)
+        self.assertEqual([call[2] for call in self.native.calls if "/submit?" in call[0]], submissions)
+        self.assertEqual((directory / "native-completion.json").read_bytes(), compact)
+        self.assertEqual((self.provider.root / "history" / ("operation-" + active["id"] + ".json")).read_bytes(), archive)
+        self.assert_native_compacted(active, "accepted", submissions[0], proof)
+
+    def test_native_cleanup_recovers_after_partial_file_removal(self):
+        self.interrupted_native_cleanup(False)
+
+    def test_native_cleanup_recovers_after_files_removed_before_completion_save(self):
+        self.interrupted_native_cleanup(True)
+
+    def test_compact_completed_rejects_fifo_authority_without_blocking_or_mutation(self):
+        directory = self.store.root / "jobs" / ("a" * 32)
+        directory.mkdir(mode=0o700)
+        os.mkfifo(directory / "authority.json", 0o600)
+        before_paths = set(self.root.rglob("*"))
+        before_files = {path: path.read_bytes() for path in before_paths if path.is_file()}
+        for execute in (False, True):
+            with self.subTest(execute=execute):
+                result = subprocess.run([sys.executable, supervisor.__file__, "--state-dir", str(self.store.root),
+                                         *(["--execute"] if execute else []), "compact-completed"],
+                                        capture_output=True, timeout=5, check=False)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(b"supervisor_configuration_or_state_failure", result.stderr)
+                self.assertEqual({path: path.read_bytes() for path in before_files}, before_files)
+                self.assertEqual(set(self.root.rglob("*")) - before_paths,
+                                 {self.store.root / "supervisor.lock"} if execute else set())
+
+    def test_compact_completed_cli_previews_then_cleans_only_owned_final_native_history(self):
+        self.native.ready.add(("child", "SNARK"))
+        self.instance.tick()
+        completed = copy.deepcopy(self.instance.state["active"])
+        directory = self.instance.directory(completed)
+        with patch.object(sentry, "compact_native", return_value=None):
+            self.complete()
+        submission = (directory / "submission.json").read_bytes()
+        proof = (self.provider.root / (completed["id"] + ".proof")).read_bytes()
+        foreign = self.store.root / "jobs" / ("f" * 32)
+        shutil.copytree(directory, foreign)
+        self.native.ready.add(("child", "FRI"))
+        self.instance.tick()
+        self.assertEqual(self.pod().tick(), "completed")
+        self.native.submit_response = (503, {}, b"")
+        with self.assertRaisesRegex(runpod.Error, "submission_retained"):
+            self.instance.tick()
+        active = copy.deepcopy(self.instance.state["active"])
+        active_directory = self.instance.directory(active)
+        active_files = {path.name: path.read_bytes() for path in active_directory.iterdir()}
+        foreign_files = {path.name: path.read_bytes() for path in foreign.iterdir()}
+        before = {str(path): path.read_bytes() for path in (self.store.root / "jobs").rglob("*") if path.is_file()}
+        preview_paths = set(self.root.rglob("*"))
+        preview_files = {path: path.read_bytes() for path in preview_paths if path.is_file()}
+        state = (self.store.root / "supervisor.json").read_bytes()
+        network_calls = len(self.native.calls), len(self.api.calls), len(self.objects.puts)
+        preview, executed = io.StringIO(), io.StringIO()
+        with patch.object(supervisor.storage, "S3Storage", side_effect=AssertionError("SDK forbidden")), \
+                patch.object(supervisor, "Runpod", side_effect=AssertionError("provider forbidden")):
+            with redirect_stdout(preview):
+                self.assertEqual(supervisor.main(["--state-dir", str(self.store.root), "compact-completed"]), 0)
+            plan = json.loads(preview.getvalue())
+            self.assertEqual(plan["action"], "plan_native_history_compaction")
+            self.assertEqual([entry["operation_id"] for entry in plan["jobs"]], [completed["id"]])
+            self.assertGreater(plan["jobs"][0]["intermediate_bytes"], 0)
+            self.assertEqual(plan["skipped"], 2)
+            self.assertEqual(set(self.root.rglob("*")), preview_paths)
+            self.assertEqual({path: path.read_bytes() for path in preview_files}, preview_files)
+            self.assertEqual({str(path): path.read_bytes() for path in (self.store.root / "jobs").rglob("*")
+                              if path.is_file()}, before)
+            with redirect_stdout(executed):
+                self.assertEqual(supervisor.main(["--state-dir", str(self.store.root), "--execute", "compact-completed"]), 0)
+        result = json.loads(executed.getvalue())
+        self.assertEqual(result, {**plan, "action": "native_history_compacted"})
+        self.assert_native_compacted(completed, "accepted", submission, proof)
+        self.assertEqual({path.name: path.read_bytes() for path in active_directory.iterdir()}, active_files)
+        self.assertEqual({path.name: path.read_bytes() for path in foreign.iterdir()}, foreign_files)
+        self.assertEqual((self.store.root / "supervisor.json").read_bytes(), state)
+        self.assertEqual((len(self.native.calls), len(self.api.calls), len(self.objects.puts)), network_calls)
+        self.reload()
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(self.instance.state["completed_jobs"], 1)
 
     def test_ten_busy_workers_share_real_queue_without_prefetch_or_extra_provider_capacity(self):
         state = self.provider.load()

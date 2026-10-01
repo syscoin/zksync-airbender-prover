@@ -94,6 +94,22 @@ original budget charge. Archive records, job lookup indexes, and proof files mus
 stay with the provider directory: recovery and exact retry checks still use them.
 Active, uncertain, and failed attempts remain in the live journal.
 
+After a supervisor-owned native job receives a definitive accepted or rejected
+disposition, the supervisor archives its completion identity and file hashes in
+the job directory's private `native-completion.json`. It then removes
+`picked-wire.json`, `payload.json`, `evidence.json`, and `submission.json` before
+clearing the active job. Interrupted cleanup resumes from that durable record.
+Keep the small authority, manifest, release, and controller metadata with the
+provider history and final proof file; recovery still verifies the retained proof.
+Ambiguous submissions and external service jobs keep their original files.
+
+To reclaim intermediates from older completed native jobs, preview
+`supervisor.py --state-dir /private/supervisor compact-completed`, then add
+`--execute` before `compact-completed` to apply it. This local maintenance command
+needs no provider API key or object-storage connection. It verifies the same
+completion evidence and skips active, expired, retired, and foreign jobs.
+Stop the supervisor loop before applying it, and keep the provider watchdog running.
+
 Admission checks reserve room for pending completion and cleanup records. Long
 URLs or unresolved work can therefore limit capacity before the configured pod
 maximum is reached. A late capacity refusal preserves the owned job for retry;
