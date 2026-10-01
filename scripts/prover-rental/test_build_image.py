@@ -1,8 +1,11 @@
 import argparse
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import job
 import runpod
@@ -15,6 +18,28 @@ spec.loader.exec_module(builder)
 
 
 class BuildImageTests(unittest.TestCase):
+    def test_warm_build_context_contains_importable_persistent_worker(self):
+        real_run = subprocess.run
+        with tempfile.TemporaryDirectory() as temporary:
+            release_path = Path(temporary) / "FRI.json"
+            job.write_new(release_path, job.encode(release("FRI")))
+
+            def inspect_build(command, **_):
+                context = Path(command[-1])
+                for line in (context / "Dockerfile").read_text().splitlines():
+                    if line.startswith("COPY "):
+                        for name in line.split()[1:-1]:
+                            self.assertTrue((context / name).exists(), name)
+                self.assertTrue((context / "fri_session.py").is_file())
+                result = real_run([sys.executable, str(context / "warm_worker.py"), "--help"],
+                                  cwd=context, env={}, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            argv = ["build-image.py", "--warm", "--fri-release", str(release_path), "--base-image",
+                    "example/prover@sha256:" + "a" * 64, "--tag", "warm-test", "--execute"]
+            with patch.object(sys, "argv", argv), patch.object(builder.subprocess, "run", inspect_build):
+                builder.main()
+
     def test_warm_image_pins_both_stages_to_same_application(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

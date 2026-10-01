@@ -2,9 +2,11 @@
 """Reuse a bounded rental pod for authenticated, sequential one-job commands."""
 
 import argparse
+import fcntl
 import hashlib
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
@@ -13,6 +15,7 @@ from types import SimpleNamespace
 import uuid
 
 import job
+from fri_session import FriSession
 import warm_protocol as warm
 import worker
 from runpod import Error, Store, atomic_json, positive_int, private_open, require, sync_dir
@@ -86,7 +89,8 @@ def atomic_bytes(path, data):
 
 class WarmWorker:
     def __init__(self, args, network=None, clock=time.time, monotonic=time.monotonic,
-                 release_dir=RELEASE_DIR, verify=job.verify_image, execute=worker.execute, native=worker.run_native):
+                 release_dir=RELEASE_DIR, verify=job.verify_image, execute=worker.execute, native=worker.run_native,
+                 fri_factory=FriSession):
         warm.identity(args.operation_id)
         warm.identity(args.session_id)
         warm.key_bytes(args.session_key)
@@ -97,6 +101,8 @@ class WarmWorker:
         require(positive_int(args.poll_interval_seconds) <= 60, "invalid_warm_poll_interval")
         self.args, self.network, self.clock, self.monotonic = args, WarmTransport(network or job.Network()), clock, monotonic
         self.verify, self.execute, self.native = verify, execute, native
+        self.fri_factory, self.fri = fri_factory, None
+        self.runtime_lock = None
         self.releases = validate_image(release_dir, verify)
         self.deadline = monotonic() + min(args.runtime_limit_seconds, max(0, args.deadline_unix - clock()))
         self.root = Path(args.state_dir)
@@ -115,13 +121,35 @@ class WarmWorker:
             "deadline_unix": args.deadline_unix, "runtime_limit_seconds": args.runtime_limit_seconds,
             "releases": {stage: release["sha256"] for stage, release in self.releases.items()},
         }
-        with self.store.lock("worker.lock", blocking=False):
-            state_path = self.root / "worker.json"
-            if state_path.exists():
-                self.load()
-            else:
-                self.state = {"schema_version": 1, "binding": self.binding, "jobs": [], "stop": None}
-                self.save()
+        self.runtime_lock = os.fdopen(private_open(self.root / "worker-process.lock", os.O_RDWR | os.O_CREAT), "r+b")
+        try:
+            # The FRI guardian inherits this descriptor, so a restarted worker cannot overlap
+            # native compute that is still being reaped after its previous parent disappeared.
+            fcntl.flock(self.runtime_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.store.lock("worker.lock", blocking=False):
+                state_path = self.root / "worker.json"
+                if state_path.exists():
+                    self.load()
+                else:
+                    self.state = {"schema_version": 1, "binding": self.binding, "jobs": [], "stop": None}
+                    self.save()
+        except BaseException:
+            self.runtime_lock.close()
+            self.runtime_lock = None
+            raise
+
+    def close_fri(self):
+        if self.fri is not None:
+            self.fri.close()
+            self.fri = None
+
+    def close(self):
+        try:
+            self.close_fri()
+        finally:
+            if self.runtime_lock is not None:
+                self.runtime_lock.close()
+                self.runtime_lock = None
 
     def load(self):
         self.state = job.decode(job.read_file(self.root / "worker.json", 2 * 1024 * 1024, private=True))
@@ -200,6 +228,7 @@ class WarmWorker:
         self.save()
 
     def finish(self):
+        self.close_fri()
         stop = self.state["stop"]
         require(stop is not None, "warm_stop_required")
         self.remaining(stop["command"]["body"])
@@ -209,9 +238,16 @@ class WarmWorker:
         return "finished"
 
     def tick(self):
-        with self.store.lock("worker.lock", blocking=False):
-            self.load()
-            return self._tick()
+        require(self.runtime_lock is not None, "warm_worker_closed")
+        try:
+            with self.store.lock("worker.lock", blocking=False):
+                self.load()
+                return self._tick()
+        except RetryableTransport:
+            raise
+        except BaseException:
+            self.close_fri()
+            raise
 
     def _tick(self):
         self.remaining()
@@ -244,6 +280,7 @@ class WarmWorker:
         require(body["expires_at"] <= self.args.deadline_unix, "warm_command_exceeds_session_deadline")
         remaining = self.remaining(body)
         if body["kind"] == "stop":
+            self.close_fri()
             receipt = warm.sign_finished({"session_id": self.args.session_id, "operation_id": self.args.operation_id,
                                           "sequence": body["sequence"], "command_sha256": digest,
                                           "completed_jobs": len(self.state["jobs"]), "status": "finished"},
@@ -263,31 +300,51 @@ class WarmWorker:
 
     def execute_record(self, record):
         body = record["command"]["body"]
+        if body["stage"] == "SNARK":
+            self.close_fri()
         remaining = self.remaining(body)
         require(int(remaining) > 0, "warm_worker_deadline_elapsed")
         args = SimpleNamespace(operation_id=body["attempt_id"], job_id=body["job_id"],
                                manifest_url=body["manifest_url"], manifest_sha256=body["manifest_sha256"],
                                runtime_limit_seconds=min(body["runtime_limit_seconds"], int(remaining)))
-        def start_native(command, directory, timeout):
+        def compute(work, release, directory, timeout):
             require(record["status"] == "preparing", "warm_compute_already_started")
             record["status"] = "executing"
             self.save()
-            self.native(command, directory, min(timeout, self.remaining(body)))
+            def retain_result(raw):
+                self.validate_artifact(record, raw)
+                atomic_bytes(self.directory(record) / "artifact.json", raw)
+                record.update(status="output_ready", artifact_sha256=job.hash_bytes(raw), artifact_bytes=len(raw))
+                self.save()
+
+            # The local submit ACK lets the native prover retire its own pending proof. Keep
+            # our recoverable result durable first, even if upload or this process then fails.
+            work.on_result = retain_result
+            timeout = min(timeout, self.remaining(body))
+            if body["stage"] == "FRI":
+                if self.fri is None:
+                    self.fri = self.fri_factory(lock_fd=self.runtime_lock.fileno(), lifetime_seconds=self.remaining())
+                self.fri.run(work, release, directory, timeout)
+            else:
+                worker.run_once(work, release, directory, timeout, native=self.native)
 
         self.execute(args, network=RecordingNetwork(self, record), release_path=self.releases[body["stage"]]["path"],
-                     verify=self.verify, native=start_native)
+                     verify=self.verify, compute=compute)
         require(record["status"] == "done", "warm_worker_result_not_durable")
 
     def run(self, sleep=time.sleep):
-        while True:
-            try:
-                if self.tick() == "finished":
-                    return
-            except RetryableTransport:
-                # The current phase determines whether retrying can download, upload, or must
-                # fail closed. Neither a failed transfer nor a repeated mailbox reruns native work.
-                pass
-            sleep(min(self.args.poll_interval_seconds, self.remaining()))
+        try:
+            while True:
+                try:
+                    if self.tick() == "finished":
+                        return
+                except RetryableTransport:
+                    # The current phase determines whether retrying can download, upload, or must
+                    # fail closed. Neither a failed transfer nor a repeated mailbox reruns native work.
+                    pass
+                sleep(min(self.args.poll_interval_seconds, self.remaining()))
+        finally:
+            self.close()
 
 
 class RecordingNetwork:
@@ -355,6 +412,9 @@ def main():
     if args.validate_image:
         validate_image()
     else:
+        def terminate(signum, _frame):
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, terminate)
         WarmWorker(args).run()
 
 

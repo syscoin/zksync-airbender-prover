@@ -63,7 +63,7 @@ def main():
         recipe = "Dockerfile.warm" if args.warm else "Dockerfile"
         shutil.copyfile(source / recipe, context / "Dockerfile")
         if args.warm:
-            for name in ("warm_worker.py", "warm_protocol.py"):
+            for name in ("warm_worker.py", "warm_protocol.py", "fri_session.py"):
                 shutil.copyfile(source / name, context / name)
         for name, release in releases.items():
             destination = context / name

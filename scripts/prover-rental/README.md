@@ -18,11 +18,15 @@ does not reserve a backlog, so other polling workers can claim distinct availabl
 jobs. Faster workers may complete more jobs; the scheduler does not wait for every
 worker to finish a numbered round or promise equal counts.
 
-The reusable image alternates the standalone GPU stage binaries inside one pod.
-It retains the pod, image and files between jobs; each native subprocess currently
-rebuilds its process-local setup caches. The native combined service separately
-supports wrapping priority between FRI jobs and retains its existing host caches.
-Neither worker interrupts an already leased proof to switch stages.
+The reusable image keeps one FRI prover process alive across consecutive FRI jobs
+inside the rented pod, preserving its process-local setup cache. It finishes the
+current proof before switching stages, then stops and reaps the FRI process before
+starting the standalone SNARK worker. A later FRI job starts a fresh FRI process.
+FRI caches are also released on stop, fatal error or session expiry; a guardian
+terminates native compute if the pod adapter dies. Proofs and the pod journal are
+durable before local acknowledgement, and result-upload retries reuse those exact
+bytes. The coordinator holds orchestration state; proving caches live in the pod.
+The idle grace and provider watchdog still bound the rental lifetime.
 
 Provider credentials, object-store credentials, sequencer credentials, real leases
 and signing keys remain on the operator's machine. The pod sees only a session

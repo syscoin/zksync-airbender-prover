@@ -24,7 +24,7 @@ from test_adapter import payload, release, storage_plan, successful_native
 from test_pool import IDENTITIES, evidence
 from test_runpod import FakeApi, policy
 from test_storage import config as storage_config
-from test_warm import MailboxStorage
+from test_warm import MailboxStorage, RecordingFriSession
 
 
 class Objects(MailboxStorage):
@@ -112,7 +112,7 @@ class SupervisorTests(unittest.TestCase):
                 "identity": IDENTITIES[name], "native_lease_seconds": 7200, "stages": ["FRI", "SNARK"]})
         self.store = supervisor.initialize(self.root / "supervisor", self.config)
         self.reload()
-        self.seen = []
+        self.seen, self.fri_events, self.fri_sessions, self.pods = [], [], [], {}
 
     def reload(self):
         self.instance = supervisor.Supervisor(self.store, self.api, self.objects, self.native,
@@ -132,15 +132,27 @@ class SupervisorTests(unittest.TestCase):
     def pod(self):
         session = self.instance.state["session"]
         descriptor = session["descriptor"]
+        if descriptor["session_id"] in self.pods:
+            return self.pods[descriptor["session_id"]]
         args = argparse.Namespace(operation_id=session["operation"], session_id=descriptor["session_id"],
             session_key=descriptor["session_key"], mailbox_url=descriptor["mailbox_url"],
             finished_manifest_put_url=descriptor["finished_manifest_put_url"], deadline_unix=session["deadline"],
             runtime_limit_seconds=3600, poll_interval_seconds=1, state_dir=str(self.root / "pod"))
         def native(args, directory, timeout):
             stage = next(stage for stage, binary in job.BINARIES.items() if args[0] == binary)
+            self.assertEqual(stage, "SNARK")
+            self.assertTrue(all(session.closed for session in self.fri_sessions))
+            self.fri_events.append(("snark-run", None))
             return successful_native(stage, self.seen)(args, directory, timeout)
-        return warm_worker.WarmWorker(args, self.objects, clock=lambda: self.now,
-            release_dir=self.store.root / "releases", verify=lambda _: None, native=native)
+        def fri_factory(**options):
+            session = RecordingFriSession(self.seen, self.fri_events, **options)
+            self.fri_sessions.append(session)
+            return session
+        pod = warm_worker.WarmWorker(args, self.objects, clock=lambda: self.now,
+            release_dir=self.store.root / "releases", verify=lambda _: None, native=native, fri_factory=fri_factory)
+        self.pods[descriptor["session_id"]] = pod
+        self.addCleanup(pod.close)
+        return pod
 
     def complete(self):
         self.assertEqual(self.pod().tick(), "completed")
@@ -225,6 +237,40 @@ class SupervisorTests(unittest.TestCase):
         request = next(call[1] for call in self.api.calls if call[0] == "create")
         self.assertNotIn("secret", json.dumps(request))
         self.assertNotIn("lease_token", json.dumps(request))
+
+    def test_supervisor_reuses_fri_cache_across_jobs_and_closes_it_before_snark_and_stop(self):
+        pod = None
+        for number, stage in enumerate(("FRI", "FRI", "SNARK", "FRI"), 1):
+            self.native.ready.add(("child", stage))
+            self.instance.tick()
+            self.assertEqual(self.instance.state["active"]["stage"], stage)
+            current = self.pod()
+            if pod is None:
+                pod = current
+            self.assertIs(current, pod)
+            picks = len(self.picks())
+            self.instance.tick()
+            self.assertEqual(len(self.picks()), picks)
+            self.complete()
+            self.assertEqual(self.instance.state["completed_jobs"], number)
+            self.assertEqual(len(self.objects.plans), number)
+        first, second = self.fri_sessions
+        self.assertEqual([len(instance.runs) for instance in self.fri_sessions], [2, 1])
+        self.assertTrue(first.closed)
+        self.assertFalse(second.closed)
+        self.assertEqual([event for event, _ in self.fri_events],
+                         ["fri-open", "fri-run", "fri-ack", "fri-run", "fri-ack", "fri-close", "snark-run",
+                          "fri-open", "fri-run", "fri-ack"])
+        picks = len(self.picks())
+        self.instance.stop_session()
+        self.assertEqual(pod.tick(), "finished")
+        self.assertTrue(second.closed)
+        self.instance.tick(acquire=False)
+        self.assertEqual(len(self.picks()), picks)
+        self.assertEqual(self.count("create"), 1)
+        self.assertEqual(self.count("delete"), 1)
+        self.assertEqual(len(self.seen), 4)
+        self.assertIsNone(self.instance.state["session"])
 
     def test_unknown_or_unmarked_pick_survives_restart_and_blocks_all_other_work(self):
         for failure in ("transport", "unmarked"):

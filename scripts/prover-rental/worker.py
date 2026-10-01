@@ -45,6 +45,8 @@ class OneJob:
         self.token = "0x" + secrets.token_hex(32)
         self.picked = False
         self.result = None
+        self.on_result = None
+        self._stored_result = None
 
     def submit(self, value):
         require(self.picked, "submission_before_pick")
@@ -59,7 +61,13 @@ class OneJob:
         if self.result is not None:
             require(self.result == encoded, "conflicting_local_submission")
         else:
-            job.write_new(self.output, encoded)
+            if self._stored_result is None:
+                job.write_new(self.output, encoded)
+                self._stored_result = encoded
+            else:
+                require(self._stored_result == encoded, "conflicting_local_submission")
+            if self.on_result is not None:
+                self.on_result(encoded)
             self.result = encoded
 
 
@@ -135,13 +143,18 @@ def command(release, endpoint, directory):
     return args
 
 
-def run_native(args, directory, timeout):
+def native_environment():
     # The child receives runtime settings only, even if an operator accidentally started the
     # adapter in an environment containing provider or wallet credentials.
     env = {name: os.environ[name] for name in (
         "PATH", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES") if name in os.environ}
     env["RUST_MIN_STACK"] = "268435456"
+    return env
+
+
+def run_native(args, directory, timeout):
+    env = native_environment()
     process = subprocess.Popen(args, cwd=directory, env=env, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, start_new_session=True)
     try:
@@ -152,7 +165,18 @@ def run_native(args, directory, timeout):
             process.wait()
 
 
-def execute(args, network=None, native=run_native, release_path=job.RELEASE_PATH, verify=job.verify_image):
+def run_once(work, release, directory, timeout, native=run_native):
+    server, thread = serve_once(work)
+    try:
+        native(command(release, f"http://127.0.0.1:{server.server_port}", directory), directory, timeout)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def execute(args, network=None, native=run_native, release_path=job.RELEASE_PATH, verify=job.verify_image,
+            compute=None):
     network = network or job.Network()
     deadline = time.monotonic() + positive_int(args.runtime_limit_seconds)
     require(re.fullmatch(r"[0-9a-f]{32}", args.operation_id), "invalid_operation_id")
@@ -171,14 +195,11 @@ def execute(args, network=None, native=run_native, release_path=job.RELEASE_PATH
     with tempfile.TemporaryDirectory(prefix="zksys-rental-") as temporary:
         directory = Path(temporary)
         work = OneJob(payload, release, directory / "proof.json")
-        server, thread = serve_once(work)
-        try:
-            native(command(release, f"http://127.0.0.1:{server.server_port}", directory), directory,
-                   max(0.01, deadline - time.monotonic()))
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
+        timeout = max(0.01, deadline - time.monotonic())
+        if compute is None:
+            run_once(work, release, directory, timeout, native)
+        else:
+            compute(work, release, directory, timeout)
         require(work.result is not None, "native_worker_did_not_return_proof")
         network.put(manifest["artifact_put_url"], work.result, deadline)
         result = {"schema_version": 1, "operation_id": args.operation_id, "job_id": args.job_id,
