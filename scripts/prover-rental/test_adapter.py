@@ -1,6 +1,7 @@
 import argparse
 import base64
 import copy
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,38 @@ from test_runpod import FakeApi, policy
 
 VK = "0x" + "a1" * 32
 TOKEN = "0x" + "f1" * 32
+
+RELEASE_WRITE_FAILURES = ("before_open", "empty", "partial", "complete", "file_fsync", "directory_fsync")
+
+
+@contextmanager
+def interrupted_release_write(window):
+    write_new = job.write_new
+    def interrupted(path, raw):
+        if Path(path).name != "release.json":
+            return write_new(path, raw)
+        if window == "file_fsync":
+            with patch.object(job.os, "fsync", side_effect=KeyboardInterrupt()):
+                write_new(path, raw)
+        elif window == "directory_fsync":
+            with patch.object(job, "sync_dir", side_effect=KeyboardInterrupt()):
+                write_new(path, raw)
+        elif window != "before_open":
+            write_new(path, b"" if window == "empty" else raw[:len(raw) // 2] if window == "partial" else raw)
+        raise KeyboardInterrupt()
+    with patch.object(job, "write_new", side_effect=interrupted):
+        yield
+
+
+@contextmanager
+def interrupted_authority_directory_fsync():
+    sync_dir = runpod.sync_dir
+    def interrupted(path):
+        if (Path(path) / "authority.json").exists():
+            raise OSError("authority directory fsync failed")
+        return sync_dir(path)
+    with patch.object(runpod, "sync_dir", side_effect=interrupted):
+        yield
 
 
 def release(stage):
@@ -264,21 +297,98 @@ class HandoffTests(unittest.TestCase):
                                             "secret", node, expected_range=(12, 13)))
                 self.assertEqual(len(node.calls), 1)
 
+    def test_interrupted_release_initialization_retries_without_a_prior_request(self):
+        raw = job.encode(release("SNARK"))
+        for window in RELEASE_WRITE_FAILURES:
+            with self.subTest(window=window):
+                directory = self.root / window
+                node = TrustedNode("SNARK")
+                with interrupted_release_write(window), self.assertRaises(KeyboardInterrupt):
+                    sentry.pick(directory, "https://trusted.node/", raw, "frozen", "secret", node,
+                                expected_range=(12, 13))
+                self.assertEqual(node.calls, [])
+                self.assertFalse((directory / "authority.json").exists())
+                self.assertEqual({path.name for path in directory.iterdir()},
+                                 set() if window == "before_open" else {"release.json"})
+                if window != "before_open":
+                    retained = (directory / "release.json").read_bytes()
+                    self.assertTrue(raw.startswith(retained))
+                    self.assertEqual(len(retained), 0 if window == "empty" else
+                                     len(raw) // 2 if window == "partial" else len(raw))
+                sentry.reset_unstarted_pick(directory, "https://trusted.node/", raw, "frozen", expected_range=(12, 13))
+                self.assertFalse(directory.exists())
+                self.assertTrue(sentry.pick(directory, "https://trusted.node/", raw, "frozen", "secret", node,
+                                            expected_range=(12, 13)))
+                self.assertEqual(len(node.calls), 1)
+
+    def test_release_file_and_directory_are_synced_before_authority_and_request(self):
+        directory = self.root / "ordered"
+        raw = job.encode(release("FRI"))
+        node = TrustedNode("FRI")
+        fsync, publish, request = os.fsync, sentry.atomic_json, node.request
+        barriers = []
+        def tracked_fsync(fd):
+            fsync(fd)
+            release_path = directory / "release.json"
+            if release_path.exists() and not (directory / "authority.json").exists():
+                info = os.fstat(fd)
+                for label, path in (("release", release_path), ("directory", directory)):
+                    observed = path.stat()
+                    if (info.st_dev, info.st_ino) == (observed.st_dev, observed.st_ino):
+                        barriers.append(label)
+        def checked_publish(path, value):
+            if value["status"] == "pick_uncertain":
+                self.assertEqual(barriers, ["release", "directory"])
+                self.assertEqual((directory / "release.json").read_bytes(), raw)
+                self.assertEqual(node.calls, [])
+            return publish(path, value)
+        def checked_request(*args, **kwargs):
+            self.assertEqual(runpod.read_private_json(directory / "authority.json")["status"], "pick_uncertain")
+            self.assertEqual((directory / "release.json").read_bytes(), raw)
+            return request(*args, **kwargs)
+        with patch.object(os, "fsync", side_effect=tracked_fsync), \
+                patch.object(sentry, "atomic_json", side_effect=checked_publish), \
+                patch.object(node, "request", side_effect=checked_request):
+            self.assertTrue(sentry.pick(directory, "https://trusted.node/", raw, "frozen", "secret", node))
+        self.assertEqual(len(node.calls), 1)
+
+    def test_published_authority_with_failed_directory_fsync_still_blocks_repick(self):
+        directory = self.root / "published"
+        raw = job.encode(release("FRI"))
+        node = TrustedNode("FRI")
+        with interrupted_authority_directory_fsync(), self.assertRaisesRegex(OSError, "authority directory fsync failed"):
+            sentry.pick(directory, "https://trusted.node/", raw, "frozen", "secret", node)
+        self.assertEqual(node.calls, [])
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        self.assertEqual(set(before), {"authority.json", "release.json"})
+        self.assertEqual(before["release.json"], raw)
+        self.assertEqual(job.decode(before["authority.json"])["status"], "pick_uncertain")
+        with self.assertRaisesRegex(runpod.Error, "pick_initialization_contains_unknown_artifacts"):
+            sentry.reset_unstarted_pick(directory, "https://trusted.node/", raw, "frozen")
+        with self.assertRaises(FileNotFoundError):
+            sentry.recover_pick(directory)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in directory.iterdir()})
+        self.assertEqual(node.calls, [])
+
     def test_pre_request_reset_preserves_authority_or_unsafe_leftovers(self):
         raw = job.encode(release("FRI"))
         _, intent = sentry.pick_intent("https://trusted.node/", raw, "frozen")
         temporary = ".authority.json." + "a" * 32 + ".tmp"
         cases = (("authority.json", job.encode(intent)), ("picked-wire.json", b"response"),
                  ("payload.json", b"payload"), ("submission.json", b"submission"),
+                 ("controller-job.json", b"capability"), ("manifest.json", b"export"),
+                 ("evidence.json", b"evidence"), ("unknown", b""),
                  (".authority.json.unknown.tmp", b""), (temporary, b"changed"),
-                 ("release.json", job.encode(release("SNARK"))))
+                 ("release.json", job.encode(release("SNARK"))), ("release.json", raw + b"extra"),
+                 ("release.json", raw[:40] + b"changed"))
         for index, (name, contents) in enumerate(cases):
             directory = self.root / ("retained-" + str(index))
             sentry.private_directory(directory, create=True)
-            job.write_new(directory / name, contents)
             job.write_new(directory / (".authority.json." + "b" * 32 + ".tmp"), b"")
+            job.write_new(directory / name, contents)
             before = {entry.name: entry.read_bytes() for entry in directory.iterdir()}
-            with self.subTest(name=name), self.assertRaises(runpod.Error):
+            entries = sorted(directory.iterdir(), key=lambda entry: entry.name == name)
+            with self.subTest(name=name), patch.object(Path, "iterdir", return_value=iter(entries)), self.assertRaises(runpod.Error):
                 sentry.reset_unstarted_pick(directory, "https://trusted.node/", raw, "frozen")
             self.assertEqual(before, {entry.name: entry.read_bytes() for entry in directory.iterdir()})
 
@@ -319,6 +429,28 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(len(node.calls), 1)
         self.assertEqual(runpod.read_private_json(directory / "authority.json")["lease_token"], TOKEN)
         self.assertNotIn(TOKEN.encode(), (directory / "payload.json").read_bytes())
+
+    def test_partial_pick_response_preserves_authority_and_never_resets(self):
+        directory = self.root / "partial-response"
+        raw = job.encode(release("FRI"))
+        node = TrustedNode("FRI")
+        write_new = job.write_new
+        def interrupted_response(path, data):
+            if Path(path).name == "picked-wire.json":
+                write_new(path, data[:len(data) // 2])
+                raise KeyboardInterrupt()
+            return write_new(path, data)
+        with patch.object(job, "write_new", side_effect=interrupted_response), self.assertRaises(KeyboardInterrupt):
+            sentry.pick(directory, "https://trusted.node/", raw, "frozen", "secret", node)
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        self.assertEqual(len(node.calls), 1)
+        self.assertEqual(job.decode(before["authority.json"])["status"], "pick_uncertain")
+        with self.assertRaisesRegex(runpod.Error, "invalid_json"):
+            sentry.recover_pick(directory)
+        with self.assertRaisesRegex(runpod.Error, "pick_initialization_contains_unknown_artifacts"):
+            sentry.reset_unstarted_pick(directory, "https://trusted.node/", raw, "frozen")
+        self.assertEqual(before, {path.name: path.read_bytes() for path in directory.iterdir()})
+        self.assertEqual(len(node.calls), 1)
 
     def test_default_pick_keeps_existing_query_and_authority_shape(self):
         for stage in ("FRI", "SNARK"):

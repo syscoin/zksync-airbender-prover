@@ -140,10 +140,13 @@ missing evidence cannot be exported or silently reclassified as another lane.
 Use `recover-pick --operation-id ...` after an interruption. If no durable
 `authority.json` exists, recovery retries the same job ID only after the sentry
 proves that the directory is absent or contains exclusively matching pre-request
-initialization files. It then durably refreshes the pick time and deadline before
-POSTing. A durable uncertain authority, response, capability, or unfamiliar file
-blocks that reset; a missing response after authority creation still requires
-origin reconciliation. A launch retry discovers its already-journaled rental even if the
+initialization files. The release is fully fsynced before authority is published;
+an interrupted release write is recoverable only while authority is absent and
+its bytes match a prefix of the frozen release. Recovery then durably refreshes
+the pick time and deadline before POSTing. A durable uncertain authority,
+response, capability, or unfamiliar file blocks that reset; a missing response
+after authority creation still requires origin reconciliation. A launch retry
+discovers its already-journaled rental even if the
 native deadline has since elapsed; it never creates a second allocation for the
 same attempt. Unmarked native responses retain the exact submission for retry.
 No status here proves reward eligibility or on-chain finality.

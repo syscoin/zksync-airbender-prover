@@ -12,7 +12,8 @@ import pool
 import runpod
 import sentry
 import worker
-from test_adapter import VK, Storage, payload, release, storage_plan, successful_native
+from test_adapter import (RELEASE_WRITE_FAILURES, VK, Storage, interrupted_authority_directory_fsync,
+                          interrupted_release_write, payload, release, storage_plan, successful_native)
 from test_runpod import FakeApi, policy
 
 
@@ -277,6 +278,62 @@ class PoolTests(unittest.TestCase):
             self.reload().recover_pick(operation)
         self.assertEqual(self.reload().operation(operation), owned)
         self.assertEqual(self.native.calls, [])
+
+    def test_release_initialization_failures_reuse_reserved_operation_and_persist_fresh_window_before_request(self):
+        config = self.config()
+        for window in RELEASE_WRITE_FAILURES:
+            with self.subTest(window=window):
+                self.store = pool.initialize(self.root / window, config)
+                self.native = Native()
+                self.reload()
+                with interrupted_release_write(window), self.assertRaises(KeyboardInterrupt):
+                    self.instance.pick_next()
+                operation = next(iter(self.instance.state["operations"]))
+                original = copy.deepcopy(self.instance.operation(operation))
+                cursor = self.instance.state["cursor"]
+                self.assertEqual(self.native.calls, [])
+                self.assertFalse((self.instance.directory(operation) / "authority.json").exists())
+                self.now += config["lanes"][original["lane"]]["native_lease_seconds"] + 1
+                self.reload()
+                request = self.native.request
+                def checked_request(url, *args, **kwargs):
+                    if "/pick?" in url:
+                        state = runpod.read_private_json(self.store.root / "pool.json")
+                        self.assertEqual(list(state["operations"]), [operation])
+                        self.assertEqual(state["cursor"], cursor)
+                        retained = state["operations"][operation]
+                        for field in ("job_id", "reserved_usd", "lane", "stage"):
+                            self.assertEqual(retained[field], original[field])
+                        self.assertEqual((retained["picked_at"], retained["deadline"]), (self.now, self.now + 7200))
+                        directory = self.instance.directory(operation)
+                        self.assertEqual((directory / "release.json").read_bytes(), job.encode(release(original["stage"])))
+                        self.assertEqual(runpod.read_private_json(directory / "authority.json")["status"], "pick_uncertain")
+                    return request(url, *args, **kwargs)
+                with patch.object(self.native, "request", side_effect=checked_request):
+                    self.instance.recover_pick(operation)
+                self.assertEqual(self.instance.operation(operation)["status"], "ready")
+                self.assertEqual(self.instance.operation(operation)["reserved_usd"], original["reserved_usd"])
+                self.assertEqual(len([call for call in self.native.calls if "/pick?" in call[0]]), 1)
+                self.assertEqual(self.instance.state["cursor"], cursor)
+                self.assertEqual(self.api.calls, [])
+
+    def test_published_authority_fsync_failure_keeps_pool_window_and_reservation_blocked(self):
+        self.start()
+        with interrupted_authority_directory_fsync(), self.assertRaisesRegex(OSError, "authority directory fsync failed"):
+            self.instance.pick_next()
+        operation = next(iter(self.instance.state["operations"]))
+        original = copy.deepcopy(self.instance.state)
+        directory = self.instance.directory(operation)
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        self.assertEqual(set(before), {"release.json", "authority.json"})
+        self.assertEqual(self.native.calls, [])
+        self.now += 8000
+        with self.assertRaises(FileNotFoundError):
+            self.reload().recover_pick(operation)
+        self.assertEqual(self.reload().state, original)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in directory.iterdir()})
+        self.assertEqual(self.native.calls, [])
+        self.assertEqual(self.api.calls, [])
 
     def test_recover_existing_uncertain_authority_never_repicks_or_refreshes_window(self):
         instance = self.start()

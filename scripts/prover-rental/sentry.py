@@ -262,7 +262,7 @@ def reset_unstarted_pick(directory, endpoint, release_bytes, job_id, *, expected
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
                 and not info.st_mode & 0o077 and info.st_nlink == 1, "unsafe_pick_initialization_file")
         raw = job.read_file(entry, job.MAX_MANIFEST, private=True)
-        require(raw == release_bytes if entry.name == "release.json" else expected.startswith(raw),
+        require((release_bytes if entry.name == "release.json" else expected).startswith(raw),
                 "pick_initialization_changed")
     # No request can precede the durable authority rename. Validate every leftover before
     # removing any; a response, capability, or unfamiliar file must keep the reservation blocked.
@@ -277,8 +277,11 @@ def pick(directory, endpoint, release_bytes, job_id, auth, network, *, expected_
     endpoint = authority["endpoint"]
     expected_bounds = authority.get("expected_bounds")
     directory = private_directory(directory, create=True)
-    atomic_json(directory / "authority.json", authority)
     job.write_new(directory / "release.json", release_bytes)
+    # Authority is the conservative network boundary. Finish recoverable local
+    # initialization before publishing it so an interrupted release write cannot
+    # be mistaken for an ambiguous request that may already own a lease.
+    atomic_json(directory / "authority.json", authority)
     parameters = {"id": "rental-sentry", "supported_vk_hashes": release["vk_hash"],
                   "max_fri_pick_response_bytes": job.MAX_PICK["FRI"]}
     if expected_bounds is not None:

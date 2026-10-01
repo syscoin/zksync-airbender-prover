@@ -20,7 +20,8 @@ import runpod
 import sentry
 import supervisor
 import warm_worker
-from test_adapter import payload, release, storage_plan, successful_native
+from test_adapter import (RELEASE_WRITE_FAILURES, interrupted_authority_directory_fsync, interrupted_release_write,
+                          payload, release, storage_plan, successful_native)
 from test_pool import IDENTITIES, evidence
 from test_runpod import FakeApi, policy
 from test_storage import config as storage_config
@@ -291,7 +292,7 @@ class SupervisorTests(unittest.TestCase):
                 self.assertEqual(self.count("create"), 0)
 
     def test_pre_authority_crashes_resume_once_with_same_identity_and_refreshed_deadline(self):
-        for window in ("before_directory", "empty_directory", "partial_temporary", "complete_temporary"):
+        for window in ("before_directory", *RELEASE_WRITE_FAILURES, "partial_temporary", "complete_temporary"):
             with self.subTest(window=window):
                 self.store = supervisor.initialize(self.root / window, self.config)
                 self.native = Native()
@@ -300,18 +301,24 @@ class SupervisorTests(unittest.TestCase):
                 source = self.instance.source("child")
                 def interrupted_authority(path, value):
                     self.assertEqual(path.name, "authority.json")
+                    self.assertEqual((path.parent / "release.json").read_bytes(), self.instance.release("SNARK"))
                     if window.endswith("temporary"):
                         raw = job.encode(value)
                         if window == "partial_temporary":
                             raw = raw[:len(raw) // 2]
                         job.write_new(path.with_name(".authority.json." + "a" * 32 + ".tmp"), raw)
                     raise KeyboardInterrupt()
-                interrupted = patch.object(sentry, "pick", side_effect=KeyboardInterrupt()) if window == "before_directory" \
-                    else patch.object(sentry, "atomic_json", side_effect=interrupted_authority)
+                if window == "before_directory":
+                    interrupted = patch.object(sentry, "pick", side_effect=KeyboardInterrupt())
+                elif window in RELEASE_WRITE_FAILURES:
+                    interrupted = interrupted_release_write(window)
+                else:
+                    interrupted = patch.object(sentry, "atomic_json", side_effect=interrupted_authority)
                 with interrupted, self.assertRaises(KeyboardInterrupt):
                     self.instance.pick_native(source, "SNARK")
                 original = copy.deepcopy(self.instance.state["active"])
                 self.assertEqual(self.picks(), [])
+                self.assertFalse((self.instance.directory() / "authority.json").exists())
                 self.advance(source["native_lease_seconds"] + 1)
                 self.reload()
                 request = self.native.request
@@ -324,6 +331,7 @@ class SupervisorTests(unittest.TestCase):
                         self.assertEqual(retained["deadline"], self.now + source["native_lease_seconds"])
                         self.assertEqual(runpod.read_private_json(self.instance.directory() / "authority.json")["status"],
                                          "pick_uncertain")
+                        self.assertEqual((self.instance.directory() / "release.json").read_bytes(), self.instance.release("SNARK"))
                     return request(url, *args, **kwargs)
                 with patch.object(self.native, "request", side_effect=checked_request):
                     self.assertTrue(self.instance.recover_native_pick(self.instance.state["active"]))
@@ -333,9 +341,14 @@ class SupervisorTests(unittest.TestCase):
                 self.assertFalse(any(self.instance.directory().glob("*.tmp")))
                 self.assertEqual(self.count("create"), 0)
 
-    def test_uncertain_authority_before_release_never_restarts_or_refreshes_deadline(self):
+    def test_legacy_uncertain_authority_without_release_never_restarts_or_refreshes_deadline(self):
         source = self.instance.source("child")
-        with patch.object(sentry.job, "write_new", side_effect=KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+        def interrupted_legacy_pick(directory, endpoint, raw, job_id, *_):
+            sentry.private_directory(directory, create=True)
+            _, authority = sentry.pick_intent(endpoint, raw, job_id)
+            runpod.atomic_json(directory / "authority.json", authority)
+            raise KeyboardInterrupt()
+        with patch.object(sentry, "pick", side_effect=interrupted_legacy_pick), self.assertRaises(KeyboardInterrupt):
             self.instance.pick_native(source, "SNARK")
         original = copy.deepcopy(self.instance.state["active"])
         authority = (self.instance.directory() / "authority.json").read_bytes()
@@ -346,6 +359,23 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(self.instance.state["active"], original)
         self.assertEqual((self.instance.directory() / "authority.json").read_bytes(), authority)
         self.assertEqual(self.picks(), [])
+
+    def test_published_authority_fsync_failure_keeps_supervisor_window_and_identity_blocked(self):
+        source = self.instance.source("child")
+        with interrupted_authority_directory_fsync(), self.assertRaisesRegex(OSError, "authority directory fsync failed"):
+            self.instance.pick_native(source, "SNARK")
+        original = copy.deepcopy(self.instance.state)
+        directory = self.instance.directory()
+        before = {path.name: path.read_bytes() for path in directory.iterdir()}
+        self.assertEqual(set(before), {"release.json", "authority.json"})
+        self.assertEqual(self.picks(), [])
+        self.advance(source["native_lease_seconds"] + 1)
+        with self.assertRaises(FileNotFoundError):
+            self.reload().recover_native_pick(self.instance.state["active"])
+        self.assertEqual(self.instance.state, original)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in directory.iterdir()})
+        self.assertEqual(self.picks(), [])
+        self.assertEqual(self.count("create"), 0)
 
     def test_completed_wire_recovery_preserves_original_deadline_without_another_pick(self):
         source = self.instance.source("child")
