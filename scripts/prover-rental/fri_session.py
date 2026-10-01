@@ -33,6 +33,51 @@ def persistent_command(release, endpoint, directory):
     return args
 
 
+def _adopted_children():
+    parent = os.getpid()
+    for path in Path("/proc").iterdir():
+        if not path.name.isdecimal():
+            continue
+        try:
+            stat = (path / "stat").read_bytes()
+            # comm can itself contain spaces, parentheses, and newlines. The fields
+            # following its final closing parenthesis begin with state and PPid.
+            _, separator, fields = stat.rpartition(b")")
+            if not separator:
+                continue
+            if int(fields.split()[1]) == parent:
+                yield int(path.name)
+        except (OSError, ValueError, IndexError):
+            # Unreadable foreign processes must not hide accessible children.
+            # The caller retries discovery until waitpid independently proves ECHILD.
+            continue
+
+
+def _reap_adopted_children():
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        except OSError:
+            time.sleep(.01)
+            continue
+        if pid:
+            continue
+        try:
+            for pid in _adopted_children():
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        except (OSError, ValueError, IndexError):
+            # Optional /proc task children files are not available on every
+            # kernel. Even standard procfs discovery can fail temporarily; only
+            # ECHILD proves it is safe to release the inherited runtime lock.
+            pass
+        time.sleep(.01)
+
+
 def _guard(lifeline, ready, lifetime, args):
     # This separate interpreter can safely establish process supervision without
     # running a Python preexec_fn after the HTTP server has created threads.
@@ -57,26 +102,15 @@ def _guard(lifeline, ready, lifetime, args):
             os.close(ready)
         if child is not None:
             try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait()
-            if linux:
-                # A subreaper also owns descendants that changed process groups.
-                # Keep the inherited worker lock until every such child is dead.
-                children = Path(f"/proc/self/task/{os.getpid()}/children")
-                while True:
-                    for pid in children.read_text().split():
-                        try:
-                            os.kill(int(pid), signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    try:
-                        pid, _ = os.waitpid(-1, os.WNOHANG)
-                    except ChildProcessError:
-                        break
-                    if pid == 0:
-                        time.sleep(.01)
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait()
+            finally:
+                if linux:
+                    # A subreaper also owns descendants that changed process groups.
+                    _reap_adopted_children()
 
 
 class FriSession:

@@ -37,10 +37,10 @@ def request(path, data=None):
         return response.status, response.read()
 event('init', environment=sorted(os.environ))
 if mode == 'crash': os._exit(73)
-if mode in ('descendant', 'descendant_exit', 'detached'):
-    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'], start_new_session=mode == 'detached')
+if mode in ('descendant', 'descendant_exit', 'detached', 'detached_exit'):
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'], start_new_session=mode.startswith('detached'))
     event('descendant', child=child.pid)
-    if mode == 'descendant_exit': os._exit(73)
+    if mode.endswith('_exit'): os._exit(73)
 last = None
 count = 0
 while True:
@@ -85,6 +85,33 @@ class FriSessionTests(unittest.TestCase):
 
     def work(self, batch=12):
         return worker.OneJob({**payload("FRI"), "batch_number": batch}, release("FRI"), self.root / f"{batch}.json")
+
+    def guardian_script(self, block_proc=False):
+        guardian = self.root / "guardian.py"
+        module_dir = str(Path(fri_session.__file__).parent)
+        guardian.write_text(f'''import pathlib, sys
+sys.path.insert(0, {module_dir!r})
+import fri_session
+root = pathlib.Path({str(self.root)!r})
+read_text, read_bytes, iterdir = pathlib.Path.read_text, pathlib.Path.read_bytes, pathlib.Path.iterdir
+def unavailable_optional(path):
+    if str(path).startswith('/proc/') and path.name == 'children':
+        raise FileNotFoundError('kernel_has_no_optional_children_entry')
+def guarded_text(path, *args, **kwargs):
+    unavailable_optional(path)
+    return read_text(path, *args, **kwargs)
+def guarded_bytes(path, *args, **kwargs):
+    unavailable_optional(path)
+    return read_bytes(path, *args, **kwargs)
+def guarded_iterdir(path):
+    if {block_proc!r} and str(path) == '/proc' and not (root / 'allow-proc').exists():
+        (root / 'enumeration-blocked').touch()
+        raise PermissionError('proc_enumeration_temporarily_unavailable')
+    return iterdir(path)
+pathlib.Path.read_text, pathlib.Path.read_bytes, pathlib.Path.iterdir = guarded_text, guarded_bytes, guarded_iterdir
+fri_session._guard(int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), sys.argv[5:])
+''')
+        return guardian
 
     def events(self):
         path = self.root / "events"
@@ -222,10 +249,12 @@ class FriSessionTests(unittest.TestCase):
         parent_script = self.root / "parent.py"
         module_dir = str(Path(fri_session.__file__).parent)
         mode = "detached" if sys.platform.startswith("linux") else "descendant"
+        guardian = self.guardian_script()
         parent_script.write_text(f'''import fcntl, json, os, pathlib, sys, time
 sys.path.insert(0, {module_dir!r})
 import fri_session, worker
 from test_adapter import payload, release
+fri_session.__file__ = {str(guardian)!r}
 root = pathlib.Path({str(self.root)!r})
 lock = (root / 'runtime.lock').open('a+')
 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -278,6 +307,71 @@ time.sleep(300)
             session.run(self.work(), release("FRI"), self.root, 5)
         child = next(event["child"] for event in self.events() if event["kind"] == "descendant")
         self.until(lambda: not self.alive(child))
+
+    def test_proc_discovery_skips_unreadable_foreign_entries_and_unusual_comm(self):
+        proc = self.root / "proc"
+        proc.mkdir()
+        for name in ("100", "101", "102", "103"):
+            (proc / name).mkdir()
+        (proc / "100" / "stat").write_bytes(b"100 (foreign) S 1 0 0")
+        (proc / "101" / "stat").write_bytes(b"101 (foreign) S invalid 0 0")
+        (proc / "102" / "stat").write_bytes(b"102 (malformed)")
+        (proc / "103" / "stat").write_bytes(b"103 (child ) with\n(parentheses)) S 42 0 0")
+        read_bytes = Path.read_bytes
+        def read(path):
+            if path.parent.name == "100":
+                raise PermissionError("unreadable_foreign_process")
+            return read_bytes(path)
+        paths = sorted(proc.iterdir())
+        with patch.object(Path, "iterdir", return_value=iter(paths)), patch.object(Path, "read_bytes", read), \
+                patch.object(os, "getpid", return_value=42):
+            self.assertEqual(list(fri_session._adopted_children()), [103])
+
+    def test_failed_child_kill_does_not_skip_other_children_or_release_ownership(self):
+        with patch.object(os, "waitpid", side_effect=[(0, 0), (21, 0), (0, 0), (20, 0), ChildProcessError()]) as wait, \
+                patch.object(fri_session, "_adopted_children", side_effect=[iter((20, 21)), iter((20,))]), \
+                patch.object(os, "kill", side_effect=[PermissionError(), None, None]) as kill, \
+                patch.object(time, "sleep"):
+            fri_session._reap_adopted_children()
+        self.assertEqual([call.args[0] for call in kill.call_args_list], [20, 21, 20])
+        self.assertEqual(wait.call_count, 5)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux subreaper lifecycle")
+    def test_missing_optional_proc_entry_reaps_detached_child_after_native_exit(self):
+        guardian = self.guardian_script()
+        session = self.session("detached_exit")
+        with patch.object(fri_session, "__file__", str(guardian)):
+            with self.assertRaisesRegex(runpod.Error, "fri_native_exited"):
+                session.run(self.work(), release("FRI"), self.root, 5)
+        child = next(event["child"] for event in self.events() if event["kind"] == "descendant")
+        self.assertFalse(self.alive(child))
+        self.assertIsNotNone(session.process.returncode)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux subreaper lifecycle")
+    def test_failed_proc_enumeration_retains_lock_until_detached_child_is_reaped(self):
+        guardian = self.guardian_script(block_proc=True)
+        lock_path = self.root / "runtime.lock"
+        lock = lock_path.open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        session = self.session("detached_exit", lock_fd=lock.fileno())
+        with patch.object(fri_session, "__file__", str(guardian)):
+            thread, errors = self.run_async(session, self.work(), timeout=10)
+            self.addCleanup((self.root / "allow-proc").touch)
+            self.until(lambda: (self.root / "enumeration-blocked").exists())
+        child = next(event["child"] for event in self.events() if event["kind"] == "descendant")
+        lock.close()
+        with lock_path.open("a+") as probe:
+            self.assertTrue(self.alive(child))
+            self.assertIsNone(session.process.poll())
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            (self.root / "allow-proc").touch()
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual([str(error) for error in errors], ["fri_native_exited"])
+            self.assertFalse(self.alive(child))
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 if __name__ == "__main__":

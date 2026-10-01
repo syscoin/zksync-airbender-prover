@@ -27,6 +27,9 @@ terminates native compute if the pod adapter dies. Proofs and the pod journal ar
 durable before local acknowledgement, and result-upload retries reuse those exact
 bytes. The coordinator holds orchestration state; proving caches live in the pod.
 The idle grace and provider watchdog still bound the rental lifetime.
+On Linux, the guardian retains worker ownership until the kernel confirms every
+adopted child has been reaped; unavailable process metadata keeps replacement
+workers blocked while cleanup retries.
 
 Provider credentials, object-store credentials, sequencer credentials, real leases
 and signing keys remain on the operator's machine. The pod sees only a session
