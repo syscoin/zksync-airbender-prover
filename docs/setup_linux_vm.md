@@ -23,7 +23,7 @@ source ~/.bashrc
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential libssl-dev pkg-config clang cmake python3 python3-tomli
+sudo apt-get install -y build-essential libssl-dev pkg-config clang cmake python3 python3-tomli jq
 ```
 
 ### 3. Install foundry
@@ -57,12 +57,23 @@ export PATH=$PATH:$CUDA_HOME/bin
 source ~/.bashrc
 ```
 
-### 5. Compile era-bellman-cuda
+### 5. Clone repos
+
+Use the Syscoin repositories: the GPU32 preparer and pinned build helpers below are not in the
+upstream Matter Labs checkout. Until prover PR9 is merged, select its reviewed branch explicitly;
+after it is merged, use the merged default branch instead.
+
+```bash
+git clone https://github.com/syscoin/zksync-os-server.git # sequencer
+git clone --branch codex/gpu32-default-snark https://github.com/syscoin/zksync-airbender-prover.git # prover PR9
+```
+
+### 6. Compile era-bellman-cuda
 
 ```bash
 # needed for GPU SNARK / combined workers, not FRI or explicit CPU fallback.
-# Run after cloning this prover repository (step 6); this creates a fresh pinned
-# GPU32 source directory and source record, never modifies a shared backend clone.
+# From the parent directory of the repositories cloned in step 5. This creates a
+# fresh pinned GPU32 source directory and source record, never modifies a shared backend clone.
 python3 zksync-airbender-prover/scripts/prepare-patched-gpu-backends.py --prepare-bellman "$PWD/era-bellman-cuda"
 cmake -Bera-bellman-cuda/build -Sera-bellman-cuda/ -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES='80;89;90;120'
 cmake --build era-bellman-cuda/build/
@@ -71,13 +82,6 @@ cmake --build era-bellman-cuda/build/
 export BELLMAN_CUDA_DIR=<PATH_TO>/era-bellman-cuda
 ---
 source ~/.bashrc
-```
-
-### 6. Clone repos
-
-```bash
-git clone https://github.com/matter-labs/zksync-os-server.git # sequencer
-git clone https://github.com/matter-labs/zksync-airbender-prover.git # prover
 ```
 
 ### 7. Download CRS file
