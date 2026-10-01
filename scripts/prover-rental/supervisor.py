@@ -142,6 +142,15 @@ class Supervisor:
     def controller(self):
         return self.controller_type(self.provider, self.api, clock=self.clock, http=self.controller_http)
 
+    def check_acquisition_capacity(self):
+        with self.provider.lock():
+            controller = self.controller()
+            session = self.state["session"]
+            if session is None:
+                controller.check_session_capacity()
+            else:
+                controller.check_warm_job_capacity(session["operation"])
+
     def release(self, stage):
         raw = job.read_file(self.store.root / "releases" / (stage + ".json"), job.MAX_MANIFEST, private=True)
         require(job.hash_bytes(raw) == self.settings["releases"][stage], "frozen_release_changed")
@@ -228,10 +237,16 @@ class Supervisor:
     def recover_native_pick(self, active):
         directory = self.directory(active)
         source = self.source(active["source"])
-        if not directory.exists():
-            # A durable supervisor intent precedes sentry's own pre-request journal.
-            # No directory means sentry could not yet have made its network request.
-            sentry.pick(directory, source["endpoint"], self.release(active["stage"]), active["job_id"],
+        if not os.path.lexists(directory / "authority.json"):
+            release = self.release(active["stage"])
+            sentry.reset_unstarted_pick(directory, source["endpoint"], release, active["job_id"])
+            self.check_acquisition_capacity()
+            # A pre-request crash may outlive the original compute window. Persist a new
+            # bound only after proving that no native request could have happened yet.
+            now = self.clock()
+            active.update(picked_at=now, deadline=now + source["native_lease_seconds"])
+            self.save()
+            sentry.pick(directory, source["endpoint"], release, active["job_id"],
                         self.auth(source), self.native)
         authority = read_private_json(directory / "authority.json")
         if authority["status"] == "no_job":
@@ -295,16 +310,15 @@ class Supervisor:
         op = candidate.operation(identifier)
         require(op["mode"] == "external" and op.get("rental_operation") is None,
                 "external_execution_requires_reconciliation")
-        controllers = [self.controller().state, candidate.controller_store(op).load()]
-        require(not any((entry.get("job") or {}).get("job_id") == op["job_id"]
-                        for state in controllers for entry in state["operations"].values()),
+        controllers = [self.controller(), Controller(candidate.controller_store(op), None, clock=self.clock)]
+        require(not any(controller.has_job(op["job_id"]) for controller in controllers),
                 "external_execution_requires_reconciliation")
         require(not (candidate.directory(identifier) / "returned-proof.json").exists(),
                 "durable_result_requires_recovery")
         if active is not None:
             require(active["rental_operation"] is None and active["phase"] in ("claim_intent", "ready", "exported"),
                     "published_authority_requires_recovery")
-            require(active["id"] not in controllers[0]["operations"]
+            require(controllers[0].find_operation(active["id"]) is None
                     and not any((self.provider.root / filename).exists()
                                 for filename in (active["id"] + ".proof", "." + active["id"] + ".partial")),
                     "durable_result_requires_recovery")
@@ -337,9 +351,11 @@ class Supervisor:
             with self.provider.lock():
                 self.require_unstarted_external(candidate, active["pool_operation"], active)
                 session = self.state["session"]
+                controller = self.controller()
                 unallocated = session is None or (session["operation"] is None and not any(
-                    entry.get("kind") == "warm_session" and entry["session"] == session["descriptor"]
-                    for entry in self.controller().state["operations"].values()))
+                    entry.get("kind") == "warm_session"
+                    and controller.operation(identifier)["session"] == session["descriptor"]
+                    for identifier, entry in controller.state["operations"].items()))
                 if archive.exists():
                     record = read_private_json(archive)
                     require(record["active"] == active and record["reason"] == reason,
@@ -569,7 +585,7 @@ class Supervisor:
             if session is not None and session["operation"] is not None:
                 require(controller.operation(session["operation"])["status"] in TERMINAL,
                         "provider_must_be_reconciled_and_stopped")
-            retained_job = controller.state["operations"].get(active["id"])
+            retained_job = controller.find_operation(active["id"])
             if retained_job is not None:
                 require(retained_job.get("kind") == "warm_job" and session is not None
                         and retained_job["session_operation_id"] == session["operation"], "warm_job_authority_changed")
@@ -595,7 +611,7 @@ class Supervisor:
         if active["phase"] not in ("exported", "published"):
             return
         with self.provider.lock():
-            op = self.controller().state["operations"].get(active["id"])
+            op = self.controller().find_operation(active["id"])
             if op is None:
                 require(active["phase"] != "published", "published_warm_job_missing")
                 return
@@ -683,9 +699,7 @@ class Supervisor:
                 return self.status()
             if not acquire:
                 return self.status()
-            if session is None:
-                with self.provider.lock():
-                    self.controller().check_session_capacity()
+            self.check_acquisition_capacity()
             for stage in ("SNARK", "FRI"):
                 if self.claim_external(stage):
                     self.state["idle_since"] = None

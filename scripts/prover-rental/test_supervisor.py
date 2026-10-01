@@ -13,6 +13,7 @@ import urllib.parse
 import job
 import pool
 import runpod
+import sentry
 import supervisor
 import warm_worker
 from test_adapter import payload, release, storage_plan, successful_native
@@ -181,6 +182,134 @@ class SupervisorTests(unittest.TestCase):
                 self.assertEqual(self.instance.state["active"], active)
                 self.assertEqual(len(self.picks()), count)
                 self.assertEqual(self.count("create"), 0)
+
+    def test_pre_authority_crashes_resume_once_with_same_identity_and_refreshed_deadline(self):
+        for window in ("before_directory", "empty_directory", "partial_temporary", "complete_temporary"):
+            with self.subTest(window=window):
+                self.store = supervisor.initialize(self.root / window, self.config)
+                self.native = Native()
+                self.native.ready.add(("child", "SNARK"))
+                self.reload()
+                source = self.instance.source("child")
+                def interrupted_authority(path, value):
+                    self.assertEqual(path.name, "authority.json")
+                    if window.endswith("temporary"):
+                        raw = job.encode(value)
+                        if window == "partial_temporary":
+                            raw = raw[:len(raw) // 2]
+                        job.write_new(path.with_name(".authority.json." + "a" * 32 + ".tmp"), raw)
+                    raise KeyboardInterrupt()
+                interrupted = patch.object(sentry, "pick", side_effect=KeyboardInterrupt()) if window == "before_directory" \
+                    else patch.object(sentry, "atomic_json", side_effect=interrupted_authority)
+                with interrupted, self.assertRaises(KeyboardInterrupt):
+                    self.instance.pick_native(source, "SNARK")
+                original = copy.deepcopy(self.instance.state["active"])
+                self.assertEqual(self.picks(), [])
+                self.advance(source["native_lease_seconds"] + 1)
+                self.reload()
+                request = self.native.request
+                def checked_request(url, *args, **kwargs):
+                    if "/pick?" in url:
+                        retained = runpod.read_private_json(self.store.root / "supervisor.json")["active"]
+                        self.assertEqual(retained["id"], original["id"])
+                        self.assertEqual(retained["job_id"], original["job_id"])
+                        self.assertEqual(retained["picked_at"], self.now)
+                        self.assertEqual(retained["deadline"], self.now + source["native_lease_seconds"])
+                        self.assertEqual(runpod.read_private_json(self.instance.directory() / "authority.json")["status"],
+                                         "pick_uncertain")
+                    return request(url, *args, **kwargs)
+                with patch.object(self.native, "request", side_effect=checked_request):
+                    self.assertTrue(self.instance.recover_native_pick(self.instance.state["active"]))
+                self.assertEqual(len(self.picks()), 1)
+                self.assertEqual(self.instance.state["active"]["phase"], "ready")
+                self.instance.compute_window(self.instance.state["active"])
+                self.assertFalse(any(self.instance.directory().glob("*.tmp")))
+                self.assertEqual(self.count("create"), 0)
+
+    def test_uncertain_authority_before_release_never_restarts_or_refreshes_deadline(self):
+        source = self.instance.source("child")
+        with patch.object(sentry.job, "write_new", side_effect=KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+            self.instance.pick_native(source, "SNARK")
+        original = copy.deepcopy(self.instance.state["active"])
+        authority = (self.instance.directory() / "authority.json").read_bytes()
+        self.assertEqual(self.picks(), [])
+        self.advance(source["native_lease_seconds"] + 1)
+        with self.assertRaises(FileNotFoundError):
+            self.reload().recover_native_pick(self.instance.state["active"])
+        self.assertEqual(self.instance.state["active"], original)
+        self.assertEqual((self.instance.directory() / "authority.json").read_bytes(), authority)
+        self.assertEqual(self.picks(), [])
+
+    def test_completed_wire_recovery_preserves_original_deadline_without_another_pick(self):
+        source = self.instance.source("child")
+        self.native.ready.add(("child", "SNARK"))
+        with patch.object(sentry, "recover_pick", side_effect=KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+            self.instance.pick_native(source, "SNARK")
+        original = copy.deepcopy(self.instance.state["active"])
+        wire = (self.instance.directory() / "picked-wire.json").read_bytes()
+        self.advance(source["native_lease_seconds"] + 1)
+        self.reload()
+        self.assertTrue(self.instance.recover_native_pick(self.instance.state["active"]))
+        self.assertEqual(len(self.picks()), 1)
+        for field in ("id", "job_id", "picked_at", "deadline"):
+            self.assertEqual(self.instance.state["active"][field], original[field])
+        self.assertEqual((self.instance.directory() / "picked-wire.json").read_bytes(), wire)
+        self.assertEqual(self.instance.state["active"]["phase"], "ready")
+
+    def test_unknown_pre_authority_artifact_blocks_recovery_without_changes(self):
+        source = self.instance.source("child")
+        with patch.object(sentry, "atomic_json", side_effect=KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+            self.instance.pick_native(source, "SNARK")
+        original = copy.deepcopy(self.instance.state["active"])
+        directory = self.instance.directory()
+        job.write_new(directory / "picked-wire.json", b"retained-response")
+        self.advance(source["native_lease_seconds"] + 1)
+        with self.assertRaisesRegex(runpod.Error, "pick_initialization_contains_unknown_artifacts"):
+            self.reload().recover_native_pick(self.instance.state["active"])
+        self.assertEqual(self.instance.state["active"], original)
+        self.assertEqual((directory / "picked-wire.json").read_bytes(), b"retained-response")
+        self.assertEqual(self.picks(), [])
+
+    def test_pre_authority_recovery_checks_capacity_before_request_or_deadline_refresh(self):
+        source = self.instance.source("child")
+        with patch.object(sentry, "atomic_json", side_effect=KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+            self.instance.pick_native(source, "SNARK")
+        original = copy.deepcopy(self.instance.state["active"])
+        self.advance(source["native_lease_seconds"] + 1)
+        with patch.object(runpod.Controller, "check_session_capacity", side_effect=runpod.Error("state_admission_capacity")), \
+                self.assertRaisesRegex(runpod.Error, "state_admission_capacity"):
+            self.reload().recover_native_pick(self.instance.state["active"])
+        self.assertEqual(self.instance.state["active"], original)
+        self.assertEqual(self.picks(), [])
+
+    def test_warm_capacity_is_checked_before_next_native_pick(self):
+        self.native.ready.add(("child", "FRI"))
+        self.instance.tick()
+        self.complete()
+        calls = len(self.picks())
+        self.native.ready.add(("child", "FRI"))
+        with patch.object(runpod.Controller, "check_warm_job_capacity", side_effect=runpod.Error("state_admission_capacity")), \
+                self.assertRaisesRegex(runpod.Error, "state_admission_capacity"):
+            self.instance.tick()
+        self.assertEqual(len(self.picks()), calls)
+        self.assertIsNone(self.instance.state["active"])
+        self.assertEqual(self.count("create"), 1)
+
+    def test_warm_capacity_is_checked_before_next_external_claim(self):
+        external = self.external_pool()
+        self.enqueue_external_fri(external, "dispatcher:first", 1300)
+        self.instance.tick()
+        self.complete()
+        pending = self.enqueue_external_fri(external, "dispatcher:next", 1300)
+        with patch.object(runpod.Controller, "check_warm_job_capacity", side_effect=runpod.Error("state_admission_capacity")), \
+                self.assertRaisesRegex(runpod.Error, "state_admission_capacity"):
+            self.instance.tick()
+        op = pool.Pool(external.store, clock=lambda: self.now).operation(pending)
+        self.assertEqual(op["status"], "ready")
+        self.assertNotIn("warm_owner", op)
+        self.assertIsNone(self.instance.state["active"])
+        self.assertEqual(self.count("create"), 1)
+        self.assertEqual(self.picks(), [])
 
     def external_pool(self, service=None):
         config = {"schema_version": 1, "limits": {"max_inflight_jobs": 4, "lifetime_budget_usd": "20"}, "lanes": {}}
@@ -698,6 +827,36 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(self.instance.state["completed_jobs"], 1)
         self.assertEqual(self.count("create"), 1)
         self.assertEqual(len(self.seen), 1)
+
+    def test_archived_finished_job_recovers_before_supervisor_completion_save(self):
+        self.native.ready.add(("child", "FRI"))
+        self.instance.tick()
+        self.assertEqual(self.pod().tick(), "completed")
+        active = copy.deepcopy(self.instance.state["active"])
+        finish = runpod.Controller.finish_warm_job
+        def crash_after_archive(controller, *args):
+            finish(controller, *args)
+            raise KeyboardInterrupt()
+        with patch.object(runpod.Controller, "finish_warm_job", crash_after_archive), self.assertRaises(KeyboardInterrupt):
+            self.instance.tick()
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(self.instance.state["completed_jobs"], 0)
+        self.assertNotIn(active["id"], self.provider.load()["operations"])
+        archived = runpod.Controller(self.provider, self.api, clock=lambda: self.now).find_operation(active["id"])
+        self.assertEqual(archived["disposition"], "accepted")
+        proof = (self.provider.root / (active["id"] + ".proof")).read_bytes()
+        submission = (self.instance.directory() / "submission.json").read_bytes()
+        picks = len(self.picks())
+        self.reload().tick()
+        self.assertIsNone(self.instance.state["active"])
+        self.assertEqual(self.instance.state["completed_jobs"], 1)
+        self.assertEqual(self.instance.state["session"]["jobs"], 1)
+        self.assertEqual(len(self.picks()), picks)
+        self.assertEqual(len([call for call in self.native.calls if "/submit?" in call[0]]), 1)
+        self.assertEqual(self.count("create"), 1)
+        self.assertEqual(len(self.seen), 1)
+        self.assertEqual((self.provider.root / (active["id"] + ".proof")).read_bytes(), proof)
+        self.assertEqual((self.instance.directory(active) / "submission.json").read_bytes(), submission)
 
     def test_ten_busy_workers_share_real_queue_without_prefetch_or_extra_provider_capacity(self):
         state = self.provider.load()

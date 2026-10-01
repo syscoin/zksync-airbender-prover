@@ -245,6 +245,70 @@ class HandoffTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             sentry.pick(directory, "https://trusted.node/", job.encode(release("FRI")), "duty", "secret", node)
 
+    def test_pre_request_initialization_resets_only_matching_private_leftovers(self):
+        raw = job.encode(release("SNARK"))
+        _, intent = sentry.pick_intent("https://trusted.node/", raw, "frozen", (12, 13))
+        encoded = job.encode(intent)
+        for index, contents in enumerate((None, b"", encoded[:len(encoded) // 2], encoded)):
+            with self.subTest(contents=contents):
+                directory = self.root / str(index)
+                sentry.private_directory(directory, create=True)
+                if contents is not None:
+                    job.write_new(directory / (".authority.json." + "a" * 32 + ".tmp"), contents)
+                if index == 3:
+                    job.write_new(directory / "release.json", raw)
+                sentry.reset_unstarted_pick(directory, "https://trusted.node/", raw, "frozen", expected_range=(12, 13))
+                self.assertFalse(directory.exists())
+                node = TrustedNode("SNARK")
+                self.assertTrue(sentry.pick(directory, "https://trusted.node/", raw, "frozen",
+                                            "secret", node, expected_range=(12, 13)))
+                self.assertEqual(len(node.calls), 1)
+
+    def test_pre_request_reset_preserves_authority_or_unsafe_leftovers(self):
+        raw = job.encode(release("FRI"))
+        _, intent = sentry.pick_intent("https://trusted.node/", raw, "frozen")
+        temporary = ".authority.json." + "a" * 32 + ".tmp"
+        cases = (("authority.json", job.encode(intent)), ("picked-wire.json", b"response"),
+                 ("payload.json", b"payload"), ("submission.json", b"submission"),
+                 (".authority.json.unknown.tmp", b""), (temporary, b"changed"),
+                 ("release.json", job.encode(release("SNARK"))))
+        for index, (name, contents) in enumerate(cases):
+            directory = self.root / ("retained-" + str(index))
+            sentry.private_directory(directory, create=True)
+            job.write_new(directory / name, contents)
+            job.write_new(directory / (".authority.json." + "b" * 32 + ".tmp"), b"")
+            before = {entry.name: entry.read_bytes() for entry in directory.iterdir()}
+            with self.subTest(name=name), self.assertRaises(runpod.Error):
+                sentry.reset_unstarted_pick(directory, "https://trusted.node/", raw, "frozen")
+            self.assertEqual(before, {entry.name: entry.read_bytes() for entry in directory.iterdir()})
+
+    def test_pre_request_reset_rejects_symlinks_hardlinks_and_public_files(self):
+        raw = job.encode(release("FRI"))
+        target = self.root / "outside.json"
+        job.write_new(target, raw)
+        for kind in ("symlink", "hardlink", "public", "directory"):
+            directory = self.root / kind
+            sentry.private_directory(directory, create=True)
+            path = directory / "release.json"
+            if kind == "symlink":
+                path.symlink_to(target)
+            elif kind == "hardlink":
+                os.link(target, path)
+            elif kind == "public":
+                job.write_new(path, raw)
+                path.chmod(0o644)
+            else:
+                path.mkdir(mode=0o700)
+            with self.subTest(kind=kind), self.assertRaisesRegex(runpod.Error, "unsafe_pick_initialization_file"):
+                sentry.reset_unstarted_pick(directory, "https://trusted.node/", raw, "frozen")
+            self.assertTrue(os.path.lexists(path))
+            self.assertEqual(target.read_bytes(), raw)
+        link = self.root / "linked-directory"
+        link.symlink_to(self.root / "symlink", target_is_directory=True)
+        with self.assertRaisesRegex(runpod.Error, "state_directory_must_be_owned_mode_0700"):
+            sentry.reset_unstarted_pick(link, "https://trusted.node/", raw, "frozen")
+        self.assertTrue(link.is_symlink())
+
     def test_pick_recovery_uses_durable_wire_without_new_request(self):
         directory = self.root / "recover"
         node = TrustedNode("FRI")

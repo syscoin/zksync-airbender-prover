@@ -31,6 +31,10 @@ API = "https://api.runpod.io/v2"
 JSON_LIMIT = 2 * 1024 * 1024
 TERMINAL = {"terminated", "refused"}
 PROVIDER_STATES = {"PROVISIONING", "STARTING", "RUNNING", "EXITED", "ERROR", "TERMINATED"}
+# JSON escapes a non-BMP URL character as two six-byte surrogate escapes. Keep
+# room for all three job URLs, both retained commands, and final local receipts.
+WARM_JOB_RESERVE = 3 * (12 * 8192 + 2) + 2 * 64 * 1024 + 64 * 1024
+FINAL_WARM_DISPOSITIONS = {"accepted", "rejected", "returned"}
 
 
 class Error(Exception):
@@ -161,8 +165,12 @@ def sync_dir(path):
         os.close(fd)
 
 
+def json_bytes(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
 def atomic_json(path, value):
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    payload = json_bytes(value)
     require(len(payload) <= JSON_LIMIT, "state_capacity_reached")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -216,6 +224,99 @@ class Store:
 
     def save(self, data):
         atomic_json(self.root / "state.json", data)
+
+    def history_directory(self, create=False):
+        directory = self.root / "history"
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            if not create:
+                return None
+            directory.mkdir(mode=0o700)
+            sync_dir(self.root)
+            info = directory.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077,
+                "history_directory_must_be_owned_mode_0700")
+        return directory
+
+    def history_json(self, name):
+        directory = self.history_directory()
+        if directory is None:
+            return None
+        try:
+            return read_private_json(directory / name)
+        except FileNotFoundError:
+            return None
+
+    def retain_history(self, name, record):
+        directory = self.history_directory(create=True)
+        destination = directory / name
+        if os.path.lexists(destination):
+            require(read_private_json(destination) == record, "immutable_history_changed")
+        else:
+            # The controller lock covers comparison and replacement. A crash leaves
+            # either the complete record or its still-authoritative inline copy.
+            atomic_json(destination, record)
+        # A prior attempt may have renamed this complete file or created history/
+        # immediately before its fsync was interrupted. Re-establish both barriers
+        # before the inline authority can be removed by a later state save.
+        sync_dir(directory)
+        sync_dir(self.root)
+
+    def archived_operation(self, operation_id, controller_id, expected=None):
+        require(isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id),
+                "invalid_operation_id")
+        record = self.history_json("operation-" + operation_id + ".json")
+        if record is None:
+            require(expected is None, "archived_operation_missing")
+            return None
+        exact_fields(record, ("schema_version", "controller_id", "operation_id", "operation_sha256", "operation"))
+        require(record["schema_version"] == 1 and record["controller_id"] == controller_id
+                and record["operation_id"] == operation_id, "archived_operation_identity_changed")
+        digest = hashlib.sha256(json_bytes(record["operation"])).hexdigest()
+        require(digest == sha256(record["operation_sha256"])
+                and (expected is None or digest == expected), "archived_operation_changed")
+        op = record["operation"]
+        require(isinstance(op, dict) and op.get("status") in TERMINAL
+                and op.get("kind") in ("warm_job", "warm_session"), "invalid_archived_operation")
+        if op["kind"] == "warm_job":
+            require(op.get("disposition") in FINAL_WARM_DISPOSITIONS and op.get("receipt") is not None
+                    and op["command"]["body"]["attempt_id"] == operation_id,
+                    "invalid_archived_warm_job")
+        return op
+
+    def archive_operation(self, operation_id, op, controller_id):
+        require(re.fullmatch(r"[0-9a-f]{32}", operation_id), "invalid_operation_id")
+        digest = hashlib.sha256(json_bytes(op)).hexdigest()
+        self.retain_history("operation-" + operation_id + ".json", {
+            "schema_version": 1, "controller_id": controller_id, "operation_id": operation_id,
+            "operation_sha256": digest, "operation": op,
+        })
+        if op["kind"] == "warm_job":
+            job_id = op["job"]["job_id"]
+            key = hashlib.sha256(job_id.encode()).hexdigest()
+            prior = self.history_json("job-" + key + ".json")
+            if prior is None:
+                self.retain_history("job-" + key + ".json", {
+                    "schema_version": 1, "controller_id": controller_id, "job_id": job_id,
+                    "operation_id": operation_id, "operation_sha256": digest,
+                })
+            else:
+                self.archived_job(job_id, controller_id)
+                self.retain_history("job-" + key + ".json", prior)
+        return digest
+
+    def archived_job(self, job_id, controller_id):
+        key = hashlib.sha256(job_id.encode()).hexdigest()
+        record = self.history_json("job-" + key + ".json")
+        if record is None:
+            return False
+        exact_fields(record, ("schema_version", "controller_id", "job_id", "operation_id", "operation_sha256"))
+        require(record["schema_version"] == 1 and record["controller_id"] == controller_id
+                and record["job_id"] == job_id, "archived_job_identity_changed")
+        op = self.archived_operation(record["operation_id"], controller_id, sha256(record["operation_sha256"]))
+        require(op["kind"] == "warm_job" and op["job"]["job_id"] == job_id, "archived_job_identity_changed")
+        return True
 
     def heartbeat(self, now):
         atomic_json(self.root / "watchdog.json", {"at": now})
@@ -349,6 +450,19 @@ def session_request_for(state, operation_id, session, deadline):
     return request
 
 
+def operation_for(state, operation_id, started_at, job=None, session=None):
+    deadline = int(started_at) + state["policy"]["limits"]["max_runtime_seconds"]
+    op = {"status": "create_uncertain", "pod_id": None, "job": job,
+          "request": (session_request_for(state, operation_id, session, deadline) if session
+                      else request_for(state, operation_id, job)), "started_at": started_at,
+          "reserved_usd": str(state["policy"]["limits"]["max_operation_usd"]), "receipt": None,
+          "cleanup_reason": None, "last_error": None, "provider_status": None}
+    if session:
+        op.update(kind="warm_session", session=session, deadline_at=deadline, jobs=[],
+                  command=None, finished_receipt=None)
+    return op
+
+
 def owned(operation, pod):
     request = operation["request"]
     require(isinstance(pod, dict), "invalid_pod")
@@ -372,11 +486,151 @@ class Controller:
         self.limits = self.policy["limits"]
 
     def save(self):
+        self.compact_history()
         self.store.save(self.state)
 
+    def find_operation(self, operation_id):
+        op = self.state["operations"].get(operation_id)
+        if op is None:
+            return self.store.archived_operation(operation_id, self.state["controller_id"])
+        if "archive_sha256" in op:
+            archived = self.store.archived_operation(operation_id, self.state["controller_id"],
+                                                     sha256(op["archive_sha256"]))
+            require(archived["kind"] == "warm_session"
+                    and all(archived[key] == op[key] for key in
+                            ("status", "pod_id", "reserved_usd", "provider_status", "receipt", "cleanup_reason", "last_error"))
+                    and archived["session"]["session_id"] == op["session"]["session_id"],
+                    "archived_session_summary_changed")
+            return archived
+        if op.get("kind") in ("warm_job", "warm_session"):
+            archived = self.store.archived_operation(operation_id, self.state["controller_id"])
+            if archived is not None:
+                self.validate_archive_successor(op, archived)
+                return archived
+        return op
+
+    def validate_archive_successor(self, inline, archived):
+        fields = ("kind", "request", "started_at", "reserved_usd", "job")
+        fields += (("session", "deadline_at", "jobs", "command") if archived["kind"] == "warm_session"
+                   else ("session_operation_id", "stage", "command"))
+        require(all(inline.get(key) == archived[key] for key in fields)
+                and inline["pod_id"] in (None, archived["pod_id"])
+                and inline["receipt"] in (None, archived["receipt"])
+                and (inline["status"] not in TERMINAL or inline["status"] == archived["status"]),
+                "archived_operation_identity_changed")
+        if archived["kind"] == "warm_job":
+            require(inline.get("disposition") in (None, archived["disposition"]), "warm_disposition_changed")
+        # A terminal archive is fsynced before the state reference. Recovery must
+        # retain that disposition even if the older inline copy predates DELETE.
+
+
     def operation(self, operation_id):
-        require(operation_id in self.state["operations"], "unknown_operation")
-        return self.state["operations"][operation_id]
+        op = self.find_operation(operation_id)
+        require(op is not None, "unknown_operation")
+        return op
+
+    def persist_archive_recovery(self, operation_id, op):
+        inline = self.state["operations"].get(operation_id)
+        if (op["status"] in TERMINAL and inline is not None and "archive_sha256" not in inline
+                and inline is not op):
+            self.save()
+
+    def has_job(self, job_id):
+        return (any((op.get("job") or {}).get("job_id") == job_id
+                    for op in self.state["operations"].values())
+                or self.store.archived_job(job_id, self.state["controller_id"]))
+
+    def compact_history(self):
+        changed = False
+        controller_id = self.state["controller_id"]
+        for operation_id, op in list(self.state["operations"].items()):
+            if "archive_sha256" in op:
+                self.find_operation(operation_id)
+                continue
+            if op.get("kind") not in ("warm_job", "warm_session"):
+                continue
+            archived = self.store.archived_operation(operation_id, controller_id)
+            if archived is not None:
+                self.validate_archive_successor(op, archived)
+                self.state["operations"][operation_id] = archived
+                changed = True
+        for operation_id, op in list(self.state["operations"].items()):
+            if (op.get("kind") == "warm_job" and op["status"] in TERMINAL
+                    and op.get("disposition") in FINAL_WARM_DISPOSITIONS and op.get("receipt") is not None):
+                self.store.archive_operation(operation_id, op, controller_id)
+                del self.state["operations"][operation_id]
+                changed = True
+        for operation_id, op in list(self.state["operations"].items()):
+            if (op.get("kind") != "warm_session" or op["status"] not in TERMINAL
+                    or "archive_sha256" in op):
+                continue
+            # A failed or unresolved attempt remains inline with its full session.
+            if any(identifier in self.state["operations"] for identifier in op["jobs"]):
+                continue
+            for identifier in op["jobs"]:
+                archived = self.operation(identifier)
+                require(archived["kind"] == "warm_job" and archived["session_operation_id"] == operation_id,
+                        "archived_session_job_changed")
+            digest = self.store.archive_operation(operation_id, op, controller_id)
+            self.state["operations"][operation_id] = {
+                **{key: op[key] for key in ("kind", "status", "pod_id", "reserved_usd", "provider_status",
+                                           "receipt", "cleanup_reason", "last_error")},
+                "session": {"session_id": op["session"]["session_id"]}, "archive_sha256": digest,
+            }
+            changed = True
+        return changed
+
+    def require_serialized_capacity(self, state, extra=0):
+        reserve = extra
+        for operation_id, op in state["operations"].items():
+            if op["status"] in TERMINAL:
+                continue
+            # Retain the larger of each current field and its completion bound.
+            # Native/provider errors recorded here are fixed diagnostic codes;
+            # no response body or presigned URL enters these two error fields.
+            fields = {"status": "delete_uncertain", "pod_id": "x" * 128,
+                      "provider_status": "PROVISIONING", "cleanup_reason": "x" * 256,
+                      "last_error": "x" * 256,
+                      "receipt": {"sha256": "0" * 64, "bytes": self.limits["max_artifact_bytes"],
+                                  "proof_verified": False}}
+            if op.get("kind") == "warm_session":
+                fields["command"] = {"schema_version": 1, "body": {
+                    "session_id": op["session"]["session_id"], "operation_id": operation_id,
+                    "sequence": 1001, "kind": "stop", "expires_at": op["deadline_at"],
+                    "previous_command_sha256": "0" * 64}, "mac": "0" * 64}
+                fields["finished_receipt"] = {"schema_version": 1, "body": {
+                    "session_id": op["session"]["session_id"], "operation_id": operation_id,
+                    "sequence": 1001, "command_sha256": "0" * 64,
+                    "completed_jobs": 1000, "status": "finished"}, "mac": "0" * 64}
+            elif op.get("kind") == "warm_job":
+                fields["disposition"] = "accepted"
+            completion = {**op, **{key: value for key, value in fields.items()
+                                   if len(json_bytes(value)) > len(json_bytes(op.get(key)))}}
+            reserve += len(json_bytes(completion)) - len(json_bytes(op))
+        require(len(json_bytes(state)) + reserve <= JSON_LIMIT, "state_admission_capacity")
+
+    def require_state_capacity(self, new_session=False):
+        if self.compact_history():
+            self.store.save(self.state)
+        prospective = self.state
+        if new_session:
+            # Admission precedes the native lease and hence the presigned session
+            # URLs. Reserve their maximal JSON representation using this policy.
+            longest_url = "https://x/" + "\U0010ffff" * (8192 - len("https://x/"))
+            session = {"schema_version": 1, "session_id": "0" * 32, "session_key": "0" * 64,
+                       "mailbox_url": longest_url, "finished_manifest_url": longest_url,
+                       "finished_manifest_put_url": longest_url, "poll_interval_seconds": 60}
+            prospective = {**self.state, "operations": {**self.state["operations"],
+                "0" * 32: operation_for(self.state, "0" * 32, self.clock(), session=session)}}
+        # This pre-lease check is advisory across supervisors. Launch/publication
+        # checks the actual candidate again under the same provider-state lock;
+        # a late refusal retains the existing lease for retry, never a fresh pick.
+        self.require_serialized_capacity(prospective, extra=WARM_JOB_RESERVE)
+
+    def check_warm_job_capacity(self, operation_id):
+        self.warm_session(operation_id)
+        self.require_state_capacity()
+        return True
 
     def launch(self, job, latest_create_at=None):
         validate_job(job)
@@ -391,12 +645,14 @@ class Controller:
         warm.validate_session(session)
         for operation_id, op in self.state["operations"].items():
             if op.get("kind") == "warm_session" and op["session"]["session_id"] == session["session_id"]:
-                require(op["session"] == session, "session_id_reused_with_different_configuration")
+                require(self.operation(operation_id)["session"] == session, "session_id_reused_with_different_configuration")
                 return operation_id
         return self._launch(session=session, latest_create_at=latest_create_at)
 
-    def check_session_capacity(self):
+    def check_session_capacity(self, admission=True):
         self.store.require_watchdog(self.clock(), self.limits["watchdog_stale_seconds"])
+        if self.compact_history():
+            self.store.save(self.state)
         ops = [op for op in self.state["operations"].values() if op.get("kind") != "warm_job"]
         require(sum(op["status"] not in TERMINAL for op in ops) < self.limits["max_concurrent_pods"],
                 "concurrency_limit")
@@ -404,10 +660,12 @@ class Controller:
         require(reserved + money(self.limits["max_operation_usd"]) <= money(self.limits["lifetime_budget_usd"]),
                 "lifetime_budget_limit")
         require(len(ops) < 1000, "operation_count_limit")
+        if admission:
+            self.require_state_capacity(new_session=True)
         return True
 
     def _launch(self, job=None, session=None, latest_create_at=None):
-        self.check_session_capacity()
+        self.check_session_capacity(admission=False)
         catalog = self.api.catalog(self.policy["gpu"]["id"])
         require(isinstance(catalog, dict) and isinstance(catalog.get("price"), dict), "invalid_catalog")
         require(catalog.get("id") == self.policy["gpu"]["id"] and catalog.get("manufacturer") == "NVIDIA",
@@ -419,15 +677,8 @@ class Controller:
         require(latest_create_at is None or self.clock() < latest_create_at, "compute_window_elapsed_before_create")
         operation_id = uuid.uuid4().hex
         started_at = self.clock()
-        deadline = int(started_at) + self.limits["max_runtime_seconds"]
-        op = {"status": "create_uncertain", "pod_id": None, "job": job,
-              "request": (session_request_for(self.state, operation_id, session, deadline) if session
-                          else request_for(self.state, operation_id, job)), "started_at": started_at,
-              "reserved_usd": str(self.limits["max_operation_usd"]), "receipt": None,
-              "cleanup_reason": None, "last_error": None, "provider_status": None}
-        if session:
-            op.update(kind="warm_session", session=session, deadline_at=deadline, jobs=[],
-                      command=None, finished_receipt=None)
+        op = operation_for(self.state, operation_id, started_at, job=job, session=session)
+        self.require_serialized_capacity({**self.state, "operations": {**self.state["operations"], operation_id: op}})
         self.state["operations"][operation_id] = op
         # No documented provider idempotency key exists. Persist intent before the sole POST;
         # a crash anywhere after this boundary may only discover the allocation by reconciliation.
@@ -471,8 +722,8 @@ class Controller:
         expires = op["deadline_at"] if expires_at is None else expires_at
         positive_int(runtime)
         positive_int(expires)
-        if attempt_id in self.state["operations"]:
-            prior = self.operation(attempt_id)
+        prior = self.find_operation(attempt_id)
+        if prior is not None:
             require(prior.get("kind") == "warm_job" and prior["session_operation_id"] == operation_id
                     and prior["job"] == job and prior["stage"] == stage
                     and prior["command"]["body"]["runtime_limit_seconds"] == runtime
@@ -488,6 +739,8 @@ class Controller:
         require(runtime <= self.limits["max_runtime_seconds"] and self.clock() < expires <= op["deadline_at"],
                 "warm_job_outside_session_deadline")
         self.store.require_watchdog(self.clock(), self.limits["watchdog_stale_seconds"])
+        if self.compact_history():
+            self.store.save(self.state)
         body = {"session_id": op["session"]["session_id"], "operation_id": operation_id,
                 "sequence": len(op["jobs"]) + 1, "kind": "job", "expires_at": expires,
                 "previous_command_sha256": warm.command_hash(op["command"]) if op["command"] else None,
@@ -495,15 +748,18 @@ class Controller:
                 "manifest_url": job["manifest_url"], "manifest_sha256": job["manifest_sha256"],
                 "runtime_limit_seconds": runtime}
         command = warm.sign_command(body, op["session"]["session_key"])
-        self.state["operations"][attempt_id] = {
+        job_operation = {
             "kind": "warm_job", "session_operation_id": operation_id, "stage": stage,
             "status": "active", "pod_id": op["pod_id"], "job": job, "request": None,
             "started_at": self.clock(), "reserved_usd": "0", "receipt": None,
             "cleanup_reason": None, "last_error": None, "provider_status": None,
             "command": command, "disposition": None,
         }
-        op["jobs"].append(attempt_id)
-        op["command"] = command
+        parent = {**op, "jobs": [*op["jobs"], attempt_id], "command": command}
+        self.require_serialized_capacity({**self.state, "operations": {
+            **self.state["operations"], attempt_id: job_operation, operation_id: parent}})
+        self.state["operations"][attempt_id] = job_operation
+        op.update(jobs=parent["jobs"], command=command)
         # The trusted supervisor publishes this exact envelope only after the intent is durable.
         self.save()
         return attempt_id
@@ -601,6 +857,7 @@ class Controller:
 
     def reconcile(self, operation_id):
         op = self.operation(operation_id)
+        self.persist_archive_recovery(operation_id, op)
         if op.get("kind") == "warm_job":
             return
         if op["status"] in TERMINAL:
@@ -677,6 +934,7 @@ class Controller:
 
     def terminate(self, operation_id, failure=False):
         op = self.operation(operation_id)
+        self.persist_archive_recovery(operation_id, op)
         require(op.get("kind") != "warm_job", "terminate_warm_session_instead")
         if op["status"] in TERMINAL:
             return
@@ -709,6 +967,7 @@ class Controller:
 
     def tick(self, operation_id):
         op = self.operation(operation_id)
+        self.persist_archive_recovery(operation_id, op)
         if op.get("kind") == "warm_job":
             return
         if op["status"] in TERMINAL:
@@ -853,7 +1112,7 @@ def main(argv=None):
                 controller.terminate(operation_id, failure=args.failure_cleanup)
             else:
                 getattr(controller, args.command)(operation_id)
-        print(json.dumps({operation_id: public_status(controller.state)[operation_id]}, indent=2))
+        print(json.dumps(public_status({"operations": {operation_id: controller.operation(operation_id)}}), indent=2))
 
 
 if __name__ == "__main__":

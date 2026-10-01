@@ -1,5 +1,6 @@
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -115,6 +116,192 @@ class WarmSessionTests(unittest.TestCase):
         self.assertTrue(self.controller().collect(attempt_id))
         self.controller().verify_receipt(attempt_id)
         self.controller().finish_warm_job(attempt_id, "accepted")
+
+    def retained_job(self, number, url_length=8192, unicode_results=False):
+        attempt_id = format(number, "032x")
+        selected = {"schema_version": 1, "job_id": "retained-" + attempt_id,
+                    "manifest_sha256": "7" * 64}
+        for field in ("manifest_url", "result_manifest_url", "result_artifact_url"):
+            prefix = f"https://storage.example/{attempt_id}/{field}?token="
+            character = "\U0010ffff" if unicode_results and field != "manifest_url" else "x"
+            selected[field] = prefix + character * (url_length - len(prefix))
+        return attempt_id, selected
+
+    def collect_retained(self, attempt_id, selected):
+        artifact = b"exact retained proof"
+        self.storage.objects[self.storage.key(selected["result_artifact_url"])] = artifact
+        self.storage.objects[self.storage.key(selected["result_manifest_url"])] = job.encode({
+            "schema_version": 1, "operation_id": attempt_id, "job_id": selected["job_id"],
+            "manifest_sha256": selected["manifest_sha256"], "artifact_sha256": hashlib.sha256(artifact).hexdigest(),
+            "artifact_bytes": len(artifact),
+        })
+        self.assertTrue(self.controller().collect(attempt_id))
+
+    def close_retained_session(self, operation_id, descriptor):
+        controller = self.controller()
+        command = controller.stop_session(operation_id)
+        count = len(controller.operation(operation_id)["jobs"])
+        envelope = warm.sign_finished({"session_id": descriptor["session_id"], "operation_id": operation_id,
+                                       "sequence": count + 1, "command_sha256": warm.command_hash(command),
+                                       "completed_jobs": count, "status": "finished"}, descriptor["session_key"])
+        self.storage.objects[self.storage.key(descriptor["finished_manifest_url"])] = warm.encode(envelope)
+        self.controller().tick(operation_id)
+        self.assertEqual(self.controller().operation(operation_id)["status"], "terminated")
+
+    def test_long_url_history_stays_bounded_within_and_across_sessions(self):
+        state = self.store.load()
+        state["policy"]["limits"]["lifetime_budget_usd"] = "6"
+        self.store.save(state)
+        first = None
+        for session_number in range(3):
+            descriptor = {**session(), "session_id": format(10000 + session_number, "032x")}
+            operation_id = self.controller().launch_session(descriptor)
+            for offset in range(80):
+                attempt_id, selected = self.retained_job(1 + session_number * 80 + offset)
+                self.controller().publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120)
+                self.collect_retained(attempt_id, selected)
+                self.controller().finish_warm_job(attempt_id, "returned")
+                self.assertNotIn(attempt_id, self.store.load()["operations"])
+                self.assertLess((self.store.root / "state.json").stat().st_size, 24 * 1024)
+                if first is None:
+                    first = operation_id, attempt_id, selected, descriptor
+            self.close_retained_session(operation_id, descriptor)
+        operation_id, attempt_id, selected, descriptor = first
+        controller = self.controller()
+        self.assertEqual(controller.operation(attempt_id)["job"], selected)
+        controller.verify_receipt(attempt_id)
+        self.assertTrue(controller.has_job(selected["job_id"]))
+        self.assertEqual(controller.launch_session(descriptor), operation_id)
+        self.assertEqual(controller.publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120), attempt_id)
+        with self.assertRaisesRegex(runpod.Error, "warm_attempt_reused"):
+            controller.publish_warm_job(operation_id, {**selected, "manifest_sha256": "8" * 64}, "FRI", attempt_id, 60, 1120)
+        self.assertEqual(self.count("create"), 3)
+        self.assertEqual(self.count("delete"), 3)
+        self.assertEqual(sum(float(op["reserved_usd"]) for op in self.store.load()["operations"].values()), 6)
+        self.assertTrue(all("archive_sha256" in op and "jobs" not in op
+                            for op in self.store.load()["operations"].values()))
+        with self.assertRaisesRegex(runpod.Error, "lifetime_budget_limit"):
+            controller.launch_session({**session(), "session_id": "9" * 32})
+
+    def test_legacy_near_cap_history_compacts_before_failure_cleanup(self):
+        operation_id = self.launch()
+        with patch.object(runpod.Controller, "compact_history", return_value=False):
+            number = 1
+            while len(runpod.json_bytes(self.store.load())) + 40000 < runpod.JSON_LIMIT:
+                attempt_id, selected = self.retained_job(number, url_length=7000)
+                self.controller().publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120)
+                self.collect_retained(attempt_id, selected)
+                self.controller().finish_warm_job(attempt_id, "returned")
+                number += 1
+        state = self.store.load()
+        remaining = runpod.JSON_LIMIT - 1 - len(runpod.json_bytes(state))
+        for op in state["operations"].values():
+            if op.get("kind") != "warm_job":
+                continue
+            for field in ("result_manifest_url", "result_artifact_url"):
+                added = min(remaining, 8192 - len(op["job"][field]))
+                op["job"][field] += "x" * added
+                remaining -= added
+        self.assertEqual(remaining, 0)
+        self.store.save(state)
+        before = (self.store.root / "state.json").read_bytes()
+        self.assertEqual(len(before), runpod.JSON_LIMIT - 1)
+        controller = self.controller()
+        self.assertEqual((self.store.root / "state.json").read_bytes(), before)
+        self.assertFalse((self.store.root / "history").exists())
+        controller.terminate(operation_id, failure=True)
+        self.assertEqual(self.count("delete"), 1)
+        self.assertEqual(self.controller().operation(operation_id)["status"], "terminated")
+        self.assertLess((self.store.root / "state.json").stat().st_size, 4096)
+        self.assertEqual(self.store.load()["operations"][operation_id]["reserved_usd"], "2")
+
+    def test_final_job_archive_recovers_crash_before_inline_state_replacement(self):
+        operation_id = self.launch()
+        attempt_id, selected = self.retained_job(1)
+        self.controller().publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120)
+        self.collect_retained(attempt_id, selected)
+        with patch.object(self.store, "save", side_effect=OSError("state replace interrupted")):
+            with self.assertRaises(OSError):
+                self.controller().finish_warm_job(attempt_id, "accepted")
+        self.assertEqual(self.store.load()["operations"][attempt_id]["status"], "active")
+        self.assertEqual(self.controller().find_operation(attempt_id)["disposition"], "accepted")
+        self.controller().finish_warm_job(attempt_id, "accepted")
+        self.assertNotIn(attempt_id, self.store.load()["operations"])
+        self.assertEqual(self.controller().publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120), attempt_id)
+        with self.assertRaisesRegex(runpod.Error, "warm_disposition_changed"):
+            self.controller().finish_warm_job(attempt_id, "failed")
+        self.assertEqual(self.count("create"), 1)
+
+    def test_terminal_parent_archive_wins_over_stale_inline_provider_status(self):
+        operation_id = self.launch()
+        attempt_id, selected = self.retained_job(1)
+        self.controller().publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120)
+        self.collect_retained(attempt_id, selected)
+        self.controller().finish_warm_job(attempt_id, "returned")
+        self.api.pods["pod_1"]["status"] = "TERMINATED"
+        with patch.object(self.store, "save", side_effect=OSError("state replace interrupted")):
+            with self.assertRaises(OSError):
+                self.controller().reconcile(operation_id)
+        self.assertEqual(self.store.load()["operations"][operation_id]["status"], "active")
+        self.api.pods.clear()
+        previous_gets = self.count("get")
+        controller = self.controller()
+        controller.tick(operation_id)
+        self.assertEqual(self.count("get"), previous_gets)
+        self.assertEqual(controller.operation(operation_id)["provider_status"], "TERMINATED")
+        self.assertEqual(controller.launch_session(session()), operation_id)
+        controller.check_session_capacity()
+        self.assertIn("archive_sha256", self.store.load()["operations"][operation_id])
+        self.assertEqual(self.store.load()["operations"][operation_id]["reserved_usd"], "2")
+        self.assertEqual(self.count("create"), 1)
+        self.assertEqual(self.count("delete"), 0)
+
+    def test_late_capacity_refusal_keeps_candidate_unpublished_and_retryable(self):
+        operation_id = self.launch()
+        self.controller().check_warm_job_capacity(operation_id)
+        attempt_id, selected = self.retained_job(1, unicode_results=True)
+        before = (self.store.root / "state.json").read_bytes()
+        controller = self.controller()
+        with patch.object(runpod, "JSON_LIMIT", len(before) + 2048):
+            with self.assertRaisesRegex(runpod.Error, "state_admission_capacity"):
+                controller.publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120)
+        self.assertEqual((self.store.root / "state.json").read_bytes(), before)
+        self.assertNotIn(attempt_id, controller.state["operations"])
+        self.assertEqual(controller.operation(operation_id)["jobs"], [])
+        self.assertIsNone(controller.warm_session(operation_id)["command"])
+        controller.publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120)
+        published_size = (self.store.root / "state.json").stat().st_size
+        with patch.object(runpod, "JSON_LIMIT", published_size + 2048):
+            self.collect_retained(attempt_id, selected)
+            self.controller().finish_warm_job(attempt_id, "returned")
+            self.close_retained_session(operation_id, session())
+        self.assertEqual(self.count("create"), 1)
+        self.assertEqual(self.count("delete"), 1)
+
+    def test_archived_identity_tampering_and_failed_attempts_fail_closed(self):
+        operation_id = self.launch()
+        attempt_id, selected = self.retained_job(1)
+        self.controller().publish_warm_job(operation_id, selected, "FRI", attempt_id, 60, 1120)
+        self.collect_retained(attempt_id, selected)
+        self.controller().finish_warm_job(attempt_id, "returned")
+        path = self.store.root / "history" / ("operation-" + attempt_id + ".json")
+        record = runpod.read_private_json(path)
+        record["operation"]["job"]["manifest_sha256"] = "b" * 64
+        runpod.atomic_json(path, record)
+        with self.assertRaisesRegex(runpod.Error, "archived_operation_changed"):
+            self.controller().operation(attempt_id)
+        with self.assertRaisesRegex(runpod.Error, "archived_operation_changed"):
+            self.controller().has_job(selected["job_id"])
+        record["operation"]["job"]["manifest_sha256"] = "7" * 64
+        runpod.atomic_json(path, record)
+        next_id, next_job = self.retained_job(2)
+        self.controller().publish_warm_job(operation_id, next_job, "FRI", next_id, 60, 1120)
+        self.controller().finish_warm_job(next_id, "failed")
+        self.controller().tick(operation_id)
+        state = self.store.load()
+        self.assertIn(next_id, state["operations"])
+        self.assertNotIn("archive_sha256", state["operations"][operation_id])
+        self.assertFalse((self.store.root / "history" / ("operation-" + next_id + ".json")).exists())
 
     def test_multiple_fri_snark_jobs_reuse_one_pod_and_standard_receipts(self):
         operation_id = self.launch()

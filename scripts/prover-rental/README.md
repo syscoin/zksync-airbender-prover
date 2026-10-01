@@ -87,6 +87,22 @@ supervisor finish its current job and stop its session; keep the watchdog runnin
 until provider deletion is confirmed. Stopping a local process alone does not
 delete a remote pod.
 
+The provider's live journal stays below 2 MiB. Once a warm job has a final native
+or external disposition and a durable result receipt, its full record moves to
+private `history/` files. Completed sessions retain a compact reference and their
+original budget charge. Archive records, job lookup indexes, and proof files must
+stay with the provider directory: recovery and exact retry checks still use them.
+Active, uncertain, and failed attempts remain in the live journal.
+
+Admission checks reserve room for pending completion and cleanup records. Long
+URLs or unresolved work can therefore limit capacity before the configured pod
+maximum is reached. A late capacity refusal preserves the owned job for retry;
+it does not acquire a replacement lease. Let existing work finish or drain while
+the watchdog continues. Do not raise the journal cap or delete history to bypass
+the guard. Older journals with completed warm history compact during authorized
+writes; a full journal containing only unresolved records is preserved and rejects
+new admission rather than discarding authority.
+
 After a failed session, `expire-active` previews retirement of a known, expired
 lease. Its `--execute` form requires the owned provider session to be stopped,
 preserves the job files and archived authority, and never retires an unknown pick

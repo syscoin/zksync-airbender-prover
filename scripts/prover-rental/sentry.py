@@ -6,6 +6,7 @@ import base64
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import urllib.parse
 
@@ -54,10 +55,9 @@ def validate_expected_range(stage, expected_range):
     return {"from_batch_number": first, "to_batch_number": last}
 
 
-def pick(directory, endpoint, release_bytes, job_id, auth, network, *, expected_range=None):
+def pick_intent(endpoint, release_bytes, job_id, expected_range=None):
     release = job.release_identity(release_bytes)
     expected_bounds = validate_expected_range(release["stage"], expected_range)
-    directory = private_directory(directory, create=True)
     require(isinstance(job_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", job_id),
             "invalid_job_id")
     endpoint = endpoint_url(endpoint)
@@ -68,6 +68,41 @@ def pick(directory, endpoint, release_bytes, job_id, auth, network, *, expected_
     if expected_bounds is not None:
         # A restart must retain the requested range before any lease can be acquired.
         authority["expected_bounds"] = expected_bounds
+    return release, authority
+
+
+def reset_unstarted_pick(directory, endpoint, release_bytes, job_id, *, expected_range=None):
+    _, authority = pick_intent(endpoint, release_bytes, job_id, expected_range)
+    directory = Path(directory)
+    require(directory.is_absolute(), "job_directory_must_be_absolute")
+    if not os.path.lexists(directory):
+        return
+    private_directory(directory)
+    entries = list(directory.iterdir())
+    expected = job.encode(authority)
+    for entry in entries:
+        temporary = re.fullmatch(r"\.authority\.json\.[0-9a-f]{32}\.tmp", entry.name)
+        require(entry.name == "release.json" or temporary is not None,
+                "pick_initialization_contains_unknown_artifacts")
+        info = entry.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and not info.st_mode & 0o077 and info.st_nlink == 1, "unsafe_pick_initialization_file")
+        raw = job.read_file(entry, job.MAX_MANIFEST, private=True)
+        require(raw == release_bytes if entry.name == "release.json" else expected.startswith(raw),
+                "pick_initialization_changed")
+    # No request can precede the durable authority rename. Validate every leftover before
+    # removing any; a response, capability, or unfamiliar file must keep the reservation blocked.
+    for entry in entries:
+        entry.unlink()
+    directory.rmdir()
+    sync_dir(directory.parent)
+
+
+def pick(directory, endpoint, release_bytes, job_id, auth, network, *, expected_range=None):
+    release, authority = pick_intent(endpoint, release_bytes, job_id, expected_range)
+    endpoint = authority["endpoint"]
+    expected_bounds = authority.get("expected_bounds")
+    directory = private_directory(directory, create=True)
     atomic_json(directory / "authority.json", authority)
     job.write_new(directory / "release.json", release_bytes)
     parameters = {"id": "rental-sentry", "supported_vk_hashes": release["vk_hash"],
