@@ -26,15 +26,21 @@ RUN bellman_repository="$(jq -er '.bellman_cuda.repository' docker/prover-build-
     cmake --build /opt/bellman-cuda/build
 
 COPY docker/fetch-verified-crs.sh /usr/local/bin/fetch-verified-crs
-RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs /setup_compact.key
+RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs gpu-snark /setup_compact.key
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
+COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py ./scripts/
+COPY patches/airbender-cuda-device-diagnostics.patch patches/airbender-cuda-device-diagnostics.json patches/airbender.Cargo.lock ./patches/
 
 # SYSCOIN: Match the locked GPU combined-service build published by release-bins.yml.
-RUN BELLMAN_CUDA_DIR=/opt/bellman-cuda cargo build --locked --profile release \
-    --target x86_64-unknown-linux-gnu --bin zksync-os-prover-service --features gpu
+RUN BELLMAN_CUDA_DIR=/opt/bellman-cuda \
+    AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/combined-airbender-build-inputs.json \
+    bash scripts/cargo-with-patched-airbender.sh docker-combined -- \
+    cargo build --locked --profile release \
+    --target x86_64-unknown-linux-gnu -p zksync_os_prover_service \
+    --bin zksync-os-prover-service --features gpu
 
 FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04@sha256:1287141d283b8f06f45681b56a48a85791398c615888b1f96bfb9fc981392d98
 
@@ -47,6 +53,7 @@ COPY --from=builder /setup_compact.key /setup_compact.key
 COPY --from=builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
 COPY --from=builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
 COPY --from=builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync-os-prover-service /usr/bin/zksync-airbender-prover
+COPY --from=builder /usr/src/zksync/combined-airbender-build-inputs.json /usr/share/syscoin-prover/airbender-build-inputs.json
 
 RUN chmod 0755 /entrypoint.sh
 

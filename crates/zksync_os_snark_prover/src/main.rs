@@ -7,7 +7,9 @@ use clap::{Parser, Subcommand};
 use protocol_version::SupportedProtocolVersions;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
-use zksync_os_snark_prover::{init_tracing, metrics, run_linking_fri_snark};
+use zksync_os_snark_prover::{
+    init_tracing, metrics, run_linking_fri_snark_with_cache_policy, WrapperCachePolicy,
+};
 use zksync_sequencer_proof_client::{
     parse_configured_sequencer_endpoints, resume_pending_submissions, wait_for_operator_shutdown,
     OpaqueSequencerEndpoint, SequencerProofClient,
@@ -56,12 +58,19 @@ enum Commands {
         /// `multiblock_batch.bin`.
         #[arg(long)]
         app_bin_path: Option<PathBuf>,
+        /// Host wrapper caches: warm (default), or cpu-cold to release caches between jobs.
+        /// cpu-cold is rejected by GPU builds and repeats setup to reduce live host memory.
+        #[arg(long, value_enum, default_value_t = WrapperCachePolicy::Warm)]
+        wrapper_cache_policy: WrapperCachePolicy,
         /// Number of iterations before exiting. Only successfully generated proofs count. If not specified, runs indefinitely
         #[arg(long)]
         iterations: Option<usize>,
         /// SYSCOIN: Dedicated default metrics port for parallel GPU workers.
         #[arg(long, default_value = "3126")]
         prometheus_port: u16,
+        /// Metrics listener IP. Use 127.0.0.1 for private SSH-forwarded monitoring.
+        #[arg(long, default_value = "0.0.0.0")]
+        prometheus_bind_address: std::net::IpAddr,
         /// SYSCOIN: Total HTTP request backstop in seconds. Connect timeout is 5s and
         /// read-inactivity timeout is 10s.
         #[arg(long, default_value = "600")]
@@ -163,14 +172,18 @@ fn main() -> anyhow::Result<()> {
                     trusted_setup_file,
                 },
             app_bin_path,
+            wrapper_cache_policy,
             iterations,
             prometheus_port,
+            prometheus_bind_address,
             request_timeout_secs,
             disable_zk,
             prover_name,
             submission_dir,
             allow_insecure_sequencer_http,
         } => {
+            // Fail before clients, replay, metrics or any wrapper initialization.
+            wrapper_cache_policy.validate_supported()?;
             // SYSCOIN: Keep secret-backed endpoint values opaque to Clap's diagnostic renderer;
             // semantic validation runs here with index-only context.
             let sequencer_urls = parse_configured_sequencer_endpoints(sequencer_urls)?;
@@ -209,7 +222,12 @@ fn main() -> anyhow::Result<()> {
                 .context("failed to create sequencer proof clients")?;
 
                 let mut metrics_handle = tokio::spawn(async move {
-                    metrics::start_metrics_exporter(prometheus_port, metrics_stop_receiver).await
+                    metrics::start_metrics_exporter_at(
+                        prometheus_bind_address,
+                        prometheus_port,
+                        metrics_stop_receiver,
+                    )
+                    .await
                 });
                 // SYSCOIN: Keep one signal listener alive across replay and proving so no Ctrl-C
                 // can fall into a registration gap between the two phases.
@@ -248,7 +266,7 @@ fn main() -> anyhow::Result<()> {
                 // rather than polling it on the OS-sized main thread via `block_on`.
                 let runtime_handle = tokio::runtime::Handle::current();
                 let mut prover_task = tokio::task::spawn_blocking(move || {
-                    runtime_handle.block_on(run_linking_fri_snark(
+                    runtime_handle.block_on(run_linking_fri_snark_with_cache_policy(
                         clients,
                         output_dir,
                         trusted_setup_file,
@@ -256,6 +274,7 @@ fn main() -> anyhow::Result<()> {
                         iterations,
                         disable_zk,
                         stop_receiver,
+                        wrapper_cache_policy,
                     ))
                 });
 
@@ -295,6 +314,87 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory as _;
+
+    #[test]
+    fn wrapper_cache_policy_is_typed_opt_in() {
+        let base = [
+            "snark-prover",
+            "run-prover",
+            "--output-dir",
+            "out",
+            "--trusted-setup-file",
+            "setup.key",
+            "--submission-dir",
+            "/tmp/snark-test-spool",
+        ];
+        let Commands::RunProver {
+            wrapper_cache_policy,
+            ..
+        } = Cli::try_parse_from(base).unwrap().command;
+        assert_eq!(wrapper_cache_policy, WrapperCachePolicy::Warm);
+        let Commands::RunProver {
+            wrapper_cache_policy,
+            ..
+        } = Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--wrapper-cache-policy", "cpu-cold"]),
+        )
+        .unwrap()
+        .command;
+        assert_eq!(wrapper_cache_policy, WrapperCachePolicy::CpuCold);
+        assert!(Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--wrapper-cache-policy", "unbounded"])
+        )
+        .is_err());
+        assert_eq!(
+            wrapper_cache_policy.validate_supported().is_ok(),
+            !cfg!(feature = "gpu") && cfg!(unix)
+        );
+    }
+
+    #[test]
+    fn prometheus_bind_address_is_explicit_and_preserves_default() {
+        let base = [
+            "snark-prover",
+            "run-prover",
+            "--output-dir",
+            "out",
+            "--trusted-setup-file",
+            "setup.key",
+            "--submission-dir",
+            "/tmp/snark-test-spool",
+        ];
+        let defaults = Cli::try_parse_from(base).unwrap();
+        let Commands::RunProver {
+            prometheus_bind_address,
+            prometheus_port,
+            ..
+        } = defaults.command;
+        assert_eq!(prometheus_bind_address.to_string(), "0.0.0.0");
+        assert_eq!(prometheus_port, 3126);
+        for ip in ["127.0.0.1", "::1"] {
+            let cli = Cli::try_parse_from(base.into_iter().chain([
+                "--prometheus-bind-address",
+                ip,
+                "--prometheus-port",
+                "43126",
+            ]))
+            .unwrap();
+            let Commands::RunProver {
+                prometheus_bind_address,
+                prometheus_port,
+                ..
+            } = cli.command;
+            assert_eq!(prometheus_bind_address.to_string(), ip);
+            assert_eq!(prometheus_port, 43126);
+        }
+        assert!(Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--prometheus-bind-address", "not-an-ip"])
+        )
+        .is_err());
+    }
 
     // SYSCOIN: A shutdown that arrives during retained-envelope replay signals the HTTP retry,
     // awaits its durable exit, and returns false so the wrapper/spawn path cannot run.

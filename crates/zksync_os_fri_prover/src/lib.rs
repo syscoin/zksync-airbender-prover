@@ -69,6 +69,10 @@ pub struct Args {
     #[arg(long, default_value = "3125")]
     pub prometheus_port: u16,
 
+    /// Metrics listener IP. Use 127.0.0.1 for private SSH-forwarded monitoring.
+    #[arg(long, default_value = "0.0.0.0")]
+    pub prometheus_bind_address: std::net::IpAddr,
+
     /// SYSCOIN: Total HTTP request backstop in seconds. Connect timeout is 5s and
     /// read-inactivity timeout is 10s.
     #[arg(long, default_value = "600")]
@@ -476,6 +480,30 @@ pub async fn run_inner(
 mod cli_security_tests {
     use super::*;
     use clap::CommandFactory as _;
+
+    #[test]
+    fn prometheus_bind_address_is_explicit_and_preserves_default() {
+        let base = ["fri-prover", "--submission-dir", "/tmp/fri-test-spool"];
+        let defaults = Args::try_parse_from(base).unwrap();
+        assert_eq!(defaults.prometheus_bind_address.to_string(), "0.0.0.0");
+        assert_eq!(defaults.prometheus_port, 3125);
+        for ip in ["127.0.0.1", "::1"] {
+            let args = Args::try_parse_from(base.into_iter().chain([
+                "--prometheus-bind-address",
+                ip,
+                "--prometheus-port",
+                "43125",
+            ]))
+            .unwrap();
+            assert_eq!(args.prometheus_bind_address.to_string(), ip);
+            assert_eq!(args.prometheus_port, 43125);
+        }
+        assert!(Args::try_parse_from(
+            base.into_iter()
+                .chain(["--prometheus-bind-address", "not-an-ip"])
+        )
+        .is_err());
+    }
 
     // SYSCOIN: Secret-backed endpoint text is opaque to Clap and hidden from generated help.
     #[test]

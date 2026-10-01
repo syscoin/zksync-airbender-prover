@@ -112,7 +112,11 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .release-tooling
-          sparse-checkout: .github/actions/runner-setup
+          sparse-checkout: |
+            .github/actions/runner-setup
+            .github/scripts
+            scripts
+            patches
           fetch-depth: '1'
           persist-credentials: false
 
@@ -152,17 +156,54 @@ jobs:
           cmake --build bellman-cuda/build/
 
       - name: Build
+        id: build
         env:
           BELLMAN_CUDA_DIR: ${{ github.workspace }}/bellman-cuda
+          PROVER_SOURCE_DIR: ${{ github.workspace }}
+          TOOLING_SHA: ${{ job.workflow_sha }}
         run: |
           # SYSCOIN: Publish the canonical production topology from the same pinned source: GPU
           # FRI workers, a CPU-only dedicated SNARK worker, and the optional combined GPU service.
-          cargo build --locked --profile "${RELEASE_PROFILE}" \
-            --target "${{ matrix.target }}" --bin "${ZKSYNC_OS_PROVER_BIN}" --features gpu
-          cargo build --locked --profile "${RELEASE_PROFILE}" \
-            --target "${{ matrix.target }}" --bin "${ZKSYNC_OS_FRI_PROVER_BIN}" --features gpu
-          cargo build --locked --profile "${RELEASE_PROFILE}" \
-            --target "${{ matrix.target }}" --bin "${ZKSYNC_OS_SNARK_PROVER_BIN}" --no-default-features
+          # Scope packages as well as binaries so workspace feature unification cannot pull the
+          # SNARK GPU backend into the standalone FRI role.
+          [[ "$(git -C .release-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .release-tooling status --porcelain --untracked-files=all)" ]]
+          # Bind the selected lock to the verified release commit, not a dirty runner file.
+          [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
+          AIRBENDER_BUILD_ATTESTATION="${PWD}/combined-airbender-build-inputs.json" \
+            bash .release-tooling/scripts/cargo-with-patched-airbender.sh release-combined -- \
+            cargo build --locked --profile "${RELEASE_PROFILE}" \
+            --target "${{ matrix.target }}" -p zksync_os_prover_service \
+            --bin "${ZKSYNC_OS_PROVER_BIN}" --features gpu
+          AIRBENDER_BUILD_ATTESTATION="${PWD}/fri-airbender-build-inputs.json" \
+            bash .release-tooling/scripts/cargo-with-patched-airbender.sh release-fri -- \
+            cargo build --locked --profile "${RELEASE_PROFILE}" \
+            --target "${{ matrix.target }}" -p zksync_os_fri_prover \
+            --bin "${ZKSYNC_OS_FRI_PROVER_BIN}" --features gpu
+          AIRBENDER_BUILD_ATTESTATION="${PWD}/snark-airbender-build-inputs.json" \
+            bash .release-tooling/scripts/cargo-with-patched-airbender.sh release-snark -- \
+            cargo build --locked --profile "${RELEASE_PROFILE}" \
+            --target "${{ matrix.target }}" -p zksync_os_snark_prover \
+            --bin "${ZKSYNC_OS_SNARK_PROVER_BIN}" --no-default-features
+          # SYSCOIN: Successful role records accompany the binaries and are bound into the
+          # archive attestation; compatible older source tags use these exact tooling pins.
+          [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
+          airbender_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
+            .release-tooling/patches/airbender-cuda-device-diagnostics.json --source-lock Cargo.lock)"
+          for role in combined fri snark; do
+            jq -e --argjson expected "${airbender_pins}" --arg role "release-${role}" \
+              '.cargo_exit_code == 0 and .inputs_reverified == true and .label == $role
+               and .pins == $expected.pins and .selected_lock == $expected.selected_lock
+               and .application_inputs_sha256["Cargo.lock"] == $expected.selected_lock.canonical_lock_sha256' \
+              "${role}-airbender-build-inputs.json" >/dev/null
+          done
+          airbender_records="$(jq -cn \
+            --arg combined "$(sha256sum combined-airbender-build-inputs.json | awk '{print $1}')" \
+            --arg fri "$(sha256sum fri-airbender-build-inputs.json | awk '{print $1}')" \
+            --arg snark "$(sha256sum snark-airbender-build-inputs.json | awk '{print $1}')" \
+            '{combined: {sha256: $combined}, fri: {sha256: $fri}, snark: {sha256: $snark}}')"
+          echo "airbender_pins=${airbender_pins}" >> "${GITHUB_OUTPUT}"
+          echo "airbender_records=${airbender_records}" >> "${GITHUB_OUTPUT}"
 
       - name: Prepare tarballs
         run: |
@@ -171,11 +212,11 @@ jobs:
           mv "./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_FRI_PROVER_BIN}" "./${ZKSYNC_OS_FRI_PROVER_BIN}"
           mv "./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_SNARK_PROVER_BIN}" "./${ZKSYNC_OS_SNARK_PROVER_BIN}"
           tar -czf "${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-gpu.tar.gz" \
-              "${ZKSYNC_OS_PROVER_BIN}"
+              "${ZKSYNC_OS_PROVER_BIN}" combined-airbender-build-inputs.json
           tar -czf "${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-gpu.tar.gz" \
-              "${ZKSYNC_OS_FRI_PROVER_BIN}"
+              "${ZKSYNC_OS_FRI_PROVER_BIN}" fri-airbender-build-inputs.json
           tar -czf "${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-cpu.tar.gz" \
-              "${ZKSYNC_OS_SNARK_PROVER_BIN}"
+              "${ZKSYNC_OS_SNARK_PROVER_BIN}" snark-airbender-build-inputs.json
 
       - name: Generate GitHub build provenance predicate
         id: build-provenance
@@ -189,6 +230,10 @@ jobs:
           BASE_PROVENANCE_TYPE: ${{ steps.build-provenance.outputs.predicate-type }}
           ATTEST_RELEASE_TAG: ${{ inputs.tag }}
           ATTEST_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          TOOLING_REPOSITORY: ${{ job.workflow_repository }}
+          TOOLING_SHA: ${{ job.workflow_sha }}
+          AIRBENDER_PINS: ${{ steps.build.outputs.airbender_pins }}
+          AIRBENDER_RECORDS: ${{ steps.build.outputs.airbender_records }}
         run: |
           # SYSCOIN: The stock predicate binds the builder invocation. Add the validated tag source
           # as a distinct resolved dependency so a manual old-tag rebuild remains honest.
@@ -199,6 +244,10 @@ jobs:
           jq -e \
             --arg source_uri "git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@refs/tags/${ATTEST_RELEASE_TAG}" \
             --arg source_sha "${ATTEST_RELEASE_SOURCE_SHA}" \
+            --arg tooling_uri "git+${GITHUB_SERVER_URL}/${TOOLING_REPOSITORY}@${TOOLING_SHA}" \
+            --arg tooling_sha "${TOOLING_SHA}" \
+            --argjson airbender "${AIRBENDER_PINS}" \
+            --argjson airbender_records "${AIRBENDER_RECORDS}" \
             '
               if .buildDefinition.buildType != "https://actions.github.io/buildtypes/workflow/v1"
                   or (.buildDefinition.externalParameters.workflow | type) != "object"
@@ -217,6 +266,18 @@ jobs:
                   else
                     . + [{uri: $source_uri, digest: {gitCommit: $source_sha}}]
                   end
+              | .buildDefinition.resolvedDependencies += [
+                  {uri: $tooling_uri, digest: {gitCommit: $tooling_sha}},
+                  {uri: ("git+" + $airbender.pins.upstream_url), digest: {gitCommit: $airbender.pins.upstream_commit}},
+                  {uri: ($tooling_uri + "/patches/airbender-cuda-device-diagnostics.json"), digest: {sha256: $airbender.manifest_sha256}},
+                  {uri: ($tooling_uri + "/patches/" + $airbender.pins.patch_file), digest: {sha256: $airbender.pins.patch_sha256}},
+                  {uri: ($tooling_uri + "/patches/" + $airbender.pins.overlay_lock_file), digest: {sha256: $airbender.pins.overlay_lock_sha256}},
+                  {uri: ($source_uri + "/Cargo.lock"), digest: {sha256: $airbender.selected_lock.canonical_lock_sha256}},
+                  {uri: "syscoin:generated-lock:airbender-source-identity-only-v1", digest: {sha256: $airbender.selected_lock.overlay_lock_sha256}}
+                ]
+              | .buildDefinition.internalParameters.syscoinAirbenderBuild = {
+                  inputs: $airbender, roleInputRecords: $airbender_records, cargoLocked: true
+                }
             ' <<< "${BASE_PROVENANCE}" > "${RUNNER_TEMP}/release-provenance.json"
 
       - name: Binaries attestation

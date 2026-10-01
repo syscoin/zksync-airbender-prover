@@ -16,9 +16,15 @@ pub async fn main() -> anyhow::Result<()> {
     let metrics_stop_receiver = stop_receiver.clone();
 
     let prometheus_port = args.prometheus_port;
+    let prometheus_bind_address = args.prometheus_bind_address;
 
     let metrics_handle = tokio::spawn(async move {
-        metrics::start_metrics_exporter(prometheus_port, metrics_stop_receiver).await
+        metrics::start_metrics_exporter_at(
+            prometheus_bind_address,
+            prometheus_port,
+            metrics_stop_receiver,
+        )
+        .await
     });
 
     // SYSCOIN: Retain and await the in-flight prover future across Ctrl-C instead of dropping it.

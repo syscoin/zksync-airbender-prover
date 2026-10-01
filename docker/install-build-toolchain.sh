@@ -6,7 +6,8 @@ set -eu
 
 apt-get update
 apt-get install -y --no-install-recommends \
-    build-essential ca-certificates clang curl gcc g++ git jq libclang-dev libssl-dev openssl pkg-config
+    build-essential ca-certificates clang curl gcc g++ git jq libclang-dev libssl-dev openssl pkg-config \
+    python3 python3-tomli
 rm -rf /var/lib/apt/lists/*
 
 pins='/usr/src/zksync/docker/prover-build-pins.json'

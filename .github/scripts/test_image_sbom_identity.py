@@ -1,10 +1,13 @@
 """SYSCOIN: Offline regressions for image-matrix identity and SBOM evidence binding."""
 
 import copy
+import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
@@ -15,6 +18,10 @@ SPEC = importlib.util.spec_from_file_location("image_sbom_identity", SCRIPT)
 identity = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(identity)
 ROOT = SCRIPT.parents[2]
+LOCK_TEST_SPEC = importlib.util.spec_from_file_location(
+    "lock_fixture", SCRIPT.with_name("test_patched_airbender_build.py"))
+LOCK_FIXTURE = importlib.util.module_from_spec(LOCK_TEST_SPEC)
+LOCK_TEST_SPEC.loader.exec_module(LOCK_FIXTURE)
 
 
 class ImageIdentityTests(unittest.TestCase):
@@ -180,6 +187,108 @@ class ImageIdentityTests(unittest.TestCase):
         self.assertEqual(context["run_attempt"], "2")
         with self.assertRaisesRegex(ValueError, "newer than"):
             identity.build_identity({**self.env, "BUILD_RUN_ATTEMPT": "3"})
+
+    def test_airbender_pins_bind_exact_manifest_patch_and_overlay(self):
+        manifest = ROOT / "patches/airbender-cuda-device-diagnostics.json"
+        result = identity.airbender_build_pins(manifest)
+        self.assertEqual(result["manifest_sha256"], hashlib.sha256(manifest.read_bytes()).hexdigest())
+        self.assertEqual(result["pins"]["upstream_package_count"], 46)
+        cli_result = json.loads(self.cli("airbender-pins", str(manifest)))
+        self.assertEqual(cli_result, result)
+        record = identity.image_record(self.context, identity.COMPONENTS[0],
+                                       self.digests[identity.COMPONENTS[0]])
+        bound = identity.bind_sbom({"bomFormat": "CycloneDX", "specVersion": "1.6"}, record, result)
+        properties = {item["name"]: item["value"] for item in bound["metadata"]["properties"]}
+        self.assertEqual(json.loads(properties["io.syscoin.prover.airbender-build.inputs"]), result)
+
+    def test_airbender_changed_patch_or_overlay_fails_closed(self):
+        for filename in ("airbender-cuda-device-diagnostics.patch", "airbender.Cargo.lock"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                for original in (ROOT / "patches").iterdir():
+                    if original.is_file():
+                        shutil.copyfile(original, directory / original.name)
+                (directory / filename).write_bytes(b"changed input")
+                with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                    identity.airbender_build_pins(directory / "airbender-cuda-device-diagnostics.json")
+
+    def test_selected_parent_lock_is_bound_separately_in_cli_and_sbom(self):
+        manifest = ROOT / "patches/airbender-cuda-device-diagnostics.json"
+        lock = self.directory / "Cargo.lock"
+        lock.write_bytes(LOCK_FIXTURE.parent_lock_bytes())
+        selected = identity.airbender_build_pins(manifest, lock)
+        reference = identity.airbender_build_pins(manifest)
+        self.assertEqual(selected["pins"], reference["pins"])
+        self.assertEqual(selected["manifest_sha256"], reference["manifest_sha256"])
+        self.assertEqual(selected["selected_lock"]["canonical_lock_sha256"],
+                         hashlib.sha256(lock.read_bytes()).hexdigest())
+        self.assertNotEqual(selected["selected_lock"]["overlay_lock_sha256"],
+                            reference["pins"]["overlay_lock_sha256"])
+        self.assertEqual(json.loads(self.cli("airbender-pins", str(manifest), "--source-lock", str(lock))), selected)
+        bom = self.directory / "bom.json"
+        bom.write_text(json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.6"}))
+        result = json.loads(self.cli("bind", identity.COMPONENTS[0], self.digests[identity.COMPONENTS[0]],
+                                    str(bom), "--airbender-pins", str(manifest), "--source-lock", str(lock)))
+        value = next(item["value"] for item in result["metadata"]["properties"]
+                     if item["name"] == "io.syscoin.prover.airbender-build.inputs")
+        self.assertEqual(json.loads(value), selected)
+
+    def test_image_provenance_and_sbom_include_airbender_input_identity(self):
+        stage = (ROOT / ".github/workflows/stage-build.yaml").read_text()
+        reusable = (ROOT / ".github/workflows/sbom-analysis-reusable.yaml").read_text()
+        for workflow in (stage, (ROOT / ".github/workflows/release-bins.yml").read_text()):
+            self.assertIn("$airbender.pins.upstream_commit", workflow)
+            self.assertIn("$airbender.pins.patch_sha256", workflow)
+            self.assertIn("$airbender.pins.overlay_lock_sha256", workflow)
+            self.assertIn("$airbender.manifest_sha256", workflow)
+        self.assertIn("airbenderBuild: $airbender", stage)
+        for workflow in (stage, (ROOT / ".github/workflows/release-bins.yml").read_text()):
+            self.assertIn("$airbender.selected_lock.canonical_lock_sha256", workflow)
+            self.assertIn("$airbender.selected_lock.overlay_lock_sha256", workflow)
+            self.assertIn('uri: "syscoin:generated-lock:airbender-source-identity-only-v1"', workflow)
+        self.assertIn("--airbender-pins .sbom-tooling/patches/airbender-cuda-device-diagnostics.json", reusable)
+        self.assertIn("--source-lock .sbom-image-source/Cargo.lock", reusable)
+        self.assertIn('"$(git -C .sbom-image-source rev-parse HEAD)" == "${SOURCE_SHA}"', reusable)
+        self.assertIn("            airbender-build-pins.json", reusable)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is required")
+    def test_actual_release_provenance_filter_binds_role_records(self):
+        # Exercise the checked-in jq expression, without claiming a real build or signing.
+        workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
+        step = workflow.split("      - name: Bind release source into provenance\n", 1)[1]
+        expression = re.search(r"\n            '\n(.*?)\n            ' <<<", step, re.S).group(1)
+        lock = self.directory / "Cargo.lock"
+        lock.write_bytes(LOCK_FIXTURE.parent_lock_bytes())
+        pins = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json", lock)
+        records = {role: {"sha256": str(index) * 64}
+                   for index, role in enumerate(("combined", "fri", "snark"), 1)}
+        source_uri = "git+https://example.invalid/source@refs/tags/fixture"
+        args = ["jq", "-ce", "--arg", "source_uri", source_uri,
+                "--arg", "source_sha", "a" * 40, "--arg", "tooling_uri", "git+https://example.invalid/tooling",
+                "--arg", "tooling_sha", "b" * 40, "--argjson", "airbender", json.dumps(pins),
+                "--argjson", "airbender_records", json.dumps(records), expression]
+        base = {"buildDefinition": {"buildType": "https://actions.github.io/buildtypes/workflow/v1",
+                                   "externalParameters": {"workflow": {}}, "internalParameters": {},
+                                   "resolvedDependencies": []},
+                "runDetails": {"builder": {"id": "offline-test"}}}
+        result = subprocess.run(args, input=json.dumps(base), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        definition = json.loads(result.stdout)["buildDefinition"]
+        self.assertEqual(definition["internalParameters"]["syscoinAirbenderBuild"],
+                         {"inputs": pins, "roleInputRecords": records, "cargoLocked": True})
+        digests = [entry["digest"] for entry in definition["resolvedDependencies"]]
+        self.assertIn({"gitCommit": pins["pins"]["upstream_commit"]}, digests)
+        for value in (pins["manifest_sha256"], pins["pins"]["patch_sha256"], pins["pins"]["overlay_lock_sha256"]):
+            self.assertIn({"sha256": value}, digests)
+        for key in ("canonical_lock_sha256", "overlay_lock_sha256"):
+            self.assertIn({"sha256": pins["selected_lock"][key]}, digests)
+        generated = next(item for item in definition["resolvedDependencies"]
+                         if item["uri"].startswith("syscoin:generated-lock:"))
+        self.assertEqual(generated["digest"], {"sha256": pins["selected_lock"]["overlay_lock_sha256"]})
+        base["buildDefinition"]["resolvedDependencies"] = [
+            {"uri": source_uri, "digest": {"gitCommit": "c" * 40}}]
+        self.assertNotEqual(subprocess.run(args, input=json.dumps(base), capture_output=True,
+                                          text=True).returncode, 0)
 
 
 if __name__ == "__main__":

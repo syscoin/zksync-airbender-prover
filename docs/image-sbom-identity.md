@@ -21,6 +21,15 @@ remains the release label; use the SBOM identity or retained workflow artifact t
 distinguish multiple builds of that label. Existing image attestations continue to
 bind the source, tooling, guest artifacts, toolchain, and CRS inputs.
 
+The image SBOM also preserves the verified Airbender overlay manifest under
+`io.syscoin.prover.airbender-build.inputs`, including its manifest SHA-256. The
+manifest binds the upstream commit/tree, diagnostic patch, patched tree, and both
+Cargo locks; its adjacent patch and overlay lock are hash-checked before SBOM
+publication. `airbender-build-pins.json` is retained beside the SBOM. The exact
+image additionally contains `/usr/share/syscoin-prover/airbender-build-inputs.json`,
+the role's success-only source/command/compiler record. See the
+[build overlay documentation](airbender-build-overlay.md) for the proof boundary.
+
 Retries deliberately require a complete build attempt: rerun **all jobs** if a
 component build or digest collection fails. Rerunning only failed jobs can leave
 successful components' digest artifacts in an earlier attempt, which the collector

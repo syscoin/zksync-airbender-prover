@@ -1,0 +1,34 @@
+diff --git a/gpu_prover/src/execution/gpu_worker.rs b/gpu_prover/src/execution/gpu_worker.rs
+--- a/gpu_prover/src/execution/gpu_worker.rs
++++ b/gpu_prover/src/execution/gpu_worker.rs
+@@ -16,10 +16,10 @@
+ use crate::prover::tracing_data::{InitsAndTeardownsTransfer, TracingDataTransfer};
+ use crate::witness::trace_unrolled::get_aux_arguments_boundary_values;
+ use crossbeam_channel::{Receiver, Sender};
+-use era_cudart::device::get_device_properties;
++use era_cudart::device::device_get_attribute;
++use era_cudart_sys::CudaDeviceAttr;
+ use log::{debug, error, info, trace, warn};
+ use prover::definitions::AuxArgumentsBoundaryValues;
+-use std::ffi::CStr;
+ use std::mem;
+ use std::ops::Deref;
+ use std::process::exit;
+@@ -62,14 +62,9 @@
+     trace!("GPU_WORKER[{device_id}] started");
+     Precomputations::ensure_initialized();
+     set_device(device_id)?;
+-    let props = get_device_properties(device_id)?;
+-    let name = unsafe { CStr::from_ptr(props.name.as_ptr()).to_string_lossy() };
+-    info!(
+-        "GPU_WORKER[{device_id}] GPU: {} ({} SMs, {:.3} GB RAM)",
+-        name,
+-        props.multiProcessorCount,
+-        props.totalGlobalMem as f64 / 1024.0 / 1024.0 / 1024.0
+-    );
++    // Device-property structs are runtime-versioned; scalar queries keep diagnostics ABI-stable.
++    let sm_count = device_get_attribute(CudaDeviceAttr::MultiProcessorCount, device_id)?;
++    info!("GPU_WORKER[{device_id}] CUDA device with {sm_count} SMs");
+     let requested_preset = prover_context_config.gpu_memory_preset;
+     let mut context = ProverContext::new(&prover_context_config)?;
+     let preset = context.get_memory_preset();

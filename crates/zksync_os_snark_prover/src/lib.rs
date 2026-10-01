@@ -27,7 +27,10 @@ use zksync_sequencer_proof_client::{
 
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
+mod cache_policy;
 pub mod metrics;
+use cache_policy::BoundWrapperInputs;
+pub use cache_policy::WrapperCachePolicy;
 
 // SYSCOIN: Stock Airbender's canonical combine/wrap path requires a real multi-proof range.
 const MIN_FRIS_PER_REAL_SNARK: usize = 2;
@@ -50,15 +53,18 @@ pub fn init_tracing() {
 /// The FRI-proof combiner sizes its GPU pool from essentially all free VRAM. The wrapper
 /// therefore must not be resident while a range is merged, even in the standalone SNARK
 /// process. Each job constructs the wrapper after merging, then retires it back into the
-/// host-only cache below. This is the single canonical lifecycle for every deployment.
+/// host-only cache below by default. CPU-only workers may explicitly retire this cache
+/// between jobs to prevent all-phase setups overlapping CPU combination/early phases.
 pub struct WrapperSource {
     trusted_setup_file: String,
     /// App binary whose commitment is bound into the wrapper VK via `check_aux_params`.
     app_bin_path: PathBuf,
-    /// Setup caches carried between jobs. Validated construction populates this before polling;
-    /// it is temporarily `None` only while one job owns the materialized wrapper.
+    /// Setup caches carried between warm jobs; always absent between CPU-cold jobs.
     /// The cache holds no GPU memory (see [`SnarkWrapperHostCache`]).
     host_cache: Option<Box<SnarkWrapperHostCache>>,
+    cache_policy: WrapperCachePolicy,
+    bound_inputs: Option<BoundWrapperInputs>,
+    validated_vk_hash: String,
 }
 
 impl WrapperSource {
@@ -72,6 +78,32 @@ impl WrapperSource {
         app_bin_path: PathBuf,
         supported_versions: &SupportedProtocolVersions,
     ) -> anyhow::Result<Self> {
+        Self::new_validated_with_policy(
+            trusted_setup_file,
+            app_bin_path,
+            supported_versions,
+            WrapperCachePolicy::Warm,
+        )
+    }
+
+    /// Preserve the complete pre-lease app/VK gate even when CPU caches are retired.
+    pub fn new_validated_with_policy(
+        trusted_setup_file: String,
+        app_bin_path: PathBuf,
+        supported_versions: &SupportedProtocolVersions,
+        cache_policy: WrapperCachePolicy,
+    ) -> anyhow::Result<Self> {
+        cache_policy.validate_supported()?;
+        let bound_inputs = if cache_policy == WrapperCachePolicy::CpuCold {
+            let config = build_wrapper_config(trusted_setup_file.clone(), &app_bin_path)?;
+            Some(BoundWrapperInputs::capture(
+                config.bin.as_deref().expect("explicit bin"),
+                config.text.as_deref().expect("explicit text"),
+                config.trusted_setup.as_deref().expect("explicit setup"),
+            )?)
+        } else {
+            None
+        };
         let mut wrapper = create_snark_wrapper(trusted_setup_file.clone(), &app_bin_path)
             .context("initialize app-bound SNARK wrapper before queue polling")?;
         let vk_hash = format!(
@@ -84,12 +116,39 @@ impl WrapperSource {
             )
         );
         ensure_supported_wrapper_vk(&vk_hash, &app_bin_path, supported_versions)?;
+        if let Some(inputs) = &bound_inputs {
+            inputs.verify()?;
+        }
 
         Ok(Self {
             trusted_setup_file,
             app_bin_path,
-            host_cache: Some(Box::new(wrapper.into_host_cache())),
+            host_cache: cache_policy.retain(Box::new(wrapper.into_host_cache())),
+            cache_policy,
+            bound_inputs,
+            validated_vk_hash: vk_hash,
         })
+    }
+
+    fn verify_bound_inputs(&self) -> anyhow::Result<()> {
+        if let Some(inputs) = &self.bound_inputs {
+            inputs.verify()?;
+        }
+        Ok(())
+    }
+
+    fn verify_cold_wrapper_vk(
+        &self,
+        actual_vk_hash: &str,
+        leased_vk_hash: &str,
+    ) -> anyhow::Result<()> {
+        if self.cache_policy == WrapperCachePolicy::CpuCold {
+            anyhow::ensure!(
+                actual_vk_hash == self.validated_vk_hash && actual_vk_hash == leased_vk_hash,
+                "cold wrapper VK differs from the exact pre-lease validated/leased VK"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -384,8 +443,34 @@ pub async fn run_linking_fri_snark(
     app_bin_path: PathBuf,
     iterations: Option<usize>,
     disable_zk: bool,
-    mut stop_receiver: tokio::sync::watch::Receiver<bool>,
+    stop_receiver: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
+    run_linking_fri_snark_with_cache_policy(
+        clients,
+        output_dir,
+        trusted_setup_file,
+        app_bin_path,
+        iterations,
+        disable_zk,
+        stop_receiver,
+        WrapperCachePolicy::Warm,
+    )
+    .await
+}
+
+/// Opt-in standalone CPU memory policy; the existing shared entry point stays warm.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_linking_fri_snark_with_cache_policy(
+    clients: Vec<Box<dyn ProofClient + Send + Sync>>,
+    output_dir: String,
+    trusted_setup_file: String,
+    app_bin_path: PathBuf,
+    iterations: Option<usize>,
+    disable_zk: bool,
+    mut stop_receiver: tokio::sync::watch::Receiver<bool>,
+    cache_policy: WrapperCachePolicy,
+) -> anyhow::Result<()> {
+    cache_policy.validate_supported()?;
     let startup_started_at = Instant::now();
 
     tracing::info!(
@@ -403,10 +488,15 @@ pub async fn run_linking_fri_snark(
         .map_err(anyhow::Error::msg)?;
     tracing::info!("{:#?}", supported_versions);
 
-    // SYSCOIN: Authenticate the configured app-bound wrapper and retain its setup cache before
-    // the polling loop below can acquire any SNARK lease.
-    let mut wrapper_source =
-        WrapperSource::new_validated(trusted_setup_file, app_bin_path, &supported_versions)?;
+    // SYSCOIN: Authenticate the app-bound wrapper before any SNARK lease. Warm mode retains
+    // its setup cache; explicit CPU-cold mode drops it before the combiner is warmed.
+    let mut wrapper_source = WrapperSource::new_validated_with_policy(
+        trusted_setup_file,
+        app_bin_path,
+        &supported_versions,
+        cache_policy,
+    )?;
+    tracing::info!(?cache_policy, "Authenticated SNARK wrapper cache policy");
 
     // SYSCOIN: Warm the combiner eagerly, mirroring the SNARK precomputation above: setup
     // problems surface at startup and the first multi-proof job doesn't pay for it.
@@ -498,6 +588,8 @@ pub async fn run_inner(
     disable_zk: bool,
     supported_protocol_versions: &SupportedProtocolVersions,
 ) -> anyhow::Result<ProofRunOutcome> {
+    // Cold reconstruction may reread files; reject drift before obtaining new authority.
+    wrapper_source.verify_bound_inputs()?;
     tracing::debug!("Picking job from sequencer {}", client.sequencer_url());
     let snark_proof_input = match client.pick_snark_job().await {
         Ok(Some(snark_proof_input)) => {
@@ -599,9 +691,17 @@ pub async fn run_inner(
 
     // A job whose proofs fail to combine would be re-picked forever, so treat merge
     // failures as fatal rather than skipping the job.
-    let proof = stats.measure_step(SnarkStage::MergeFri, || {
+    let merged = stats.measure_step(SnarkStage::MergeFri, || {
         merge_fris(snark_proof_input, combiner)
-    })?;
+    });
+    // CPU-cold also retires the merge setup before the wrapper's phase caches
+    // and SNARK proving assembly are allocated. Rebuild lazily on the next merge.
+    let proof = wrapper_source.cache_policy.retire_combiner_after_merge(
+        merged,
+        combiner,
+        create_combiner,
+    )?;
+    wrapper_source.verify_bound_inputs()?;
 
     // SYSCOIN: Materialize the wrapper only after the merge: the merge's GPU prover sizes its
     // device pool to all free VRAM, so the wrapper's device-resident state must not
@@ -633,18 +733,57 @@ pub async fn run_inner(
 
     tracing::info!("SNARKifying proof");
     // note that the API is use_zk, so we invert the disable_zk flag
-    let snark_proof: SnarkWrapperProof = stats
+    let (mut snark_wrapper, snark_proof): (SnarkWrapper, SnarkWrapperProof) = stats
         .measure_step(SnarkStage::Snark, || {
-            snark_wrapper.prove_snark(compression_proof, !disable_zk)
+            let (mut wrapper, compression_proof) =
+                wrapper_source.cache_policy.prepare_phase_three(
+                    Ok::<_, anyhow::Error>(compression_proof),
+                    snark_wrapper,
+                    |wrapper| Ok(wrapper.compression_vk()?.clone()),
+                    |compression_vk| {
+                        // This VK is derived by the same wrapper that just verified compression,
+                        // never an external trust input. Retire phase-1/2 setups before phase 3.
+                        wrapper_source.verify_bound_inputs()?;
+                        let mut config = build_wrapper_config(
+                            wrapper_source.trusted_setup_file.clone(),
+                            &wrapper_source.app_bin_path,
+                        )?;
+                        config.compression_vk = Some(compression_vk);
+                        let mut wrapper = SnarkWrapper::new(config)?;
+                        let actual_vk_hash = format!(
+                            "{:?}",
+                            calculate_verification_key_hash(wrapper.snark_vk()?.clone())
+                        );
+                        wrapper_source.verify_cold_wrapper_vk(&actual_vk_hash, &vk_hash)?;
+                        // Final VK derivation has returned and its temporary setup assembly
+                        // is no longer owned. Reclaim free pages before actual proving.
+                        wrapper_source
+                            .cache_policy
+                            .reclaim("validated_phase_three_setup");
+                        Ok(wrapper)
+                    },
+                )?;
+            let proof = wrapper.prove_snark(compression_proof, !disable_zk)?;
+            Ok::<_, anyhow::Error>((wrapper, proof))
         })
         .map_err(|e| anyhow::anyhow!("failed to SNARKify proof: {e:?}"))?;
+    if wrapper_source.cache_policy == WrapperCachePolicy::CpuCold {
+        // This reads the freshly derived cached VK; it does not add another proving path.
+        let actual_vk_hash = format!(
+            "{:?}",
+            calculate_verification_key_hash(snark_wrapper.snark_vk()?.clone())
+        );
+        wrapper_source.verify_cold_wrapper_vk(&actual_vk_hash, &vk_hash)?;
+        wrapper_source.verify_bound_inputs()?;
+    }
     stats.observe_full();
     tracing::info!("Finished generating proof, time stats: {}", stats);
 
-    // SYSCOIN: The per-job wrapper is done with the GPU; retire it but keep its host-side setup
-    // caches so the next job's wrapper build is a cheap rehydration instead of a full
-    // re-derivation.
-    wrapper_source.host_cache = Some(Box::new(snark_wrapper.into_host_cache()));
+    // SYSCOIN: Release device state after the job. Warm mode retains host setup caches;
+    // CPU-cold mode drops them before submission or another combine.
+    wrapper_source.host_cache = wrapper_source
+        .cache_policy
+        .retain(Box::new(snark_wrapper.into_host_cache()));
 
     // SYSCOIN: Retain a pure in-memory copy for the historical operator artifact; all fallible
     // serialization and filesystem work stays after the canonical durable submission boundary.
@@ -709,6 +848,23 @@ mod tests {
     use protocol_version::SupportedProtocolVersions;
 
     use super::{ensure_real_snark_proof_count, ensure_supported_wrapper_vk};
+
+    #[test]
+    fn cold_wrapper_must_rebind_exact_startup_and_leased_vk() {
+        let source = super::WrapperSource {
+            trusted_setup_file: String::new(),
+            app_bin_path: Default::default(),
+            host_cache: None,
+            cache_policy: super::WrapperCachePolicy::CpuCold,
+            bound_inputs: None,
+            validated_vk_hash: "validated".to_owned(),
+        };
+        assert!(source
+            .verify_cold_wrapper_vk("validated", "validated")
+            .is_ok());
+        assert!(source.verify_cold_wrapper_vk("other", "validated").is_err());
+        assert!(source.verify_cold_wrapper_vk("validated", "other").is_err());
+    }
 
     #[test]
     fn real_snark_range_requires_at_least_two_fris() {

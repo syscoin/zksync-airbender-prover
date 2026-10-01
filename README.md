@@ -4,7 +4,7 @@ This repo contains the Prover Service implementation for ZKsync OS Airbender pro
 
 ## Overview
 
-This repo contains 3 crates:
+This repo contains 4 service crates:
 
 - sequencer_proof_client
 - zksync_os_fri_prover
@@ -39,18 +39,32 @@ Before starting, make sure that your **sequencer** has fake proofs disabled:
 prover_api_fake_fri_provers_enabled=false prover_api_fake_snark_provers_enabled=false
 ```
 
-Before starting, please download the trusted setup file (see info in crs/README.md).
+FRI does not need a trusted setup file. For SNARK proving, download the verified CRS for the
+chosen backend: Security100 CPU uses `crs/setup_2^25.key`, while GPU SNARK / the combined service use
+`crs/setup_compact.key`. These serializations are not interchangeable; see [CRS instructions](crs/README.md).
 
 Sample usage for commands.
 
-**This command currently requires a GPU (at least 24GB of VRAM)**
+Use `-p` to select the worker package as well as `--bin`: selecting only a binary at the
+workspace root can unify other workers' GPU features and pull the SNARK CUDA backend into FRI.
+The isolated FRI GPU worker does not require `BELLMAN_CUDA_DIR`; GPU SNARK and combined workers do.
+
+Use the checked-in Cargo wrapper shown below for worker builds and runs. It applies the pinned,
+diagnostic-only CUDA compatibility patch in disposable source copies, audits the complete lock
+overlay, and leaves artifacts under the usual `target/` directory. Python 3.11+ or Python 3 with
+the distribution's `python3-tomli` package is required. Direct `cargo` worker builds omit this fix;
+see [build overlay and provenance](docs/airbender-build-overlay.md).
+
+FRI requires a CUDA GPU. Airbender selects a bounded arena from available VRAM; the
+current V32 service validation used a 32 GiB RTX 5090. Physical 24 GiB operation is not
+qualified by that run, and arena capacity is not a guarantee of total process VRAM.
 
 ```bash
 # start FRI prover with a single sequencer
-cargo run --release --features gpu --bin zksync_os_fri_prover -- --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --submission-dir "$PWD/output/fri-submissions" --path ./output/fri_proof.json
+bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --release -p zksync_os_fri_prover --features gpu --bin zksync_os_fri_prover -- --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --submission-dir "$PWD/output/fri-submissions" --path ./output/fri_proof.json
 
 # start FRI prover with multiple sequencers
-cargo run --release --features gpu --bin zksync_os_fri_prover -- --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --submission-dir "$PWD/output/fri-submissions" --path ./output/fri_proof.json
+bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --release -p zksync_os_fri_prover --features gpu --bin zksync_os_fri_prover -- --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --submission-dir "$PWD/output/fri-submissions" --path ./output/fri_proof.json
 ```
 
 Specify optional `--iterations` argument to run FRI prover N times and then exit.
@@ -109,20 +123,22 @@ Note: the app program consists of the `.bin` file passed via `--app-bin-path` **
 + `multiblock_batch.text`). Both files must be present; the prover refuses to start otherwise.
 
 The standalone SNARK prover supports either the CPU backend (no `gpu` feature) or the GPU
-backend (`--features gpu`). The canonical Syscoin layout below uses a dedicated CPU worker so
-the three FRI GPUs stay resident. Plan 256 GiB of physical RAM for that worker (192 GiB is a
-bring-up floor), do not rely on swap, and keep the initial server lease at two hours until a
-production-size Security100 range is measured.
+backend (`--features gpu`). A dedicated CPU worker allows FRI workers to stay resident.
+For CPU-cold operation, use `--wrapper-cache-policy cpu-cold` as shown below; `warm` remains
+the compatible default. The validated serial mock workflow admitted 235 GiB of effective
+host RAM with a 32 GiB runtime reserve on a 256 GiB host, with no swap. This is a tested
+admission policy, not a guarantee for larger ranges or concurrent FRI/SNARK jobs.
+See [CPU-cold cache ownership and input checks](CPU_COLD_CACHE.md).
 
 ```bash
 # optional - increase stack size to 300M (TODO: check if this could be lower)
 ulimit -s 300000
 
 # start the canonical CPU SNARK worker with a single sequencer
-RUST_MIN_STACK=267108864 cargo run --release --no-default-features --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file 'crs/setup_2^25.key' --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 
 # start the canonical CPU SNARK worker with multiple sequencers
-RUST_MIN_STACK=267108864 cargo run --release --no-default-features --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --trusted-setup-file 'crs/setup_2^25.key' --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
@@ -141,7 +157,7 @@ generated Syscoin `multiblock_batch.bin` and `.text` artifacts.
 ```bash
 mkdir -p output/fri-gpu0 output/fri-gpu1 output/fri-gpu2
 
-CUDA_VISIBLE_DEVICES=0 cargo run --release --features gpu \
+CUDA_VISIBLE_DEVICES=0 bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --release -p zksync_os_fri_prover --features gpu \
   --bin zksync_os_fri_prover -- \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
@@ -149,7 +165,7 @@ CUDA_VISIBLE_DEVICES=0 cargo run --release --features gpu \
   --submission-dir "$PWD/output/fri-gpu0/pending-submissions" \
   --path ./output/fri-gpu0/fri_proof.json
 
-CUDA_VISIBLE_DEVICES=1 cargo run --release --features gpu \
+CUDA_VISIBLE_DEVICES=1 bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --release -p zksync_os_fri_prover --features gpu \
   --bin zksync_os_fri_prover -- \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
@@ -157,7 +173,7 @@ CUDA_VISIBLE_DEVICES=1 cargo run --release --features gpu \
   --submission-dir "$PWD/output/fri-gpu1/pending-submissions" \
   --path ./output/fri-gpu1/fri_proof.json
 
-CUDA_VISIBLE_DEVICES=2 cargo run --release --features gpu \
+CUDA_VISIBLE_DEVICES=2 bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --release -p zksync_os_fri_prover --features gpu \
   --bin zksync_os_fri_prover -- \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
@@ -167,11 +183,11 @@ CUDA_VISIBLE_DEVICES=2 cargo run --release --features gpu \
 
 # Run this process on the separate CPU server. No CUDA device is required or used.
 mkdir -p output/snark-cpu
-RUST_MIN_STACK=267108864 cargo run --release --no-default-features \
-  --bin zksync_os_snark_prover -- run-prover \
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features \
+  --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold \
   --sequencer-urls http://localhost:3124 \
   --app-bin-path ./multiblock_batch.bin \
-  --trusted-setup-file crs/setup_compact.key \
+  --trusted-setup-file 'crs/setup_2^25.key' \
   --output-dir ./output/snark-cpu \
   --submission-dir "$PWD/output/snark-cpu/pending-submissions" \
   --prover-name syscoin-snark-cpu --prometheus-port 3213
@@ -184,8 +200,10 @@ multiple compatible workers may request jobs. The CPU worker combines its assign
 performs the wrapper entirely on CPU.
 
 <!-- SYSCOIN: This section documents the downstream deployment and batching policy. -->
-The workspace uses the exact upstream Matter Labs Airbender `v0.6.0-rc.2` graph, with no Syscoin
-core fork. The sole supported lane is protocol V32 / Execution V7 / Proving V8. Every real SNARK
+The workspace retains the upstream Matter Labs Airbender `v0.6.0-rc.2` versions and proving code.
+The build wrapper applies one pinned startup-diagnostic compatibility patch, without changing
+cryptographic algorithms or guest artifacts. The sole supported lane is protocol V32 / Execution
+V7 / Proving V8. Every real SNARK
 job must therefore contain at least two compatible FRI proofs; the
 prover fails before merge or wrapper setup if the server violates that contract. Fake FRI and
 SNARK provers must be off. For the dedicated SNARK worker, batching readiness is authoritative on
@@ -204,18 +222,31 @@ aggregation hashes every input and would change the settlement public output.
 The release names belong to different repositories: `v0.6.0-rc.2` is the pinned Airbender proving
 stack, while the checked-in Syscoin guest below is based on final `zksync-os v0.4.0`.
 
-The canonical record already contains the patched Syscoin app MD5 and Security100 program
-commitment. Its VK is deliberately a zero regeneration sentinel, so the binaries fail closed
-until production keygen supplies the app-bound VK and it is updated atomically with the server
-and Era verifier constants.
+This V32 source integration binds the generated Syscoin app MD5, Security100 program
+commitment and app-bound VK `0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe`.
+The zero-VK rejection and all other production identity checks remain intact. Genuine
+FRI and CPU SNARK service proofs, native verification and canonical DA/commit/prove/execute
+receipts have been observed for an 11-batch mock frontier. Those retained results validate
+the tested source snapshot, not a newly built release commit or production deployment.
+Sustained throughput/drain, migration, asset-bridge and recovery gates remain pending,
+and server/Era/prover identities must be rolled out together before a public cutover.
 
-The checked-in guest is built reproducibly from final `zksync-os v0.4.0` (`69bc4305...`) plus
-the reviewed Syscoin patch. `multiblock_batch.bin` is 1,323,208 bytes with SHA-256
-`3eab56f061f330704fc90da98c5c3de9aef824842873fc2eb240475da5945d4a` and MD5
-`5117d5dac6dbd34b93fef54e04d0b41c`; its paired `.text` is 1,193,676 bytes with SHA-256
-`cd1c9b6679b97a47b24a71208d281b417a3cb714760fcf5b065896e6c6a84ce9`. Its Security100
+The separate GPU32 memory optimization has passed an offline final-wrapper experiment
+with the same Security100 VK. Its Bellman CUDA and wrapper overlays are **not included**
+here, and normal GPU-service/image integration and performance remain unvalidated.
+
+The guest is built reproducibly from final `zksync-os v0.4.0` (`69bc4305...`) plus
+the reviewed Syscoin patch, source tree `6935489bdbc7b1ed31e608677d1b2418b10691b5`.
+`multiblock_batch.bin` is 1,329,732 bytes with SHA-256
+`0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6` and MD5
+`1bc285f1bbde995134d483c4e75ee204`; its paired `.text` is 1,200,064 bytes with SHA-256
+`9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a`. Its Security100
 program commitment is
-`0x0d2bc42eeea78bfb08553eb9e18ee1efa4a97e199b5db62d9972e78924d28425`.
+`0x1be0999eb16ad9235efc3c320a750afa496f7ee4cb9474926decbd539eeea674`.
+Only the paired runtime `multiblock_batch.bin` and `.text` are promoted here; duplicate
+ELF/guest-artifact outputs and task-local provenance are not release inputs. Rebuilding
+this draft must produce a new build attestation; retained candidate binary attestations
+must not be relabelled with the release commit.
 
 **This one is only needed if you want to manually upload.**
 
@@ -256,7 +287,7 @@ Use `--path` to select a fresh pick file and pass that same file back with `--jo
 ulimit -s 300000
 
 # start prover service
-RUST_MIN_STACK=267108864 cargo run --release --features gpu --bin zksync_os_prover_service -- --base-url http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/combined-submissions" --max-snark-latency 3600 --max-fris-per-snark 100
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh combined-run -- cargo run --locked --release -p zksync_os_prover_service --features gpu --bin zksync-os-prover-service -- --base-url http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/combined-submissions" --max-snark-latency 3600 --max-fris-per-snark 100
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.

@@ -38,17 +38,26 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Check isolated prover build recipes
+        run: python3 -B .github/scripts/test_prover_role_recipes.py
+
+      - name: Check role-specific verified CRS downloads
+        run: python3 -B .github/scripts/test_verified_crs_roles.py
+
+      - name: Check isolated Airbender source overlay
+        run: python3 -B .github/scripts/test_patched_airbender_build.py
+
       # no-default-features is set because the code is a mix of GPU/non-GPU compliant code
       # the flag needs to be removed once we allow both version to be build and control it via env var
       # these changes will be removed once https://github.com/matter-labs/prover-subsystem-internal/issues/49 is done
       - name: Run Clippy
-        run: cargo clippy --no-default-features -- -D warnings
+        run: bash scripts/cargo-with-patched-airbender.sh ci-clippy -- cargo clippy --locked --no-default-features -- -D warnings
 
       - name: Build server
-        run: cargo build --release --no-default-features
+        run: bash scripts/cargo-with-patched-airbender.sh ci-build -- cargo build --locked --release --no-default-features
 
       - name: Run tests
-        run: cargo test --no-default-features
+        run: bash scripts/cargo-with-patched-airbender.sh ci-test -- cargo test --locked --no-default-features
 
 
   ###############################
