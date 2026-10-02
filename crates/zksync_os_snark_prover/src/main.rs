@@ -33,6 +33,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Verify a frozen native V32/V8 FRI range on CPU against trusted statements.
+    VerifyFri {
+        #[arg(long)]
+        payload: PathBuf,
+        #[arg(long)]
+        expected: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
     RunProver {
         /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
         ///
@@ -148,6 +157,24 @@ fn main() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
 
+    // Verification must remain available without initializing proving, GPU, or CRS state.
+    if let Commands::VerifyFri {
+        payload,
+        expected,
+        output,
+    } = &cli.command
+    {
+        let paths = (payload.clone(), expected.clone(), output.clone());
+        return std::thread::Builder::new()
+            .name("native-fri-verifier".into())
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                zksync_os_snark_prover::fri_verify::verify_files(&paths.0, &paths.1, &paths.2)
+            })?
+            .join()
+            .map_err(|_| anyhow::anyhow!("native FRI verifier panicked"))?;
+    }
+
     // Circuit synthesis in the SNARK wrapper chain exhausts the default stack, and the
     // main thread's size is fixed by the OS. Give every thread the runtime spawns
     // (workers and blocking threads alike) an explicit stack size: it only limits
@@ -164,6 +191,7 @@ fn main() -> anyhow::Result<()> {
         .expect("failed to build tokio runtime");
 
     match cli.command {
+        Commands::VerifyFri { .. } => unreachable!("verification returned before prover startup"),
         Commands::RunProver {
             sequencer_urls,
             setup:
@@ -330,7 +358,10 @@ mod tests {
         let Commands::RunProver {
             wrapper_cache_policy,
             ..
-        } = Cli::try_parse_from(base).unwrap().command;
+        } = Cli::try_parse_from(base).unwrap().command
+        else {
+            panic!("expected run-prover command");
+        };
         assert_eq!(wrapper_cache_policy, WrapperCachePolicy::Warm);
         let Commands::RunProver {
             wrapper_cache_policy,
@@ -340,7 +371,10 @@ mod tests {
                 .chain(["--wrapper-cache-policy", "cpu-cold"]),
         )
         .unwrap()
-        .command;
+        .command
+        else {
+            panic!("expected run-prover command");
+        };
         assert_eq!(wrapper_cache_policy, WrapperCachePolicy::CpuCold);
         assert!(Cli::try_parse_from(
             base.into_iter()
@@ -370,7 +404,10 @@ mod tests {
             prometheus_bind_address,
             prometheus_port,
             ..
-        } = defaults.command;
+        } = defaults.command
+        else {
+            panic!("expected run-prover command");
+        };
         assert_eq!(prometheus_bind_address.to_string(), "0.0.0.0");
         assert_eq!(prometheus_port, 3126);
         for ip in ["127.0.0.1", "::1"] {
@@ -385,7 +422,10 @@ mod tests {
                 prometheus_bind_address,
                 prometheus_port,
                 ..
-            } = cli.command;
+            } = cli.command
+            else {
+                panic!("expected run-prover command");
+            };
             assert_eq!(prometheus_bind_address.to_string(), ip);
             assert_eq!(prometheus_port, 43126);
         }
@@ -430,7 +470,9 @@ mod tests {
             &format!("https://:{secret}@sequencer.example/"),
         ])
         .expect("opaque endpoint must not fail inside Clap");
-        let Commands::RunProver { sequencer_urls, .. } = cli.command;
+        let Commands::RunProver { sequencer_urls, .. } = cli.command else {
+            panic!("expected run-prover command");
+        };
         let error = parse_configured_sequencer_endpoints(sequencer_urls).unwrap_err();
         assert!(!format!("{error:#}").contains(secret));
 
@@ -443,5 +485,21 @@ mod tests {
             .find(|argument| argument.get_id() == "sequencer_urls")
             .expect("sequencer_urls argument");
         assert!(endpoint.is_hide_env_values_set());
+    }
+
+    #[test]
+    fn cpu_verification_needs_no_prover_setup_or_endpoint_arguments() {
+        let cli = Cli::try_parse_from([
+            "snark-prover",
+            "verify-fri",
+            "--payload",
+            "/tmp/payload.json",
+            "--expected",
+            "/tmp/expected.json",
+            "--output",
+            "/tmp/result.json",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::VerifyFri { .. }));
     }
 }

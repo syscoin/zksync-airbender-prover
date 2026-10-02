@@ -28,6 +28,7 @@ use zksync_sequencer_proof_client::{
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
 mod cache_policy;
+pub mod fri_verify;
 pub mod metrics;
 use cache_policy::BoundWrapperInputs;
 pub use cache_policy::WrapperCachePolicy;

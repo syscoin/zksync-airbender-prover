@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "mode": "decentralized-service",
+  "provider_state_dir": "/absolute/private/provider-controller",
+  "releases": {
+    "FRI": "/absolute/reviewed/FRI-release.json",
+    "SNARK": "/absolute/reviewed/SNARK-release.json"
+  },
+  "storage": {
+    "endpoint_url": "https://REPLACE_WITH_REVIEWED_S3_ENDPOINT",
+    "region": "REPLACE_WITH_REGION",
+    "bucket": "replace-with-private-bucket",
+    "prefix": "zksys-warm",
+    "profile": null,
+    "url_ttl_seconds": 14400
+  },
+  "poll_interval_seconds": 5,
+  "idle_grace_seconds": 120,
+  "startup_reserve_seconds": 60,
+  "runtime_seconds": {
+    "FRI": null,
+    "SNARK": null
+  },
+  "sequencers": [],
+  "external_pool_dirs": ["/absolute/private/this-provers-assigned-service-pool"]
+}

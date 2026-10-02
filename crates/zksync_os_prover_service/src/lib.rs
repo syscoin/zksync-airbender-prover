@@ -2,7 +2,6 @@
 // SNARK & FRI should be libs only and expose no binaries themselves.
 // We'll need slightly more "involved" CLI args, but nothing too complex.
 use std::{
-    cell::RefCell,
     future::Future,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -14,9 +13,9 @@ use protocol_version::SupportedProtocolVersions;
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use zksync_sequencer_proof_client::{
-    ordered_client_indices, parse_configured_sequencer_endpoints, resume_pending_submissions,
-    JobQueueStage, OpaqueSequencerEndpoint, ProofRunOutcome, SequencerProofClient,
-    STATUS_PROBE_CONCURRENCY,
+    claim_first_snark_job, hinted_client_indices, ordered_client_indices,
+    parse_configured_sequencer_endpoints, resume_pending_submissions, JobQueueStage,
+    OpaqueSequencerEndpoint, ProofRunOutcome, SequencerProofClient, STATUS_PROBE_CONCURRENCY,
 };
 
 pub mod metrics;
@@ -33,9 +32,13 @@ pub struct Args {
     /// SYSCOIN: Max amount of FRI proofs per SNARK (default value - 100).
     #[arg(long, default_value = "100")]
     pub max_fris_per_snark: Option<usize>,
-    /// SYSCOIN: Max time to wait for a SNARK job after switching away from FRI proving.
+    /// SYSCOIN: Max time to wait for a SNARK job when a FRI phase limit is reached.
     #[arg(long, default_value = "60")]
     pub snark_acquire_timeout_secs: u64,
+    /// Maximum time between direct SNARK queue probes when status hints are empty or unavailable.
+    /// In-flight proofs always finish before another queue claim.
+    #[arg(long, default_value = "5")]
+    pub snark_probe_interval_secs: u64,
     /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
     ///
     /// Format: http[s]://[username:password@]host:port. Do not put credentials on argv; set
@@ -87,9 +90,75 @@ pub struct Args {
     pub disable_zk: bool,
 }
 
-// SYSCOIN: Explicit phase polling and OR-based 100-proof / one-hour controls.
 const SNARK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const FRI_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnarkProbe {
+    Hinted,
+    AllClients,
+    PhaseLimit,
+}
+
+struct PriorityScheduler {
+    phase_started: Instant,
+    fri_proof_count: usize,
+    last_full_probe: Option<Instant>,
+}
+
+impl PriorityScheduler {
+    fn new(now: Instant) -> Self {
+        Self {
+            phase_started: now,
+            fri_proof_count: 0,
+            last_full_probe: None,
+        }
+    }
+
+    fn next_probe(
+        &self,
+        now: Instant,
+        probe_interval: Duration,
+        max_snark_latency: Option<u64>,
+        max_fris_per_snark: Option<usize>,
+    ) -> SnarkProbe {
+        if fri_phase_limit_reached(
+            now.duration_since(self.phase_started),
+            self.fri_proof_count,
+            max_snark_latency,
+            max_fris_per_snark,
+        ) {
+            SnarkProbe::PhaseLimit
+        } else if self
+            .last_full_probe
+            .is_none_or(|last| now.duration_since(last) >= probe_interval)
+        {
+            SnarkProbe::AllClients
+        } else {
+            SnarkProbe::Hinted
+        }
+    }
+
+    fn probed(&mut self, now: Instant, probe: SnarkProbe) {
+        if probe != SnarkProbe::Hinted {
+            self.last_full_probe = Some(now);
+        }
+        if probe == SnarkProbe::PhaseLimit {
+            self.phase_started = now;
+            self.fri_proof_count = 0;
+        }
+    }
+
+    fn submitted_snark(&mut self, now: Instant) {
+        // A queued wrap backlog must drain before warming FRI again, including when status is
+        // unavailable. A subsequent empty native pick restarts the bounded fallback interval.
+        *self = Self::new(now);
+    }
+
+    fn submitted_fri(&mut self) {
+        self.fri_proof_count = self.fri_proof_count.saturating_add(1);
+    }
+}
 
 fn fri_phase_limit_reached(
     elapsed: Duration,
@@ -101,34 +170,34 @@ fn fri_phase_limit_reached(
         || max_fris_per_snark.is_some_and(|max| fri_proof_count >= max)
 }
 
-async fn acquire_snark_proof<F, Fut>(
+async fn acquire_snark_job<F, Fut, T>(
     snark_acquire_timeout: Duration,
     poll_interval: Duration,
     stop_receiver: &mut watch::Receiver<bool>,
     mut run_snark_attempt: F,
-) -> anyhow::Result<bool>
+) -> anyhow::Result<Option<T>>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = anyhow::Result<bool>>,
+    Fut: Future<Output = anyhow::Result<Option<T>>>,
 {
     let started_at = Instant::now();
     loop {
         if shutdown_requested(stop_receiver) {
-            return Ok(false);
+            return Ok(None);
         }
 
-        // SYSCOIN: Once an attempt starts it may own a sequencer lease. Let it finish and
-        // submit before observing shutdown so operator Ctrl-C cannot discard paid proving work.
-        if run_snark_attempt().await? {
-            return Ok(true);
+        // A pick can transfer a lease while shutdown arrives. Return that owned input for
+        // processing; cancellation is only safe before the next acquisition attempt.
+        if let Some(job) = run_snark_attempt().await? {
+            return Ok(Some(job));
         }
 
         if shutdown_requested(stop_receiver) || started_at.elapsed() >= snark_acquire_timeout {
-            return Ok(false);
+            return Ok(None);
         }
 
         if wait_for_shutdown(poll_interval, stop_receiver).await {
-            return Ok(false);
+            return Ok(None);
         }
     }
 }
@@ -160,6 +229,10 @@ pub fn init_tracing() {
 // SYSCOIN: The combined worker retains every acquired lease through durable handoff or definitive
 // manager disposition and observes one cooperative stop signal between phases.
 pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.snark_probe_interval_secs > 0,
+        "SNARK probe interval must be positive"
+    );
     // SYSCOIN: Defer semantic URL parsing until after Clap has consumed the secret-backed env
     // value, preventing malformed credentials from being echoed in a typed-parser error.
     let sequencer_urls =
@@ -207,202 +280,158 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
     // SNARK job — after the job's proofs are merged — and dropped with the job,
     // mirroring how `fri_prover` is dropped before SNARKing. Its host-side setup
     // caches are authenticated and initialized below before polling, then survive between jobs,
-    // so no leased job pays the full setup derivation. It is kept in a RefCell so the retry
-    // closure below can borrow it mutably.
+    // so no leased job pays the full setup derivation.
     // SYSCOIN: Use the dedicated worker's authenticated pre-lease initialization, then retain
     // only its host cache. Missing/corrupt setup and an app-bound VK mismatch must fail before the
     // combined service can acquire either FRI or SNARK work.
-    let wrapper_source = RefCell::new(
-        zksync_os_snark_prover::WrapperSource::new_validated(
-            args.trusted_setup_file.clone(),
-            binary_path.clone(),
-            &supported_versions,
-        )
-        .context("initialize combined-service app-bound SNARK wrapper before queue polling")?,
-    );
+    let mut wrapper_source = zksync_os_snark_prover::WrapperSource::new_validated(
+        args.trusted_setup_file.clone(),
+        binary_path.clone(),
+        &supported_versions,
+    )
+    .context("initialize combined-service app-bound SNARK wrapper before queue polling")?;
 
     // SYSCOIN: The FRI-proof combiner likewise caches its setup data (and, on `gpu` builds, the
     // GPU prover's host state — pinned host RAM only, no VRAM) across jobs and across
     // the FRI/SNARK phase alternation. Its caches build lazily on the first multi-proof
     // SNARK job rather than at startup, so a service that never sees multi-proof jobs
     // doesn't pin tens of gigabytes of host RAM for nothing.
-    let combiner = RefCell::new(zksync_os_snark_prover::create_combiner());
+    let mut combiner = zksync_os_snark_prover::create_combiner();
 
     tracing::info!("Starting Zksync OS Prover Service");
 
     let mut snark_proof_count = 0;
-    let mut snark_latency = Instant::now();
+    let mut scheduler = PriorityScheduler::new(Instant::now());
+    let mut fri_prover = None;
+    let mut fri_program_commitment = None;
+    let probe_interval = Duration::from_secs(args.snark_probe_interval_secs);
 
-    // SYSCOIN: Schedule each phase independently across every configured sequencer.
     loop {
-        // SYSCOIN: Honor shutdown before either phase can acquire a new lease.
         if shutdown_requested(&stop_receiver) {
-            tracing::info!("Shutdown requested before acquiring another prover job");
             return Ok(());
         }
+        resume_pending_submissions(&clients)
+            .await
+            .context("durable submission replay blocks new combined-service picks")?;
 
-        let mut fri_proof_count = 0;
-
-        // The FRI prover holds the program setups (and the GPU context when built with the
-        // `gpu` feature); it is recreated each cycle so the GPU is released before SNARKing.
-        let fri_prover = zksync_os_fri_prover::create_prover(&binary_path)?;
-
-        // Fail fast on a binary no supported version proves; free, from the prover's setups.
-        let program_commitment = zksync_os_fri_prover::program_commitment(&fri_prover).context(
-            "program commitment unavailable (CPU backend); cannot verify the app binary",
-        )?;
-        anyhow::ensure!(
-            supported_versions.supports_program(&program_commitment),
-            "program {binary_path:?} (commitment {program_commitment}) is not proven by any \
-             supported protocol version"
+        let probe = scheduler.next_probe(
+            Instant::now(),
+            probe_interval,
+            args.max_snark_latency,
+            args.max_fris_per_snark,
         );
-        tracing::info!("App program commitment: {program_commitment}");
-
-        // Run FRI prover until we hit one of the limits
-        tracing::info!("Running FRI prover across {} sequencer(s)", clients.len());
-        loop {
-            // SYSCOIN: Retained config/auth envelopes block the whole worker before another lease.
-            resume_pending_submissions(&clients)
-                .await
-                .context("durable submission replay blocks new combined-service picks")?;
-            let mut proof_generated = false;
-            let client_order =
-                ordered_client_indices(&clients, JobQueueStage::Fri, STATUS_PROBE_CONCURRENCY)
-                    .await;
-            for client_idx in client_order {
-                if shutdown_requested(&stop_receiver) {
-                    tracing::info!("Shutdown requested before acquiring another FRI job");
-                    return Ok(());
-                }
-                let client = &clients[client_idx];
-                match zksync_os_fri_prover::run_inner(
-                    client.as_ref(),
-                    &fri_prover,
-                    args.fri_path.clone(),
-                    &supported_versions,
-                    &program_commitment,
-                )
-                .await?
-                {
-                    ProofRunOutcome::ProofSubmitted => {
-                        proof_generated = true;
-                        break;
-                    }
-                    ProofRunOutcome::NoJob | ProofRunOutcome::EndpointUnavailable => {}
-                }
-            }
-
-            // SYSCOIN: `run_inner` owns any claimed lease until proof submission returns.
-            // Observe shutdown only after that durable handoff has completed.
-            if shutdown_requested(&stop_receiver) {
-                tracing::info!("Shutdown requested after completing the in-flight FRI attempt");
-                return Ok(());
-            }
-
-            fri_proof_count += proof_generated as usize;
-
-            if fri_phase_limit_reached(
-                snark_latency.elapsed(),
-                fri_proof_count,
-                args.max_snark_latency,
-                args.max_fris_per_snark,
-            ) {
-                tracing::info!(
-                    "FRI phase limit reached ({} proof(s), {} seconds); switching to SNARK",
-                    fri_proof_count,
-                    snark_latency.elapsed().as_secs()
-                );
-                break;
-            }
-            if !proof_generated && wait_for_shutdown(FRI_POLL_INTERVAL, &mut stop_receiver).await {
-                return Ok(());
-            }
-        }
-        // SYSCOIN: Release only FRI GPU state at the phase boundary; retained host caches let the
-        // sequential SNARK phase reuse setup without concurrent VRAM ownership.
-        drop(fri_prover);
-
-        // SYSCOIN: Never re-enter FRI acquisition after an in-flight SNARK attempt if shutdown won.
-        if shutdown_requested(&stop_receiver) {
-            return Ok(());
-        }
-
-        // Here we do exactly one SNARK proof
-        tracing::info!("Running SNARK prover across {} sequencer(s)", clients.len());
-        // Holding the RefCell guard across the await is fine here: `run` executes as a
-        // single (non-Send) future and SNARK attempts run strictly sequentially, so no
-        // concurrent borrow of the wrapper can occur.
-        let snark_attempt_stop = stop_receiver.clone();
-        #[allow(clippy::await_holding_refcell_ref)]
-        let proof_generated = acquire_snark_proof(
-            Duration::from_secs(args.snark_acquire_timeout_secs),
-            SNARK_POLL_INTERVAL,
-            &mut stop_receiver,
-            || async {
-                // SYSCOIN: Do not switch stages or acquire a SNARK lease behind a retained FRI or
-                // SNARK envelope; unresolved config responses fail the service visibly.
-                resume_pending_submissions(&clients)
-                    .await
-                    .context("durable submission replay blocks new SNARK picks")?;
-                let client_order = ordered_client_indices(
-                    &clients,
-                    JobQueueStage::Snark,
-                    STATUS_PROBE_CONCURRENCY,
-                )
-                .await;
-                for client_idx in client_order {
-                    if shutdown_requested(&snark_attempt_stop) {
-                        return Ok(false);
-                    }
-                    let client = &clients[client_idx];
-                    match zksync_os_snark_prover::run_inner(
-                        client.as_ref(),
-                        &mut wrapper_source.borrow_mut(),
-                        &mut combiner.borrow_mut(),
-                        args.output_dir.clone(),
-                        args.disable_zk,
-                        &supported_versions,
+        let claimed = if probe == SnarkProbe::PhaseLimit {
+            let claim_stop = stop_receiver.clone();
+            acquire_snark_job(
+                Duration::from_secs(args.snark_acquire_timeout_secs),
+                SNARK_POLL_INTERVAL,
+                &mut stop_receiver,
+                || async {
+                    let candidates = ordered_client_indices(
+                        &clients,
+                        JobQueueStage::Snark,
+                        STATUS_PROBE_CONCURRENCY,
                     )
-                    .await?
-                    {
-                        ProofRunOutcome::ProofSubmitted => return Ok(true),
-                        ProofRunOutcome::NoJob | ProofRunOutcome::EndpointUnavailable => {}
-                    }
-                }
-                Ok(false)
-            },
-        )
-        .await
-        // SYSCOIN: Propagate a post-lease/proof failure through normal service shutdown; panicking
-        // obscures the durable-envelope diagnostic and skips orderly auxiliary-task cleanup.
-        .context("failed to run SNARK prover")?;
-
-        if proof_generated {
-            // Increment SNARK proof counter
-            tracing::info!("Successfully run SNARK prover");
-            snark_proof_count += proof_generated as usize;
-            snark_latency = Instant::now();
+                    .await;
+                    claim_first_snark_job(&clients, &candidates, &claim_stop).await
+                },
+            )
+            .await?
         } else {
-            tracing::info!(
-                "No SNARK proof was generated within snark_acquire_timeout_secs ({} seconds), returning to FRI prover",
-                args.snark_acquire_timeout_secs
+            let candidates = if probe == SnarkProbe::AllClients {
+                ordered_client_indices(&clients, JobQueueStage::Snark, STATUS_PROBE_CONCURRENCY)
+                    .await
+            } else {
+                hinted_client_indices(&clients, JobQueueStage::Snark, STATUS_PROBE_CONCURRENCY)
+                    .await
+            };
+            claim_first_snark_job(&clients, &candidates, &stop_receiver).await?
+        };
+        scheduler.probed(Instant::now(), probe);
+
+        if let Some(claimed) = claimed {
+            // Status exposes queued FRIs, not the server's target/age/eligibility decision.
+            // Keep the expensive FRI setup until a native pick actually transfers a SNARK lease.
+            drop(fri_prover.take());
+            fri_program_commitment = None;
+            // The retained client consumes exactly the preclaimed input. Even a shutdown arriving
+            // during that pick must finish this owned attempt before another phase can start.
+            let outcome = zksync_os_snark_prover::run_inner(
+                &claimed,
+                &mut wrapper_source,
+                &mut combiner,
+                args.output_dir.clone(),
+                args.disable_zk,
+                &supported_versions,
+            )
+            .await
+            .context("failed to process the retained SNARK lease")?;
+            anyhow::ensure!(
+                outcome == ProofRunOutcome::ProofSubmitted,
+                "retained SNARK lease did not reach its proof submission path"
             );
-            snark_latency = Instant::now();
-        }
-
-        // SYSCOIN: After the acquired SNARK attempt resolves, honor shutdown before any new FRI
-        // lease can be claimed by the next phase.
-        if shutdown_requested(&stop_receiver) {
-            tracing::info!("Shutdown requested after completing the in-flight SNARK attempt");
-            return Ok(());
-        }
-
-        // Check if we've reached the iteration limit
-        if let Some(max_iterations) = args.iterations {
-            if snark_proof_count >= max_iterations {
-                tracing::info!("Reached maximum iterations ({max_iterations}), exiting...",);
+            snark_proof_count += 1;
+            scheduler.submitted_snark(Instant::now());
+            if args
+                .iterations
+                .is_some_and(|limit| snark_proof_count >= limit)
+            {
                 return Ok(());
             }
+            continue;
+        }
+
+        if shutdown_requested(&stop_receiver) {
+            return Ok(());
+        }
+        if fri_prover.is_none() {
+            let prover = zksync_os_fri_prover::create_prover(&binary_path)?;
+            let program_commitment = zksync_os_fri_prover::program_commitment(&prover).context(
+                "program commitment unavailable (CPU backend); cannot verify the app binary",
+            )?;
+            anyhow::ensure!(
+                supported_versions.supports_program(&program_commitment),
+                "program {binary_path:?} (commitment {program_commitment}) is not proven by any \
+                 supported protocol version"
+            );
+            tracing::info!("App program commitment: {program_commitment}");
+            fri_program_commitment = Some(program_commitment);
+            fri_prover = Some(prover);
+            // Initial setup can outlast the queue hint. Recheck wrapping work before acquiring
+            // the first FRI lease, without recreating this resident setup on an empty response.
+            continue;
+        }
+
+        let prover = fri_prover.as_ref().expect("FRI setup was initialized");
+        let program_commitment = fri_program_commitment
+            .as_ref()
+            .expect("resident FRI setup has its authenticated app commitment");
+        let mut proof_generated = false;
+        let client_order =
+            ordered_client_indices(&clients, JobQueueStage::Fri, STATUS_PROBE_CONCURRENCY).await;
+        for client_idx in client_order {
+            if shutdown_requested(&stop_receiver) {
+                return Ok(());
+            }
+            match zksync_os_fri_prover::run_inner(
+                clients[client_idx].as_ref(),
+                prover,
+                args.fri_path.clone(),
+                &supported_versions,
+                program_commitment,
+            )
+            .await?
+            {
+                ProofRunOutcome::ProofSubmitted => {
+                    scheduler.submitted_fri();
+                    proof_generated = true;
+                    break;
+                }
+                ProofRunOutcome::NoJob | ProofRunOutcome::EndpointUnavailable => {}
+            }
+        }
+        if !proof_generated && wait_for_shutdown(FRI_POLL_INTERVAL, &mut stop_receiver).await {
+            return Ok(());
         }
     }
 }
@@ -425,7 +454,7 @@ mod tests {
 
         let acquired = tokio::time::timeout(
             Duration::from_millis(100),
-            acquire_snark_proof(
+            acquire_snark_job(
                 Duration::from_millis(20),
                 Duration::from_millis(1),
                 &mut stop_receiver,
@@ -433,7 +462,7 @@ mod tests {
                     let attempts = attempts_for_closure.clone();
                     async move {
                         attempts.fetch_add(1, Ordering::Relaxed);
-                        Ok(false)
+                        Ok(None::<()>)
                     }
                 },
             ),
@@ -442,7 +471,7 @@ mod tests {
         .expect("snark acquisition should time out rather than loop forever")
         .expect("snark acquisition should not error");
 
-        assert!(!acquired);
+        assert!(acquired.is_none());
         assert!(attempts.load(Ordering::Relaxed) >= 1);
     }
 
@@ -452,7 +481,7 @@ mod tests {
         let attempts_for_closure = attempts.clone();
         let (_stop_sender, mut stop_receiver) = watch::channel(false);
 
-        let acquired = acquire_snark_proof(
+        let acquired = acquire_snark_job(
             Duration::from_millis(100),
             Duration::from_millis(1),
             &mut stop_receiver,
@@ -460,14 +489,14 @@ mod tests {
                 let attempts = attempts_for_closure.clone();
                 async move {
                     let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-                    Ok(attempt >= 2)
+                    Ok((attempt >= 2).then_some(()))
                 }
             },
         )
         .await
         .expect("snark acquisition should not error");
 
-        assert!(acquired);
+        assert!(acquired.is_some());
         assert!(attempts.load(Ordering::Relaxed) >= 3);
     }
 
@@ -480,7 +509,7 @@ mod tests {
         let mut started_sender = Some(started_sender);
         let mut finish_receiver = Some(finish_receiver);
 
-        let acquire = acquire_snark_proof(
+        let acquire = acquire_snark_job(
             Duration::from_secs(1),
             Duration::from_millis(1),
             &mut stop_receiver,
@@ -496,7 +525,7 @@ mod tests {
                     finish_receiver
                         .await
                         .expect("test must release the attempt");
-                    Ok(true)
+                    Ok(Some(()))
                 }
             },
         );
@@ -515,7 +544,7 @@ mod tests {
         );
 
         finish_sender.send(()).expect("attempt must still be alive");
-        assert!(acquire.await.expect("attempt must succeed"));
+        assert!(acquire.await.expect("attempt must succeed").is_some());
     }
 
     // SYSCOIN: After an in-flight attempt completes without a proof, shutdown prevents
@@ -526,7 +555,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_for_closure = attempts.clone();
 
-        let acquired = acquire_snark_proof(
+        let acquired = acquire_snark_job(
             Duration::from_secs(1),
             Duration::from_millis(1),
             &mut stop_receiver,
@@ -536,14 +565,14 @@ mod tests {
                 async move {
                     attempts.fetch_add(1, Ordering::Relaxed);
                     stop_sender.send_replace(true);
-                    Ok(false)
+                    Ok(None::<()>)
                 }
             },
         )
         .await
         .expect("shutdown should be graceful");
 
-        assert!(!acquired);
+        assert!(acquired.is_none());
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
     }
 
@@ -571,6 +600,98 @@ mod tests {
     }
 
     #[test]
+    fn wrap_priority_checks_all_clients_on_startup_and_after_each_wrap() {
+        let now = Instant::now();
+        let mut scheduler = PriorityScheduler::new(now);
+        let interval = Duration::from_secs(5);
+        assert_eq!(
+            scheduler.next_probe(now, interval, Some(3600), Some(100)),
+            SnarkProbe::AllClients
+        );
+        scheduler.probed(now, SnarkProbe::AllClients);
+        scheduler.submitted_fri();
+        assert_eq!(
+            scheduler.next_probe(now, interval, Some(3600), Some(100)),
+            SnarkProbe::Hinted
+        );
+        scheduler.submitted_snark(now);
+        assert_eq!(
+            scheduler.next_probe(now, interval, Some(3600), Some(100)),
+            SnarkProbe::AllClients,
+            "a wrapping backlog must get another native pick before FRI setup"
+        );
+        assert_eq!(scheduler.fri_proof_count, 0);
+    }
+
+    #[test]
+    fn missing_or_misleading_hints_cannot_defer_snark_for_the_full_phase() {
+        let now = Instant::now();
+        let mut scheduler = PriorityScheduler::new(now);
+        let interval = Duration::from_secs(5);
+        scheduler.probed(now, SnarkProbe::AllClients);
+        scheduler.submitted_fri();
+        scheduler.probed(now + Duration::from_secs(4), SnarkProbe::Hinted);
+        assert_eq!(
+            scheduler.next_probe(now + Duration::from_secs(4), interval, None, None),
+            SnarkProbe::Hinted
+        );
+        assert_eq!(
+            scheduler.next_probe(now + interval, interval, None, None),
+            SnarkProbe::AllClients
+        );
+        scheduler.probed(now + interval, SnarkProbe::AllClients);
+        assert_eq!(scheduler.fri_proof_count, 1);
+        assert_eq!(
+            scheduler.next_probe(now + interval, interval, Some(3600), Some(100)),
+            SnarkProbe::Hinted,
+            "an empty native probe must permit FRI work without resetting its phase"
+        );
+    }
+
+    #[test]
+    fn phase_limits_keep_the_bounded_native_acquisition_fallback() {
+        let now = Instant::now();
+        let interval = Duration::from_secs(5);
+        let mut scheduler = PriorityScheduler::new(now);
+        scheduler.probed(now, SnarkProbe::AllClients);
+        scheduler.submitted_fri();
+        scheduler.submitted_fri();
+        assert_eq!(
+            scheduler.next_probe(now, interval, Some(3600), Some(2)),
+            SnarkProbe::PhaseLimit
+        );
+        scheduler.probed(now, SnarkProbe::PhaseLimit);
+        assert_eq!(scheduler.fri_proof_count, 0);
+        assert_eq!(
+            scheduler.next_probe(now, interval, Some(3600), Some(2)),
+            SnarkProbe::Hinted
+        );
+        assert_eq!(
+            scheduler.next_probe(now + Duration::from_secs(3600), interval, Some(3600), None),
+            SnarkProbe::PhaseLimit
+        );
+    }
+
+    #[tokio::test]
+    async fn uncertain_snark_claim_stops_acquisition_without_retrying() {
+        let attempts = AtomicUsize::new(0);
+        let (_stop_sender, mut stop_receiver) = watch::channel(false);
+        let error = acquire_snark_job(
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+            &mut stop_receiver,
+            || async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<Option<()>, _>(anyhow::anyhow!("uncertain native lease"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("uncertain native lease"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn cli_accepts_both_fri_phase_limits() {
         let args = Args::try_parse_from([
             "prover-service",
@@ -588,6 +709,7 @@ mod tests {
         .expect("both OR limits must be accepted");
         assert_eq!(args.max_snark_latency, Some(3600));
         assert_eq!(args.max_fris_per_snark, Some(100));
+        assert_eq!(args.snark_probe_interval_secs, 5);
     }
 
     // SYSCOIN: Malformed credential text is rejected only after Clap, and live env values are
