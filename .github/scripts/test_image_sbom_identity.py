@@ -214,7 +214,7 @@ class ImageIdentityTests(unittest.TestCase):
                     if original.is_file():
                         shutil.copyfile(original, directory / original.name)
                 (directory / filename).write_bytes(b"changed input")
-                with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                     identity.airbender_build_pins(directory / "airbender-cuda-device-diagnostics.json")
 
     def test_gpu_backend_pins_and_cli_bind_exact_tested_manifest(self):

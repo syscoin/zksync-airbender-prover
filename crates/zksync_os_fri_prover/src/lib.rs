@@ -22,6 +22,9 @@ use zksync_sequencer_proof_client::{
 use crate::metrics::FRI_PROVER_METRICS;
 
 pub mod metrics;
+pub mod setup_summaries;
+
+pub use setup_summaries::FriSetupPolicy;
 
 /// Command-line arguments for the Zksync OS prover
 #[derive(Parser, Debug)]
@@ -49,6 +52,14 @@ pub struct Args {
     /// Path to `app.bin`
     #[arg(long)]
     pub app_bin_path: Option<PathBuf>,
+    /// Use the authenticated release setup summaries, or explicitly rederive them on CPU.
+    #[arg(
+        long,
+        value_enum,
+        env = "ZKSYNC_FRI_SETUP_POLICY",
+        default_value_t = FriSetupPolicy::Bundled
+    )]
+    pub fri_setup_policy: FriSetupPolicy,
     /// Number of iterations before exiting. Only successfully generated proofs count. If not specified, runs indefinitely
     #[arg(long)]
     pub iterations: Option<usize>,
@@ -105,6 +116,16 @@ fn proving_security_level() -> SecurityLevel {
 /// The prover holds all precomputed setup data (and, with the `gpu` feature, the GPU
 /// context), so it should be constructed once and reused across batches.
 pub fn create_prover(binary_path: &Path) -> anyhow::Result<ProgramProver> {
+    create_prover_with_setup_policy(binary_path, FriSetupPolicy::Bundled)
+}
+
+/// Create a prover with an explicit setup policy. The compatibility entry point
+/// [`create_prover`] uses authenticated bundled summaries; recomputation never
+/// happens as a silent fallback for an unknown or modified app.
+pub fn create_prover_with_setup_policy(
+    binary_path: &Path,
+    policy: FriSetupPolicy,
+) -> anyhow::Result<ProgramProver> {
     let source = ProgramSource::from_paths(
         binary_path
             .to_str()
@@ -113,10 +134,6 @@ pub fn create_prover(binary_path: &Path) -> anyhow::Result<ProgramProver> {
         // The matching `.text` section path is derived from the `.bin` path.
         None,
     );
-    // Fail fast on a bad path instead of erroring only when the first job is picked.
-    for path in [&source.bin_path, &source.text_path] {
-        anyhow::ensure!(Path::new(path).is_file(), "program file not found: {path}");
-    }
     let config = ProgramProverConfig {
         // Recursion up to the unified layer: the compact form expected by the SNARK wrapper.
         target: ProofTarget::RecursionUnified,
@@ -127,16 +144,37 @@ pub fn create_prover(binary_path: &Path) -> anyhow::Result<ProgramProver> {
         // `gpu` defaults to `GpuMemoryPreset::Auto`: 28 GiB arena, falling back to 21.5 GiB.
         ..Default::default()
     };
-    ProgramProver::new(source, config).map_err(|e| anyhow::anyhow!("failed to create prover: {e}"))
+    create_prover_with_config_and_setup_policy(source, config, policy)
 }
 
-/// Compute the [`ProgramCommitment`] of the app program at `binary_path` (`.text`
-/// sibling derived like [`create_prover`] does).
-///
-/// Uses zkos-wrapper's own `BinaryCommitment`, so the value is byte-identical to what
-/// the wrapper chain enforces — but that recomputes the program's setup caps, which
-/// takes on the order of a minute. Call once at startup.
-///
+/// Shared construction path for the service and explicit offline diagnostics.
+/// The caller's GPU memory preset and replay-thread configuration are preserved.
+pub fn create_prover_with_config_and_setup_policy(
+    source: ProgramSource,
+    config: ProgramProverConfig,
+    policy: FriSetupPolicy,
+) -> anyhow::Result<ProgramProver> {
+    // Fail before setup instead of waiting for the first leased job.
+    for path in [&source.bin_path, &source.text_path] {
+        anyhow::ensure!(Path::new(path).is_file(), "program file not found: {path}");
+    }
+    tracing::info!(%policy, "Initializing FRI prover setup");
+    let result = match policy {
+        FriSetupPolicy::Bundled => {
+            let (summaries, binary, text) =
+                setup_summaries::load_bundled_setup_summaries_and_program(
+                    Path::new(&source.bin_path),
+                    Path::new(&source.text_path),
+                )?;
+            ProgramProver::new_with_setup_summaries_and_program_bytes(
+                source, config, summaries, binary, text,
+            )
+        }
+        FriSetupPolicy::Recompute => ProgramProver::new(source, config),
+    };
+    result.map_err(|e| anyhow::anyhow!("failed to create prover: {e}"))
+}
+
 /// The app program commitment, read off the prover's own setups (a map lookup).
 ///
 /// Previously recomputed from the binary via `BinaryCommitment::from_base_binary`, which
@@ -208,7 +246,7 @@ pub async fn run(
         .app_bin_path
         .unwrap_or_else(|| Path::new(&manifest_path).join("../../multiblock_batch.bin"));
 
-    let prover = create_prover(&binary_path)?;
+    let prover = create_prover_with_setup_policy(&binary_path, args.fri_setup_policy)?;
 
     // Fail fast on a binary no supported version proves. Free now, so it runs after
     // construction rather than before it.
@@ -479,7 +517,40 @@ pub async fn run_inner(
 #[cfg(test)]
 mod cli_security_tests {
     use super::*;
-    use clap::CommandFactory as _;
+    use clap::{CommandFactory as _, FromArgMatches as _};
+
+    #[test]
+    fn fri_setup_policy_is_bundled_by_default_with_explicit_recompute() {
+        let base = ["fri-prover", "--submission-dir", "/tmp/fri-test-spool"];
+        let command_without_env =
+            || Args::command().mut_arg("fri_setup_policy", |argument| argument.env(None::<&str>));
+        let default_matches = command_without_env().try_get_matches_from(base).unwrap();
+        assert_eq!(
+            Args::from_arg_matches(&default_matches)
+                .unwrap()
+                .fri_setup_policy,
+            FriSetupPolicy::Bundled
+        );
+        for (name, expected) in [
+            ("bundled", FriSetupPolicy::Bundled),
+            ("recompute", FriSetupPolicy::Recompute),
+        ] {
+            let matches = command_without_env()
+                .try_get_matches_from(base.into_iter().chain(["--fri-setup-policy", name]))
+                .unwrap();
+            let args = Args::from_arg_matches(&matches).unwrap();
+            assert_eq!(args.fri_setup_policy, expected);
+        }
+        assert!(command_without_env()
+            .try_get_matches_from(base.into_iter().chain(["--fri-setup-policy", "auto"]))
+            .is_err());
+        let command = Args::command();
+        let policy = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "fri_setup_policy")
+            .unwrap();
+        assert_eq!(policy.get_env().unwrap(), "ZKSYNC_FRI_SETUP_POLICY");
+    }
 
     #[test]
     fn prometheus_bind_address_is_explicit_and_preserves_default() {

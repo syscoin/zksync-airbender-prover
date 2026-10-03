@@ -41,33 +41,13 @@ def airbender_build_pins(path, source_lock=None):
     """Read the tooling-bound manifest and verify both adjacent immutable inputs."""
     require(path.is_file() and not path.is_symlink(), "invalid Airbender pin manifest")
     raw = path.read_bytes()
-    pins = parse_json(raw)
-    require(isinstance(pins, dict) and pins.get("schema_version") == 1,
-            "invalid Airbender pin schema")
-    require(pins.get("upstream_url") == "https://github.com/matter-labs/zksync-airbender",
-            "unexpected Airbender repository")
-    for key in ("upstream_commit", "upstream_tree", "patched_tree"):
-        require(isinstance(pins.get(key), str) and SHA.fullmatch(pins[key]),
-                f"invalid Airbender {key}")
-    for key in ("patch_sha256", "preimage_sha256", "postimage_sha256",
-                "canonical_lock_sha256", "overlay_lock_sha256"):
-        require(isinstance(pins.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", pins[key])
-                and pins[key] != "0" * 64, f"invalid Airbender {key}")
-    for key, expected_name, hash_key in (
-        ("patch_file", "airbender-cuda-device-diagnostics.patch", "patch_sha256"),
-        ("overlay_lock_file", "airbender.Cargo.lock", "overlay_lock_sha256"),
-    ):
-        require(pins.get(key) == expected_name, f"unexpected Airbender {key}")
-        artifact = path.parent / expected_name
-        require(artifact.is_file() and not artifact.is_symlink(), f"invalid Airbender {key}")
-        require(hashlib.sha256(artifact.read_bytes()).hexdigest() == pins[hash_key],
-                f"Airbender {key} hash mismatch")
     # SYSCOIN: Both CPU and GPU lanes use the same exact wrapper-source overlay.
     # These are prepared build inputs, not a claim that the FRI-only binary links it.
     wrapper = Path(__file__).resolve().parents[2] / "scripts/prepare-patched-airbender.py"
     spec = importlib.util.spec_from_file_location("selected_airbender_lock", wrapper)
     helper = importlib.util.module_from_spec(spec)
     exec(compile(wrapper.read_bytes(), str(wrapper), "exec"), helper.__dict__)
+    pins = helper.load_airbender_pins(path)
     wrapper_manifest = path.parent / "zkos-wrapper-buffered-os-rng.json"
     result = {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "pins": pins,
               "zkos_wrapper": helper.wrapper_pins_metadata(wrapper_manifest)}

@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::Parser;
 use tokio::sync::watch;
+use zksync_os_fri_prover::FriSetupPolicy;
 use zksync_os_prover_service::{init_tracing, metrics};
 use zksync_os_snark_prover::BinaryCommitmentPolicy;
 use zksync_sequencer_proof_client::wait_for_operator_shutdown;
@@ -22,6 +23,14 @@ struct Cli {
         default_value_t = BinaryCommitmentPolicy::default()
     )]
     binary_commitment_policy: BinaryCommitmentPolicy,
+    /// FRI setup summaries: bundled (default), or recompute on CPU.
+    #[arg(
+        long,
+        env = "ZKSYNC_FRI_SETUP_POLICY",
+        value_enum,
+        default_value_t = FriSetupPolicy::default()
+    )]
+    fri_setup_policy: FriSetupPolicy,
 }
 
 #[tokio::main]
@@ -30,6 +39,7 @@ pub async fn main() -> anyhow::Result<()> {
     let Cli {
         args,
         binary_commitment_policy,
+        fri_setup_policy,
     } = Cli::parse();
 
     // SYSCOIN: One cooperative stop signal owns the service and metrics tasks through shutdown.
@@ -41,10 +51,11 @@ pub async fn main() -> anyhow::Result<()> {
     let mut metrics_handle = tokio::spawn(async move {
         metrics::start_metrics_exporter(prometheus_port, stop_receiver).await
     });
-    let mut service = Box::pin(zksync_os_prover_service::run_with_binary_commitment_policy(
+    let mut service = Box::pin(zksync_os_prover_service::run_with_setup_policies(
         args,
         service_stop_receiver,
         binary_commitment_policy,
+        fri_setup_policy,
     ));
 
     let (service_result, metrics_task_finished) = tokio::select! {
@@ -112,9 +123,14 @@ mod tests {
     use super::*;
 
     fn parse_cli(policy: Option<&str>) -> Result<Cli, clap::Error> {
+        parse_policies(policy, None)
+    }
+
+    fn parse_policies(policy: Option<&str>, fri_policy: Option<&str>) -> Result<Cli, clap::Error> {
         // Do not let an operator's environment choose the policy under test.
-        let command =
-            Cli::command().mut_arg("binary_commitment_policy", |arg| arg.env(None::<&str>));
+        let command = Cli::command()
+            .mut_arg("binary_commitment_policy", |arg| arg.env(None::<&str>))
+            .mut_arg("fri_setup_policy", |arg| arg.env(None::<&str>));
         let mut arguments = vec![
             "prover-service",
             "--output-dir",
@@ -126,6 +142,9 @@ mod tests {
         ];
         if let Some(policy) = policy {
             arguments.extend(["--binary-commitment-policy", policy]);
+        }
+        if let Some(policy) = fri_policy {
+            arguments.extend(["--fri-setup-policy", policy]);
         }
         let matches = command.try_get_matches_from(arguments)?;
         Cli::from_arg_matches(&matches)
@@ -139,6 +158,7 @@ mod tests {
             BinaryCommitmentPolicy::Bundled
         );
         assert_eq!(cli.args.trusted_setup_file, "setup.key");
+        assert_eq!(cli.fri_setup_policy, FriSetupPolicy::Bundled);
     }
 
     #[test]
@@ -169,6 +189,34 @@ mod tests {
             Some(std::ffi::OsStr::new(
                 "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY"
             ))
+        );
+    }
+
+    #[test]
+    fn combined_fri_setup_policy_is_independent_and_explicit() {
+        for snark in ["bundled", "recompute"] {
+            assert_eq!(
+                parse_policies(Some(snark), None).unwrap().fri_setup_policy,
+                FriSetupPolicy::Bundled
+            );
+            for (argument, expected) in [
+                ("bundled", FriSetupPolicy::Bundled),
+                ("recompute", FriSetupPolicy::Recompute),
+            ] {
+                let cli = parse_policies(Some(snark), Some(argument)).unwrap();
+                assert_eq!(cli.fri_setup_policy, expected);
+                assert_eq!(cli.binary_commitment_policy.to_string(), snark);
+            }
+        }
+        assert!(parse_policies(None, Some("auto")).is_err());
+        let command = Cli::command();
+        let argument = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "fri_setup_policy")
+            .unwrap();
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new("ZKSYNC_FRI_SETUP_POLICY"))
         );
     }
 }

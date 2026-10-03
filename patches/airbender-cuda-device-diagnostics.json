@@ -1,18 +1,42 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "upstream_url": "https://github.com/matter-labs/zksync-airbender",
   "upstream_commit": "03454c7a41053a4b88bb421e97fb9efe893a92f5",
   "upstream_tree": "3af54eb50c31d8e78575434c3f0ab4386891c131",
   "upstream_lock_source": "git+https://github.com/matter-labs/zksync-airbender?tag=v0.6.0-rc.2#03454c7a41053a4b88bb421e97fb9efe893a92f5",
   "upstream_package_count": 46,
   "patch_file": "airbender-cuda-device-diagnostics.patch",
-  "patch_sha256": "768e9305dd5ebacff733a172f40fcabd5b333c212bc9582424526dcb16f257e2",
-  "changed_path": "gpu_prover/src/execution/gpu_worker.rs",
-  "preimage_sha256": "8791e121106596623eaeedde6c863da1fd8f9533dd13a69d01f49c59bdcff255",
-  "postimage_sha256": "3a809535fd15cf2b6a456881c0b9a4dddec606ae0d95ce17c928987dd76aca84",
-  "patched_tree": "46fb7849211ce3f2200bc1d0f8fc74a8bcb8704b",
+  "patch_sha256": "ad61a6c1206c3a63bd7d2ef290e6bbe8f70c4a63869d48b5e9c3c63650225778",
+  "changed_files": {
+    "execution_utils/src/lib.rs": {
+      "preimage_sha256": "0bb7ad548956ec6b2e31b79b5a2952fd6cef51bc5580432c70475e71ce31150e",
+      "postimage_sha256": "ef863d1a3e09648348e5ff6daddab7469bcb42fa74bd63172459d3a6337f3049",
+      "postimage_size": 49001
+    },
+    "execution_utils/src/setup_summaries.rs": {
+      "preimage_sha256": null,
+      "postimage_sha256": "f88bc6142088e6255b1356e70d031d6557445560984debe2d329d70042ab2b02",
+      "postimage_size": 10432
+    },
+    "execution_utils/src/unrolled_gpu.rs": {
+      "preimage_sha256": "5eb60930c22bc4878bdbf4c72c79e4f49d285ecd787c47015a1261257cf53b6d",
+      "postimage_sha256": "13ae69259a2791b8e8a9343da975ba04eb6e0535b4c11143c929a768307a3110",
+      "postimage_size": 24813
+    },
+    "gpu_prover/src/execution/gpu_worker.rs": {
+      "preimage_sha256": "8791e121106596623eaeedde6c863da1fd8f9533dd13a69d01f49c59bdcff255",
+      "postimage_sha256": "3a809535fd15cf2b6a456881c0b9a4dddec606ae0d95ce17c928987dd76aca84",
+      "postimage_size": 15148
+    },
+    "tools/cli/src/prover_utils.rs": {
+      "preimage_sha256": "7d8b0d96a840bcd7772142878149db161fef8df1c755b4d81ee8e4b1586c0608",
+      "postimage_sha256": "8aa93a6fb387d298076012989b1b73069c5883b5b2d1dd2e0014fe563a42e2d8",
+      "postimage_size": 83432
+    }
+  },
+  "patched_tree": "5968cc57e4e927c4ad206241cb123b159bbd6925",
   "canonical_lock_sha256": "108f48582a1107251b3e4fdf9233e746c9fa62dfac071b0f0d233c6db4a0edf9",
   "overlay_lock_file": "airbender.Cargo.lock",
   "overlay_lock_sha256": "f2f5f4b93849767d2d082966ec5549c41223febde75b74b1dafdeb7312b4db56",
-  "purpose": "Replace a runtime-versioned bulk CUDA device-properties startup log with the stable scalar SM-count API. No proving, verifier, registry, or guest changes."
+  "purpose": "Keep ABI-stable scalar CUDA startup diagnostics and add authenticated compact FRI setup-summary injection. GPU proving precomputations, circuits, verifiers, and guests remain unchanged; legacy CPU summary derivation remains available."
 }

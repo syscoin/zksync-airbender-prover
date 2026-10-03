@@ -84,6 +84,32 @@ bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --rel
 
 Specify optional `--iterations` argument to run FRI prover N times and then exit.
 Specify optional `--path` argument if you want to serialize FRI proof to file.
+
+Dedicated FRI and combined-service FRI startup default to `--fri-setup-policy bundled`
+(environment: `ZKSYNC_FRI_SETUP_POLICY`). The reviewed, embedded release artifact contains the compact
+base/unrolled/unified setup summaries, not full traces or secret setup material. Before GPU
+initialization it checks the artifact digest, exact app `.bin` and `.text` hashes, both embedded
+recursion programs, Security100/V32/circuit identities, cap geometry, derived end parameters,
+and the complete registered program commitment. GPU registration consumes those same validated
+byte snapshots without reopening the program paths. Unknown or changed inputs fail closed; there
+is no operator-supplied cache and no automatic recomputation fallback. Normal GPU registration,
+proof generation, and all program/queue checks remain in place. Explicit
+`--fri-setup-policy recompute` retains the original CPU derivation path.
+
+To independently derive and compare every bundled cap word and metadata field without GPU
+initialization, a CRS, or proof generation:
+
+```bash
+bash scripts/cargo-with-patched-airbender.sh fri-setup-verify -- \
+  cargo run --locked --release -p zksync_os_fri_prover --example bundled_fri_setup -- --verify
+```
+
+For release regeneration, replace `--verify` with `--output /absolute/new-fri-setups.json`.
+The output must not already exist. Review the complete artifact and its reported digest before
+updating the compiled release pin; generating a file alone never changes the runtime bundle.
+The offline FRI diagnostic accepts the same `--fri-setup-policy bundled|recompute` option and
+records the selection alongside its existing `setup_ms`/proof/verification timings.
+
 `--request-timeout-secs` controls the 600s total request backstop. Connect timeout is
 5s and read inactivity timeout is 10s. Large compressed sequencer responses are decoded
 automatically.

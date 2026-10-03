@@ -12,6 +12,7 @@ use clap::Parser;
 use protocol_version::SupportedProtocolVersions;
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
+use zksync_os_fri_prover::FriSetupPolicy;
 use zksync_os_snark_prover::{BinaryCommitmentPolicy, WrapperCachePolicy};
 use zksync_sequencer_proof_client::{
     claim_first_snark_job, hinted_client_indices, ordered_client_indices,
@@ -236,9 +237,26 @@ pub async fn run(args: Args, stop_receiver: watch::Receiver<bool>) -> anyhow::Re
 /// Run the combined worker with an explicit fixed-commitment policy. Existing callers of
 /// [`run`] use the checked-in commitment by default; recomputation is an operator opt-in.
 pub async fn run_with_binary_commitment_policy(
+    args: Args,
+    stop_receiver: watch::Receiver<bool>,
+    binary_commitment_policy: BinaryCommitmentPolicy,
+) -> anyhow::Result<()> {
+    run_with_setup_policies(
+        args,
+        stop_receiver,
+        binary_commitment_policy,
+        FriSetupPolicy::default(),
+    )
+    .await
+}
+
+/// Select FRI summaries independently from the SNARK fixed-commitment policy.
+/// Both compatibility entry points retain authenticated bundled FRI setup by default.
+pub async fn run_with_setup_policies(
     mut args: Args,
     mut stop_receiver: watch::Receiver<bool>,
     binary_commitment_policy: BinaryCommitmentPolicy,
+    fri_setup_policy: FriSetupPolicy,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.snark_probe_interval_secs > 0,
@@ -398,7 +416,10 @@ pub async fn run_with_binary_commitment_policy(
             return Ok(());
         }
         if fri_prover.is_none() {
-            let prover = zksync_os_fri_prover::create_prover(&binary_path)?;
+            let prover = zksync_os_fri_prover::create_prover_with_setup_policy(
+                &binary_path,
+                fri_setup_policy,
+            )?;
             let program_commitment = zksync_os_fri_prover::program_commitment(&prover).context(
                 "program commitment unavailable (CPU backend); cannot verify the app binary",
             )?;
@@ -491,6 +512,17 @@ mod tests {
                     .await
                     .expect_err("explicit policy must use the same validation before any setup");
             assert_eq!(error.to_string(), "SNARK probe interval must be positive");
+            for fri_policy in [FriSetupPolicy::Bundled, FriSetupPolicy::Recompute] {
+                let error = run_with_setup_policies(
+                    invalid_args(),
+                    stop_receiver.clone(),
+                    policy,
+                    fri_policy,
+                )
+                .await
+                .expect_err("both policies retain validation before setup");
+                assert_eq!(error.to_string(), "SNARK probe interval must be positive");
+            }
         }
     }
 

@@ -142,7 +142,7 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
         checked_hash = BASE.checked_hash
 
         def check_local_or_external(path, digest):
-            if path.name == Path(AIR["changed_path"]).name and "airbender" in path.parts:
+            if path.name in {Path(name).name for name in AIR["changed_files"]} and "airbender" in path.parts:
                 return  # The independently tested source preparer owns this preimage check.
             if reject_tooling and path == BASE.WRAPPER_PIN_PATH:
                 raise ValueError("tooling changed after Cargo")

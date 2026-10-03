@@ -50,6 +50,17 @@ WRAPPER_CHANGED_PATHS = {
     "wrapper/src/wrapper/mod.rs",
 }
 WRAPPER_PATCHED_TREE = "b2081f4c987e22043f31ca5a9656f2a1655b06c3"
+AIRBENDER_UPSTREAM = (
+    "https://github.com/matter-labs/zksync-airbender",
+    "03454c7a41053a4b88bb421e97fb9efe893a92f5",
+    "3af54eb50c31d8e78575434c3f0ab4386891c131",
+)
+AIRBENDER_CHANGED_PATHS = {
+    "execution_utils/src/lib.rs", "execution_utils/src/setup_summaries.rs",
+    "execution_utils/src/unrolled_gpu.rs", "gpu_prover/src/execution/gpu_worker.rs",
+    "tools/cli/src/prover_utils.rs",
+}
+AIRBENDER_PATCHED_TREE = "5968cc57e4e927c4ad206241cb123b159bbd6925"
 
 
 def require(condition, message):
@@ -86,6 +97,47 @@ def unique_object(pairs):
 def json_document(path):
     require(path.is_file() and not path.is_symlink(), "invalid JSON input: " + str(path))
     return json.loads(path.read_text(), object_pairs_hook=unique_object)
+
+
+def load_airbender_pins(path=PIN_PATH):
+    pins = json_document(path)
+    require(isinstance(pins, dict) and set(pins) == {"schema_version", "upstream_url", "upstream_commit", "upstream_tree",
+            "upstream_lock_source", "upstream_package_count", "patch_file", "patch_sha256",
+            "changed_files", "patched_tree", "canonical_lock_sha256", "overlay_lock_file",
+            "overlay_lock_sha256", "purpose"}, "unknown Airbender pin fields")
+    require(type(pins["schema_version"]) is int and pins["schema_version"] == 2,
+            "unsupported Airbender pin schema")
+    require(tuple(pins[k] for k in ("upstream_url", "upstream_commit", "upstream_tree"))
+            == AIRBENDER_UPSTREAM, "unknown Airbender upstream origin")
+    require(pins["upstream_lock_source"] == "git+" + AIRBENDER_UPSTREAM[0]
+            + "?tag=v0.6.0-rc.2#" + AIRBENDER_UPSTREAM[1], "unknown Airbender lock source")
+    require(type(pins["upstream_package_count"]) is int and pins["upstream_package_count"] == 46,
+            "unknown Airbender package graph")
+    require(pins["patch_file"] == "airbender-cuda-device-diagnostics.patch"
+            and pins["overlay_lock_file"] == "airbender.Cargo.lock", "unknown Airbender artifact route")
+    for key in ("patch_sha256", "canonical_lock_sha256", "overlay_lock_sha256"):
+        require(isinstance(pins[key], str) and re.fullmatch(r"[0-9a-f]{64}", pins[key])
+                and pins[key] != "0" * 64, "invalid Airbender digest")
+    checked_hash(path.parent / pins["patch_file"], pins["patch_sha256"])
+    checked_hash(path.parent / pins["overlay_lock_file"], pins["overlay_lock_sha256"])
+    require(pins["patched_tree"] == AIRBENDER_PATCHED_TREE, "unknown Airbender patched tree")
+    require(isinstance(pins["changed_files"], dict)
+            and set(pins["changed_files"]) == AIRBENDER_CHANGED_PATHS,
+            "unknown Airbender source closure")
+    for relative, row in pins["changed_files"].items():
+        require(isinstance(row, dict) and set(row) == {"preimage_sha256", "postimage_sha256", "postimage_size"},
+                "unknown Airbender source fields")
+        is_new = relative == "execution_utils/src/setup_summaries.rs"
+        require((row["preimage_sha256"] is None) == is_new, "invalid Airbender new-file preimage")
+        for key in ("preimage_sha256", "postimage_sha256"):
+            if key == "preimage_sha256" and is_new:
+                continue
+            require(isinstance(row[key], str) and re.fullmatch(r"[0-9a-f]{64}", row[key])
+                    and row[key] != "0" * 64, "invalid Airbender source digest")
+        require(type(row["postimage_size"]) is int and row["postimage_size"] > 0,
+                "invalid Airbender postimage size")
+    require(isinstance(pins["purpose"], str) and pins["purpose"], "missing Airbender purpose")
+    return pins
 
 
 def load_wrapper_pins(path=WRAPPER_PIN_PATH):
@@ -474,13 +526,27 @@ def package_paths(upstream, expected):
 
 def verify_upstream(upstream, pins):
     require(run_git(upstream, "rev-parse", "HEAD") == pins["upstream_commit"], "upstream HEAD changed")
-    require(run_git(upstream, "diff", "--name-only", "HEAD") == pins["changed_path"],
+    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"],
+            "upstream tree changed")
+    require(run_git(upstream, "diff", "--name-only", "HEAD").splitlines() == sorted(pins["changed_files"]),
             "unexpected upstream changed paths")
     require(not run_git(upstream, "ls-files", "--others", "--exclude-standard"),
             "unexpected upstream untracked files")
     require(not run_git(upstream, "diff", "--name-only"), "upstream changed after patch staging")
     require(run_git(upstream, "write-tree") == pins["patched_tree"], "patched tree mismatch")
-    checked_hash(upstream / pins["changed_path"], pins["postimage_sha256"])
+    for relative, row in pins["changed_files"].items():
+        path = upstream / relative
+        checked_hash(path, row["postimage_sha256"])
+        require(path.stat().st_size == row["postimage_size"], "Airbender postimage size mismatch")
+
+
+def check_airbender_preimages(upstream, pins):
+    for relative, row in pins["changed_files"].items():
+        path = upstream / relative
+        if row["preimage_sha256"] is None:
+            require(not path.exists() and not path.is_symlink(), "Airbender new-file preimage already exists")
+        else:
+            checked_hash(path, row["preimage_sha256"])
 
 
 def verify_wrapper(upstream, pins):
@@ -547,10 +613,9 @@ def main(argv):
     cargo_command(argv[2:], Path("placeholder/Cargo.toml"))
     source = Path(os.environ.get("PROVER_SOURCE_DIR", TOOLING_ROOT)).resolve(strict=True)
     require_airbender_only(source, argv[2:], explicit_cpu)
-    pins = json.loads(PIN_PATH.read_text())
+    pins = load_airbender_pins()
     wrapper_pins = load_wrapper_pins()
     wrapper_inputs = wrapper_pins_metadata()
-    require(pins["schema_version"] == 1, "unsupported pin schema")
     patch = PIN_PATH.parent / pins["patch_file"]
     overlay = PIN_PATH.parent / pins["overlay_lock_file"]
     checked_hash(patch, pins["patch_sha256"])
@@ -582,10 +647,10 @@ def main(argv):
                     clone_source, str(upstream)], check=True)
     run_git(upstream, "checkout", "--quiet", "--detach", pins["upstream_commit"])
     require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"], "upstream tree mismatch")
-    checked_hash(upstream / pins["changed_path"], pins["preimage_sha256"])
+    check_airbender_preimages(upstream, pins)
     run_git(upstream, "apply", "--check", str(patch))
     run_git(upstream, "apply", str(patch))
-    run_git(upstream, "add", "--", pins["changed_path"])
+    run_git(upstream, "add", "--", *sorted(pins["changed_files"]))
     verify_upstream(upstream, pins)
     paths = package_paths(upstream, expected)
     wrapper, wrapper_clone_source, wrapper_paths = prepare_wrapper(build, wrapper_pins)

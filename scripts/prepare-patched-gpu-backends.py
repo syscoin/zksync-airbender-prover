@@ -207,7 +207,7 @@ def gpu_backend_pins(manifest, source_lock=None):
     result = {"manifest_sha256": sha256(manifest), "pins": pins}
     if source_lock is not None:
         base = base_helper()
-        air = document(base.PIN_PATH)
+        air = base.load_airbender_pins()
         raw, selected = base.selected_lock_overlay(
             source_lock, base.PIN_PATH.parent / air["overlay_lock_file"], air)
         combined = crypto_lock_overlay(raw, pins)
@@ -351,7 +351,7 @@ def main(argv):
     require(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", label), "invalid build label")
     base.cargo_command(argv[2:], Path("placeholder/Cargo.toml"))
     source = Path(os.environ.get("PROVER_SOURCE_DIR", TOOLING_ROOT)).resolve(strict=True)
-    air = document(base.PIN_PATH)
+    air = base.load_airbender_pins()
     wrapper_pins = base.load_wrapper_pins()
     wrapper_inputs = base.wrapper_pins_metadata()
     patch = base.PIN_PATH.parent / air["patch_file"]
@@ -388,10 +388,10 @@ def main(argv):
     subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks", clone, str(upstream)], check=True)
     base.run_git(upstream, "checkout", "--quiet", "--detach", air["upstream_commit"])
     require(base.run_git(upstream, "rev-parse", "HEAD^{tree}") == air["upstream_tree"], "Airbender tree mismatch")
-    base.checked_hash(upstream / air["changed_path"], air["preimage_sha256"])
+    base.check_airbender_preimages(upstream, air)
     base.run_git(upstream, "apply", "--check", str(patch))
     base.run_git(upstream, "apply", str(patch))
-    base.run_git(upstream, "add", "--", air["changed_path"])
+    base.run_git(upstream, "add", "--", *sorted(air["changed_files"]))
     base.verify_upstream(upstream, air)
     air_paths = base.package_paths(upstream, selected_lock["airbender_packages"])
     wrapper, wrapper_clone, wrapper_paths = base.prepare_wrapper(build, wrapper_pins)

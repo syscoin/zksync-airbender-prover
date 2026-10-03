@@ -20,7 +20,7 @@ SPEC = importlib.util.spec_from_file_location(
 )
 HELPER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPER)
-PINS = json.loads((ROOT / "patches/airbender-cuda-device-diagnostics.json").read_text())
+PINS = HELPER.load_airbender_pins()
 
 
 def parent_lock_bytes():
@@ -187,14 +187,212 @@ class LockOverlayTests(unittest.TestCase):
 
     def test_logger_patch_has_no_proving_changes(self):
         source = (ROOT / "patches/airbender-cuda-device-diagnostics.patch").read_text()
-        self.assertEqual(source.count("diff --git "), 1)
-        self.assertIn("gpu_prover/src/execution/gpu_worker.rs", source)
+        self.assertEqual(source.count("diff --git "), 5)
+        source = next("diff --git " + section for section in source.split("diff --git ")
+                      if section.startswith("a/gpu_prover/src/execution/gpu_worker.rs "))
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),
+                         "768e9305dd5ebacff733a172f40fcabd5b333c212bc9582424526dcb16f257e2")
         additions = "\n".join(line[1:] for line in source.splitlines()
                               if line.startswith("+") and not line.startswith("+++"))
         self.assertIn("device_get_attribute(CudaDeviceAttr::MultiProcessorCount, device_id)?", additions)
         self.assertNotIn("get_device_properties", additions)
         self.assertNotIn("unsafe", additions)
         self.assertNotIn("CStr", additions)
+
+
+class AirbenderPinTests(unittest.TestCase):
+    def fixture(self, directory, pins):
+        directory = Path(directory)
+        manifest = directory / HELPER.PIN_PATH.name
+        manifest.write_text(json.dumps(pins))
+        for filename in (PINS["patch_file"], PINS["overlay_lock_file"]):
+            (directory / filename).write_bytes((ROOT / "patches" / filename).read_bytes())
+        return manifest
+
+    def test_exact_source_closure_and_pure_metadata(self):
+        with patch.object(HELPER.subprocess, "run") as run, patch.object(HELPER.subprocess, "check_output") as output:
+            pins = HELPER.load_airbender_pins()
+            self.assertEqual(set(pins["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
+            self.assertEqual(pins["patched_tree"], HELPER.AIRBENDER_PATCHED_TREE)
+            sections = (ROOT / "patches" / pins["patch_file"]).read_text().split("diff --git ")[1:]
+            self.assertEqual({section.splitlines()[0].split()[1][2:] for section in sections},
+                             HELPER.AIRBENDER_CHANGED_PATHS)
+            run.assert_not_called()
+            output.assert_not_called()
+
+    def test_fri_release_artifact_binds_locked_source_circuits_and_security(self):
+        artifact_path = ROOT / "crates/zksync_os_fri_prover/artifacts/syscoin-v32-security100-fri-setups.json"
+        artifact = HELPER.json_document(artifact_path)
+        metadata, summaries = artifact["metadata"], artifact["summaries"]
+        loader = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
+        integration = (ROOT / "crates/zksync_os_fri_prover/src/lib.rs").read_text()
+        dependencies = HELPER.read_toml(ROOT / "Cargo.toml")["workspace"]["dependencies"]
+        lock = HELPER.read_toml(ROOT / "Cargo.lock")
+        revision = PINS["upstream_commit"]
+        self.assertEqual(metadata["airbender_revision"], revision)
+        self.assertIn(f'const AIRBENDER_REVISION: &str = "{revision}";', loader)
+        self.assertIn('const BUNDLED_ARTIFACT_SHA256: &str =\n    "'
+                      + HELPER.sha256(artifact_path) + '";', loader)
+        for dependency, package in (("zksync_airbender_execution_utils", "execution_utils"),
+                                    ("zksync_airbender_cli", "cli")):
+            self.assertEqual(dependencies[dependency]["git"], PINS["upstream_url"])
+            self.assertEqual(PINS["upstream_lock_source"],
+                             f'git+{dependencies[dependency]["git"]}'
+                             f'?tag={dependencies[dependency]["tag"]}#{revision}')
+            locked = [row for row in lock["package"] if row["name"] == package]
+            self.assertEqual(len(locked), 1)
+            self.assertEqual(locked[0]["source"], PINS["upstream_lock_source"])
+        self.assertEqual(metadata["security_bits"], 100)
+        self.assertEqual(summaries["security_bits"], 100)
+        self.assertEqual(metadata["circuit_identity"],
+                         "rv32im-unsigned-base/reduced-unrolled/reduced-unified-v1")
+        self.assertEqual(metadata["setup_algorithm"], "base-unrolled-unified-v1")
+        self.assertEqual(metadata["proof_target"], "recursion-unified")
+        self.assertEqual((metadata["cap_size"], metadata["num_cosets"]), (64, 2))
+        self.assertIn("zksync_airbender_execution_utils::setups::CAP_SIZE == self.cap_size", loader)
+        self.assertIn("zksync_airbender_execution_utils::setups::NUM_COSETS == self.num_cosets", loader)
+        self.assertIn(".validate(SecurityLevel::Security100.model(), base_binary)", loader)
+        self.assertIn("target: ProofTarget::RecursionUnified", integration)
+        self.assertIn("ProgramProver::new_with_setup_summaries_and_program_bytes(", integration)
+        self.assertEqual(set(PINS["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
+        self.assertFalse(any(relative.startswith(("circuit_defs/", "verifier/", "full_statement_verifier/"))
+                             for relative in PINS["changed_files"]))
+        for section, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
+            self.assertEqual(metadata["app"][section]["sha256"], HELPER.sha256(ROOT / relative))
+            self.assertEqual(metadata["app"][section]["size_bytes"], (ROOT / relative).stat().st_size)
+        for identity in ("app", "recursion_unrolled", "recursion_unified"):
+            for section in ("bin", "text"):
+                self.assertIn('"' + metadata[identity][section]["sha256"] + '"', loader)
+        commitment = HELPER.json_document(
+            ROOT / "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json")
+        for field in ("protocol_version", "execution_version", "proving_version", "security_bits",
+                      "vk_hash", "program_commitment", "airbender_revision"):
+            self.assertEqual(metadata[field], commitment[field])
+        for level, families in (("base", [1, 2, 3, 4, 16, 17]),
+                                ("recursion_unrolled", [1, 2, 3, 16]),
+                                ("recursion_unified", [128])):
+            setup = summaries[level]
+            self.assertEqual(sorted(map(int, setup["circuit_families_setups"])), families)
+            groups = list(setup["circuit_families_setups"].values()) + [setup["inits_and_teardowns_setup"]]
+            for caps in groups:
+                self.assertEqual(len(caps), metadata["num_cosets"])
+                for cap in caps:
+                    self.assertEqual(len(cap["cap"]), metadata["cap_size"])
+                    self.assertTrue(all(len(word) == 8 for word in cap["cap"]))
+
+    def test_locked_application_ci_covers_summary_validation_without_upstream_resolution(self):
+        workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
+        loader = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
+        self.assertIn("ci-test -- cargo test --locked --no-default-features", workflow)
+        self.assertNotIn('cargo test --manifest-path "${airbender}/Cargo.toml"', workflow)
+        for test in ("repository_artifact_matches_inputs_and_registered_program_without_deriving",
+                     "artifact_corruption_truncation_and_unknown_fields_fail_closed",
+                     "every_metadata_field_is_release_pinned",
+                     "both_sections_of_every_input_are_hash_and_length_bound",
+                     "summary_order_security_geometry_and_derived_values_are_checked"):
+            self.assertIn("fn " + test + "()", loader)
+
+    def test_unknown_invalid_or_missing_pin_fields_fail_closed(self):
+        for edit in (
+            lambda p: p.update(extra=True),
+            lambda p: p.update(schema_version=True),
+            lambda p: p.update(schema_version=1),
+            lambda p: p.update(upstream_url="https://example.invalid/airbender"),
+            lambda p: p.update(upstream_commit="f" * 40),
+            lambda p: p.update(upstream_tree="f" * 40),
+            lambda p: p.update(upstream_lock_source=p["upstream_lock_source"] + "-changed"),
+            lambda p: p.update(upstream_package_count=True),
+            lambda p: p.update(patch_file="../escape.patch"),
+            lambda p: p.update(overlay_lock_file="../escape.lock"),
+            lambda p: p.update(patch_sha256="0" * 64),
+            lambda p: p.update(patched_tree="f" * 40),
+            lambda p: p["changed_files"].pop("execution_utils/src/lib.rs"),
+            lambda p: p["changed_files"].update({"../unexpected": {}}),
+            lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(preimage_sha256=None),
+            lambda p: p["changed_files"]["execution_utils/src/setup_summaries.rs"].update(preimage_sha256="f" * 64),
+            lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(postimage_sha256="0" * 64),
+            lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(postimage_size=True),
+            lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(extra=1),
+            lambda p: p.update(purpose=""),
+        ):
+            with tempfile.TemporaryDirectory() as temporary:
+                pins = copy.deepcopy(PINS)
+                edit(pins)
+                with self.assertRaises(ValueError):
+                    HELPER.load_airbender_pins(self.fixture(temporary, pins))
+
+    def test_duplicate_manifest_keys_symlinks_and_changed_inputs_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self.fixture(temporary, PINS)
+            manifest.write_text('{"schema_version":2,"schema_version":2}')
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+                HELPER.load_airbender_pins(manifest)
+            manifest.unlink()
+            manifest.symlink_to(HELPER.PIN_PATH)
+            with self.assertRaises(ValueError):
+                HELPER.load_airbender_pins(manifest)
+            manifest.unlink()
+            for name in (PINS["patch_file"], PINS["overlay_lock_file"]):
+                manifest = self.fixture(temporary, PINS)
+                (manifest.parent / name).write_bytes(b"changed")
+                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                    HELPER.load_airbender_pins(manifest)
+
+    def test_preimages_check_every_existing_file_and_reject_new_file_collisions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(HELPER, "checked_hash") as hashes:
+                HELPER.check_airbender_preimages(root, PINS)
+                self.assertEqual(hashes.call_count, 4)
+                for relative, row in PINS["changed_files"].items():
+                    if row["preimage_sha256"] is not None:
+                        hashes.assert_any_call(root / relative, row["preimage_sha256"])
+                new = root / "execution_utils/src/setup_summaries.rs"
+                new.parent.mkdir(parents=True)
+                new.symlink_to(root / "missing")
+                with self.assertRaisesRegex(ValueError, "preimage already exists"):
+                    HELPER.check_airbender_preimages(root, PINS)
+
+    def test_reverification_rejects_git_state_hash_size_and_symlink_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pins = copy.deepcopy(PINS)
+            for relative, row in pins["changed_files"].items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode())
+                row["postimage_sha256"] = HELPER.sha256(path)
+                row["postimage_size"] = path.stat().st_size
+            values = {
+                ("rev-parse", "HEAD"): pins["upstream_commit"],
+                ("rev-parse", "HEAD^{tree}"): pins["upstream_tree"],
+                ("diff", "--name-only", "HEAD"): "\n".join(sorted(pins["changed_files"])),
+                ("ls-files", "--others", "--exclude-standard"): "",
+                ("diff", "--name-only"): "",
+                ("write-tree",): pins["patched_tree"],
+            }
+            with patch.object(HELPER, "run_git", side_effect=lambda repo, *args: values[args]):
+                HELPER.verify_upstream(root, pins)
+                for args, original in list(values.items()):
+                    values[args] = "unexpected"
+                    with self.assertRaises(ValueError):
+                        HELPER.verify_upstream(root, pins)
+                    values[args] = original
+                for relative, row in pins["changed_files"].items():
+                    row["postimage_size"] += 1
+                    with self.assertRaisesRegex(ValueError, "size mismatch"):
+                        HELPER.verify_upstream(root, pins)
+                    row["postimage_size"] -= 1
+                    path = root / relative
+                    path.write_bytes(b"changed")
+                    with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                        HELPER.verify_upstream(root, pins)
+                    path.unlink()
+                    path.symlink_to(root / "missing")
+                    with self.assertRaisesRegex(ValueError, "not a regular input"):
+                        HELPER.verify_upstream(root, pins)
+                    path.unlink()
+                    path.write_bytes(relative.encode())
 
 
 class WrapperPinTests(unittest.TestCase):
@@ -575,7 +773,7 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
         checked_hash = HELPER.checked_hash
 
         def check_local_or_external(path, digest):
-            if path.name == Path(PINS["changed_path"]).name and "airbender" in path.parts:
+            if path.name in {Path(name).name for name in PINS["changed_files"]} and "airbender" in path.parts:
                 return
             if reject_tooling and path == HELPER.WRAPPER_PIN_PATH:
                 raise ValueError("tooling changed after Cargo")

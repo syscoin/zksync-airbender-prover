@@ -155,6 +155,8 @@ def native_environment(snark=False):
             "ZKSYNC_SNARK_CPU_POLICY", "ZKSYNC_SNARK_CPU_MAX_LOGICAL",
             "ZKSYNC_SNARK_CPU_DEFAULT_THREADS", "RAYON_NUM_THREADS",
             "BELLMAN_NUM_THREADS", "OMP_NUM_THREADS") if name in os.environ})
+    elif "ZKSYNC_FRI_SETUP_POLICY" in os.environ:
+        env["ZKSYNC_FRI_SETUP_POLICY"] = os.environ["ZKSYNC_FRI_SETUP_POLICY"]
     env["RUST_MIN_STACK"] = "268435456"
     return env
 
