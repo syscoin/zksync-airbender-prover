@@ -71,6 +71,9 @@ jobs:
       # dependency's own workspace is required to resolve its dev-dependencies;
       # the production build wrapper's package-selection policy stays unchanged.
       - name: Run pinned wrapper RNG tests
+        env:
+          RUST_MIN_STACK: "33554432"
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           record="${RUNNER_TEMP}/ci-test-airbender-inputs.json"
           workspace="$(jq -er '.workspace' "${record}")"

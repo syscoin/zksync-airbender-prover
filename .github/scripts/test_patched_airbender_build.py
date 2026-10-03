@@ -296,10 +296,20 @@ class WrapperPinTests(unittest.TestCase):
         self.assertNotIn('cargo test --manifest-path "${workspace}/Cargo.toml"', workflow)
         self.assertIn("--locked -p zkos-wrapper --lib buffered_os_rng::tests", workflow)
         self.assertIn('helper.verify_wrapper(Path(sys.argv[1]), helper.load_wrapper_pins())', workflow)
+        self.assertIn('      - name: Run pinned wrapper RNG tests\n'
+                      '        env:\n'
+                      '          RUST_MIN_STACK: "33554432"\n'
+                      '          CARGO_PROFILE_DEV_DEBUG: "0"\n'
+                      '        run: |', workflow)
 
     def test_ci_wrapper_rng_shell_routes_manifest_and_preserves_failure(self):
         lines = (ROOT / ".github/workflows/ci.yaml").read_text().splitlines()
-        start = lines.index("      - name: Run pinned wrapper RNG tests") + 2
+        step = lines.index("      - name: Run pinned wrapper RNG tests")
+        start = lines.index("        run: |", step) + 1
+        self.assertEqual(lines[step + 1], "        env:")
+        step_env = dict(line.strip().split(": ", 1) for line in lines[step + 2:start - 1])
+        step_env = {key: value.strip('"') for key, value in step_env.items()}
+        self.assertEqual(step_env, {"RUST_MIN_STACK": "33554432", "CARGO_PROFILE_DEV_DEBUG": "0"})
         body = []
         for line in lines[start:]:
             if line.startswith("          "):
@@ -323,7 +333,9 @@ if name == "python3":
     event = {"kind": "verify", "wrapper": sys.argv[-1]}
 else:
     assert name == "cargo"
-    event = {"kind": "cargo", "argv": sys.argv[1:], "target": os.environ["CARGO_TARGET_DIR"]}
+    event = {"kind": "cargo", "argv": sys.argv[1:], "target": os.environ["CARGO_TARGET_DIR"],
+             "rust_min_stack": os.environ["RUST_MIN_STACK"],
+             "profile_dev_debug": os.environ["CARGO_PROFILE_DEV_DEBUG"]}
 with Path(os.environ["WORKFLOW_CALL_LOG"]).open("a") as output:
     output.write(json.dumps(event) + "\n")
 raise SystemExit(int(os.environ["WRAPPER_TEST_EXIT_CODE"]) if name == "cargo" else 0)
@@ -342,7 +354,7 @@ raise SystemExit(int(os.environ["WRAPPER_TEST_EXIT_CODE"]) if name == "cargo" el
                     "workspace": str(workspace), "cargo_target_dir": str(target)}))
                 log = root / "calls.jsonl"
                 result = subprocess.run(["bash", "-eu", "-c", script], cwd=ROOT, capture_output=True,
-                                        text=True, env={**os.environ, "RUNNER_TEMP": str(root),
+                                        text=True, env={**os.environ, **step_env, "RUNNER_TEMP": str(root),
                                         "PATH": str(commands) + os.pathsep + os.environ.get("PATH", ""),
                                         "WORKFLOW_CALL_LOG": str(log), "WRAPPER_TEST_EXIT_CODE": str(status)})
                 self.assertEqual(result.returncode, status, result.stderr)
@@ -350,7 +362,8 @@ raise SystemExit(int(os.environ["WRAPPER_TEST_EXIT_CODE"]) if name == "cargo" el
                 wrapper = workspace.parent / "zkos-wrapper"
                 self.assertEqual(events, [
                     {"kind": "verify", "wrapper": str(wrapper)},
-                    {"kind": "cargo", "target": str(target), "argv": [
+                    {"kind": "cargo", "target": str(target), "rust_min_stack": "33554432",
+                     "profile_dev_debug": "0", "argv": [
                         "test", "--manifest-path", str(wrapper / "Cargo.toml"), "--locked",
                         "-p", "zkos-wrapper", "--lib", "buffered_os_rng::tests"]},
                     {"kind": "verify", "wrapper": str(wrapper)},
