@@ -33,6 +33,8 @@ OVERLAY_FILES = (
     "patches/airbender-cuda-device-diagnostics.patch",
     "patches/airbender-cuda-device-diagnostics.json",
     "patches/airbender.Cargo.lock",
+    "patches/zkos-wrapper-buffered-os-rng.json",
+    "patches/zkos-wrapper-buffered-os-rng.patch",
 )
 GPU_OVERLAY_FILES = (
     "scripts/prepare-patched-gpu-backends.py",
@@ -232,11 +234,15 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertNotIn("||", entrypoint)
         self.assertNotIn("cpu-cold", entrypoint)
 
-    def test_fri_recipe_is_byte_unchanged(self):
+    def test_fri_recipe_only_adds_required_common_overlay_inputs(self):
         path = "docker/zksync-os-prover-fri/Dockerfile"
-        # Merged PR8/main 1b152e8 bytes; do not require an ancestor Git object in
-        # the shallow CI checkout merely to enforce the immutable FRI boundary.
-        self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(),
+        # Apart from copying the two new common build inputs, preserve merged
+        # PR8/main 1b152e8 bytes. No FRI flags, runtime, or CUDA recipe may change.
+        # This does not require an ancestor Git object in a shallow CI checkout.
+        copy = b"COPY patches/zkos-wrapper-buffered-os-rng.json patches/zkos-wrapper-buffered-os-rng.patch ./patches/\n"
+        raw = (ROOT / path).read_bytes()
+        self.assertEqual(raw.count(copy), 1)
+        self.assertEqual(hashlib.sha256(raw.replace(copy, b"")).hexdigest(),
                          "007eb0f396686d224c635b39fc505b497cb536dab40690f766dc016806e1d868")
 
     def test_gpu_routes_require_opt_in_overlay_and_no_cpu_cache_argument(self):
@@ -383,6 +389,8 @@ class ProverRoleRecipeTests(unittest.TestCase):
                 output / "Cargo.lock", output / OVERLAY_FILES[4], reference_pins)
             self.assertEqual(len(wrapper.audit_lock(wrapper.read_toml(output / "Cargo.lock"),
                                                    wrapper.tomllib.loads(raw.decode()), reference_pins)), 46)
+            self.assertEqual(selection["zkos_wrapper_packages"],
+                             {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"})
             self.assertNotEqual(selection["overlay_lock_sha256"], reference_pins["overlay_lock_sha256"])
             pins = json.loads((output / "docker/prover-build-pins.json").read_text())
             self.assertEqual(pins["rust_toolchain"], "nightly-2026-01-01")

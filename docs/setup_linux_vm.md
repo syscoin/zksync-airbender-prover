@@ -111,9 +111,10 @@ prover_api_fake_fri_provers_enabled=false prover_api_fake_snark_provers_enabled=
 
 ### 10. Start FRI prover
 
-The checked-in wrapper applies the pinned diagnostic-only CUDA compatibility patch in isolated
-source copies; see [build overlay](airbender-build-overlay.md). It preserves package selection,
-the caller's working directory, and the normal `target/` artifact location.
+The checked-in wrapper prepares pinned Airbender and `zkos-wrapper` sources, with the CUDA
+compatibility and buffered OS-RNG patches, in isolated copies; the FRI binary does not link the
+wrapper packages. See [build overlay](airbender-build-overlay.md). The helper preserves package
+selection, the caller's working directory, and the normal `target/` artifact location.
 
 ```bash
 # in a new terminal/session

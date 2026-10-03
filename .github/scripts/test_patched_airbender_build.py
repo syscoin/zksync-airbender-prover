@@ -1,6 +1,7 @@
 """Offline source-overlay guards; no CUDA calls, builds, downloads, or shared-cache writes."""
 
 import copy
+from contextlib import ExitStack
 import hashlib
 import importlib.util
 import json
@@ -58,13 +59,15 @@ class LockOverlayTests(unittest.TestCase):
         ):
             HELPER.checked_hash(ROOT / relative, PINS[key])
 
-    def test_only_all_airbender_source_identities_change(self):
+    def test_only_all_airbender_and_wrapper_source_identities_change(self):
         packages = HELPER.audit_lock(self.canonical, self.overlay, PINS)
         self.assertEqual(len(packages), 46)
         self.assertIn("gpu_prover", packages)
         self.assertIn("cli", packages)
         self.assertIn("execution_utils", packages)
         self.assertFalse(any("zksync-airbender" in item.get("source", "")
+                             for item in self.overlay["package"]))
+        self.assertFalse(any("zkos-wrapper" in item.get("source", "")
                              for item in self.overlay["package"]))
 
     def test_current_derivation_is_byte_identical_to_reviewed_overlay(self):
@@ -74,6 +77,10 @@ class LockOverlayTests(unittest.TestCase):
         self.assertEqual(selected["canonical_lock_sha256"], PINS["canonical_lock_sha256"])
         self.assertEqual(selected["overlay_lock_sha256"], PINS["overlay_lock_sha256"])
         self.assertEqual(selected["airbender_packages"], HELPER.audit_lock(self.canonical, self.overlay, PINS))
+        self.assertEqual(selected["schema_version"], 2)
+        self.assertEqual(selected["derivation"], "airbender-wrapper-source-identity-only-v2")
+        self.assertEqual(selected["zkos_wrapper_packages"],
+                         {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"})
 
     def test_actual_parent_lock_with_separate_current_tooling(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -123,18 +130,37 @@ class LockOverlayTests(unittest.TestCase):
                 registry = next(item for item in modified["package"]
                                 if item.get("source", "").startswith("registry+"))
                 registry[field] = value
-                with self.assertRaisesRegex(ValueError, "more than Airbender source identity"):
+                with self.assertRaisesRegex(ValueError, "more than Airbender"):
                     HELPER.audit_lock(self.canonical, modified, PINS)
 
-    def test_crypto_or_wrapper_pin_drift_rejected(self):
-        for dependency in ("zksync-crypto.git", "zkos-wrapper.git"):
-            with self.subTest(dependency=dependency):
+    def test_crypto_pin_or_wrapper_path_identity_drift_rejected(self):
+        for name in ("zksync_bellman", "zkos-wrapper", "circuit_mersenne_field"):
+            with self.subTest(name=name):
                 modified = copy.deepcopy(self.overlay)
-                item = next(item for item in modified["package"]
-                            if dependency in item.get("source", ""))
-                item["source"] += "-changed"
+                item = next(item for item in modified["package"] if item["name"] == name)
+                item["source"] = item.get("source", HELPER.WRAPPER_LOCK_SOURCE) + "-changed"
                 with self.assertRaises(ValueError):
                     HELPER.audit_lock(self.canonical, modified, PINS)
+
+    def test_wrapper_source_version_package_and_partial_overlay_drift_rejected(self):
+        for edit in (
+            lambda p: p.update(source=p["source"] + "-changed"),
+            lambda p: p.update(version="0.2.0"),
+            lambda p: p.update(name="unknown-wrapper"),
+        ):
+            original = copy.deepcopy(self.canonical)
+            edit(next(p for p in original["package"] if p["name"] == "zkos-wrapper"))
+            with self.assertRaises(ValueError):
+                HELPER.audit_lock(original, self.overlay, PINS)
+        for name in HELPER.WRAPPER_PACKAGES:
+            original = copy.deepcopy(self.canonical)
+            original["package"] = [p for p in original["package"] if p["name"] != name]
+            with self.assertRaisesRegex(ValueError, "incomplete wrapper"):
+                HELPER.audit_lock(original, self.overlay, PINS)
+            modified = copy.deepcopy(self.overlay)
+            next(p for p in modified["package"] if p["name"] == name)["source"] = HELPER.WRAPPER_LOCK_SOURCE
+            with self.assertRaises(ValueError):
+                HELPER.audit_lock(self.canonical, modified, PINS)
 
     def test_partial_overlay_rejected(self):
         modified = copy.deepcopy(self.overlay)
@@ -168,6 +194,167 @@ class LockOverlayTests(unittest.TestCase):
         self.assertNotIn("CStr", additions)
 
 
+class WrapperPinTests(unittest.TestCase):
+    def fixture(self, directory, pins):
+        directory = Path(directory)
+        manifest = directory / "zkos-wrapper-buffered-os-rng.json"
+        manifest.write_text(json.dumps(pins))
+        (directory / "zkos-wrapper-buffered-os-rng.patch").write_bytes(
+            (ROOT / "patches/zkos-wrapper-buffered-os-rng.patch").read_bytes())
+        return manifest
+
+    def test_metadata_is_complete_and_never_executes_subprocess(self):
+        with patch.object(HELPER.subprocess, "run") as run, patch.object(HELPER.subprocess, "check_output") as output:
+            metadata = HELPER.wrapper_pins_metadata()
+            self.assertEqual(metadata["manifest_sha256"], HELPER.sha256(HELPER.WRAPPER_PIN_PATH))
+            self.assertEqual(metadata["pins"]["upstream_packages"], HELPER.WRAPPER_PACKAGES)
+            self.assertEqual(set(metadata["pins"]["changed_files"]), HELPER.WRAPPER_CHANGED_PATHS)
+            self.assertEqual(metadata["pins"]["patched_tree"], HELPER.WRAPPER_PATCHED_TREE)
+            run.assert_not_called()
+            output.assert_not_called()
+
+    def test_unknown_invalid_or_missing_pin_fields_fail_closed(self):
+        pins = HELPER.load_wrapper_pins()
+        for edit in (
+            lambda p: p.update(extra=True),
+            lambda p: p.update(schema_version=True),
+            lambda p: p.update(upstream_url="https://example.invalid/zkos-wrapper.git"),
+            lambda p: p.update(upstream_commit="f" * 40),
+            lambda p: p.update(upstream_tree="f" * 40),
+            lambda p: p.update(upstream_lock_source=p["upstream_lock_source"] + "-changed"),
+            lambda p: p["upstream_packages"].update({"unknown": "0.1.0"}),
+            lambda p: p["upstream_packages"].pop("circuit_mersenne_field"),
+            lambda p: p.update(patch_file="../escape.patch"),
+            lambda p: p.update(patch_sha256="0" * 64),
+            lambda p: p.update(patched_tree="f" * 40),
+            lambda p: p["changed_files"].pop("wrapper/src/lib.rs"),
+            lambda p: p["changed_files"]["wrapper/src/lib.rs"].update(preimage_sha256=None),
+            lambda p: p["changed_files"]["wrapper/src/lib.rs"].update(postimage_sha256="0" * 64),
+            lambda p: p["changed_files"]["wrapper/src/lib.rs"].update(postimage_size=True),
+            lambda p: p.update(purpose=""),
+        ):
+            with tempfile.TemporaryDirectory() as temporary:
+                invalid = copy.deepcopy(pins)
+                edit(invalid)
+                with self.assertRaises(ValueError):
+                    HELPER.load_wrapper_pins(self.fixture(temporary, invalid))
+
+    def test_duplicate_manifest_keys_symlinks_and_changed_patch_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self.fixture(temporary, HELPER.load_wrapper_pins())
+            manifest.write_text('{"schema_version":1,"schema_version":1}')
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+                HELPER.load_wrapper_pins(manifest)
+            manifest.unlink()
+            manifest.symlink_to(HELPER.WRAPPER_PIN_PATH)
+            with self.assertRaisesRegex(ValueError, "invalid JSON input"):
+                HELPER.load_wrapper_pins(manifest)
+            manifest.unlink()
+            manifest = self.fixture(temporary, HELPER.load_wrapper_pins())
+            artifact = manifest.parent / "zkos-wrapper-buffered-os-rng.patch"
+            artifact.write_bytes(b"changed patch")
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                HELPER.load_wrapper_pins(manifest)
+            artifact.unlink()
+            artifact.symlink_to(ROOT / "patches/zkos-wrapper-buffered-os-rng.patch")
+            with self.assertRaises(ValueError):
+                HELPER.load_wrapper_pins(manifest)
+
+    def test_patch_only_adds_private_rng_and_substitutes_the_two_padding_calls(self):
+        raw = (ROOT / "patches/zkos-wrapper-buffered-os-rng.patch").read_text()
+        chunks = raw.split("diff --git ")[1:]
+        self.assertEqual({chunk.splitlines()[0].split()[1][2:] for chunk in chunks},
+                         HELPER.WRAPPER_CHANGED_PATHS)
+        callsites = [chunk for chunk in chunks if "a/wrapper/src/buffered_os_rng.rs " not in chunk.splitlines()[0]]
+        additions = [line[1:] for chunk in callsites for line in chunk.splitlines()
+                     if line.startswith("+") and not line.startswith("+++")]
+        self.assertCountEqual(additions, [
+            "mod buffered_os_rng;",
+            "    SnarkWrapperFunction, SnarkWrapperProof, SnarkWrapperVK, buffered_os_rng::BufferedOsRng,",
+            "        let mut rng = BufferedOsRng::new();",
+            "        let mut rng = buffered_os_rng::BufferedOsRng::new();",
+        ])
+        rng = next(chunk for chunk in chunks if "a/wrapper/src/buffered_os_rng.rs " in chunk.splitlines()[0])
+        self.assertIn("pub(crate) struct BufferedOsRng", rng)
+        self.assertIn("const OS_ENTROPY_BUFFER_BYTES: usize = 64 * 1024;", rng)
+        self.assertIn("impl<R: RngCore + CryptoRng> CryptoRng for BufferedOsRng<R>", rng)
+        self.assertNotIn("unsafe", rng)
+        self.assertNotIn("Clone", rng)
+        self.assertIn("not be retained or reused across a process fork", rng)
+
+    def test_ci_executes_dependency_rng_tests_from_the_attested_workspace(self):
+        workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
+        self.assertIn('AIRBENDER_BUILD_ATTESTATION="${RUNNER_TEMP}/ci-test-airbender-inputs.json"', workflow)
+        self.assertIn("ci-test -- cargo test --locked --no-default-features", workflow)
+        self.assertIn("workspace=\"$(jq -er '.workspace' \"${record}\")\"", workflow)
+        self.assertIn("target=\"$(jq -er '.cargo_target_dir' \"${record}\")\"", workflow)
+        self.assertIn('CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${workspace}/Cargo.toml"', workflow)
+        self.assertIn("--locked -p zkos-wrapper --lib buffered_os_rng::tests", workflow)
+
+    def test_prepare_uses_isolated_clone_exact_pin_and_reverification(self):
+        pins = HELPER.load_wrapper_pins()
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary).resolve()
+            local_source = root / "source"
+            local_source.mkdir()
+            marker = local_source / "untouched"
+            marker.write_bytes(b"source must remain unchanged")
+            stack.enter_context(patch.dict(HELPER.os.environ, {"ZKOS_WRAPPER_SOURCE_DIR": str(local_source)}, clear=True))
+            run = stack.enter_context(patch.object(HELPER.subprocess, "run"))
+            git = stack.enter_context(patch.object(HELPER, "run_git", return_value=pins["upstream_tree"]))
+            hashes = stack.enter_context(patch.object(HELPER, "checked_hash"))
+            verify = stack.enter_context(patch.object(HELPER, "verify_wrapper"))
+            paths = stack.enter_context(patch.object(HELPER, "package_paths", return_value={"zkos-wrapper": "wrapper"}))
+            upstream, clone_source, package_paths = HELPER.prepare_wrapper(root, pins)
+            self.assertEqual(upstream, root / "zkos-wrapper")
+            self.assertEqual(clone_source, str(local_source))
+            self.assertEqual(package_paths, {"zkos-wrapper": "wrapper"})
+            run.assert_called_once_with(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
+                                         str(local_source), str(upstream)], check=True)
+            git.assert_any_call(upstream, "checkout", "--quiet", "--detach", pins["upstream_commit"])
+            git.assert_any_call(upstream, "apply", "--check", str(ROOT / "patches" / pins["patch_file"]))
+            git.assert_any_call(upstream, "apply", str(ROOT / "patches" / pins["patch_file"]))
+            git.assert_any_call(upstream, "add", "--", *sorted(pins["changed_files"]))
+            self.assertEqual(hashes.call_count, 2)
+            verify.assert_called_once_with(upstream, pins)
+            paths.assert_called_once_with(upstream, pins["upstream_packages"])
+            self.assertEqual(marker.read_bytes(), b"source must remain unchanged")
+
+    def test_reverification_rejects_git_state_hash_and_size_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pins = copy.deepcopy(HELPER.load_wrapper_pins())
+            for relative, row in pins["changed_files"].items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode())
+                row["postimage_sha256"] = HELPER.sha256(path)
+                row["postimage_size"] = path.stat().st_size
+            values = {
+                ("rev-parse", "HEAD"): pins["upstream_commit"],
+                ("rev-parse", "HEAD^{tree}"): pins["upstream_tree"],
+                ("diff", "--name-only", "HEAD"): "\n".join(sorted(pins["changed_files"])),
+                ("ls-files", "--others", "--exclude-standard"): "",
+                ("diff", "--name-only"): "",
+                ("write-tree",): pins["patched_tree"],
+            }
+            with patch.object(HELPER, "run_git", side_effect=lambda repo, *args: values[args]):
+                HELPER.verify_wrapper(root, pins)
+                for args, original in list(values.items()):
+                    values[args] = "unexpected"
+                    with self.assertRaises(ValueError):
+                        HELPER.verify_wrapper(root, pins)
+                    values[args] = original
+                relative = "wrapper/src/lib.rs"
+                pins["changed_files"][relative]["postimage_size"] += 1
+                with self.assertRaisesRegex(ValueError, "size mismatch"):
+                    HELPER.verify_wrapper(root, pins)
+                pins["changed_files"][relative]["postimage_size"] -= 1
+                (root / relative).write_bytes(b"changed")
+                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                    HELPER.verify_wrapper(root, pins)
+
+
 class CommandTests(unittest.TestCase):
     def test_manifest_injected_without_changing_role_or_application_arguments(self):
         command = ["cargo", "run", "--locked", "-p", "zksync_os_fri_prover", "--features", "gpu",
@@ -197,6 +384,117 @@ class CommandTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid build label"):
                 HELPER.main(["../bad", "--", "cargo", "build", "--locked"])
             checked.assert_not_called()
+
+
+class WrapperCpuIntegrationTests(unittest.TestCase):
+    def exercise(self, temporary, *, reject_reverification=False, reject_tooling=False, cargo_exit_code=0):
+        """Test CPU orchestration with real snapshots/records and mocked external tools."""
+        source = Path(temporary).resolve()
+        (source / "crates/example/src").mkdir(parents=True)
+        (source / "crates/example/src/lib.rs").write_text("pub fn fixture() {}\n")
+        (source / "crates/example/Cargo.toml").write_text('[package]\nname = "example"\nversion = "0.1.0"\n')
+        for name in HELPER.SOURCE_FILES:
+            (source / name).write_bytes((ROOT / name).read_bytes())
+        (source / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/example"]\n')
+        attestation = source / "verified-build.json"
+        events = []
+        pins = HELPER.load_wrapper_pins()
+        paths = {"circuit_mersenne_field": "circuit_mersenne_field", "zkos-wrapper": "wrapper"}
+        checked_hash = HELPER.checked_hash
+
+        def check_local_or_external(path, digest):
+            if path.name == Path(PINS["changed_path"]).name and "airbender" in path.parts:
+                return
+            if reject_tooling and path == HELPER.WRAPPER_PIN_PATH:
+                raise ValueError("tooling changed after Cargo")
+            checked_hash(path, digest)
+
+        def prepare_wrapper(build, selected_pins):
+            self.assertEqual(selected_pins, pins)
+            events.append("prepare-wrapper")
+            return build / "zkos-wrapper", pins["upstream_url"], paths
+
+        def verify_wrapper(root, selected_pins):
+            self.assertEqual(root.name, "zkos-wrapper")
+            self.assertEqual(selected_pins, pins)
+            events.append("reverify-wrapper")
+            if reject_reverification:
+                raise ValueError("wrapper changed after Cargo")
+
+        def run(command, **kwargs):
+            if command[0] == "cargo":
+                events.append("cargo")
+                manifest = HELPER.read_toml(Path(command[command.index("--manifest-path") + 1]))
+                self.assertEqual(set(manifest["patch"][pins["upstream_url"]]), set(paths))
+                self.assertIn("--no-default-features", command)
+                return unittest.mock.Mock(returncode=cargo_exit_code)
+            self.assertEqual(command[:2], ["git", "clone"])
+            return unittest.mock.Mock(returncode=0)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(HELPER.os.environ, {
+                "PROVER_SOURCE_DIR": str(source), "AIRBENDER_BUILD_ATTESTATION": str(attestation),
+            }, clear=True))
+            for name, kwargs in (
+                ("checked_hash", {"side_effect": check_local_or_external}),
+                ("run_git", {"return_value": PINS["upstream_tree"]}),
+                ("verify_upstream", {}),
+                ("package_paths", {"side_effect": lambda root, packages: {p: p for p in packages}}),
+                ("prepare_wrapper", {"side_effect": prepare_wrapper}),
+                ("verify_wrapper", {"side_effect": verify_wrapper}),
+            ):
+                stack.enter_context(patch.object(HELPER, name, **kwargs))
+            stack.enter_context(patch.object(HELPER.subprocess, "run", side_effect=run))
+            stack.enter_context(patch.object(HELPER.subprocess, "check_output", return_value="offline-test-version"))
+            command = ["--cpu", "test-wrapper", "--", "cargo", "build", "--locked", "--no-default-features"]
+            if reject_reverification or reject_tooling:
+                with self.assertRaisesRegex(ValueError, "changed after Cargo"):
+                    HELPER.main(command)
+            else:
+                self.assertEqual(HELPER.main(command), cargo_exit_code)
+        builds = list((source / "target/patched-airbender").iterdir())
+        self.assertEqual(len(builds), 1)
+        return attestation, builds[0], events
+
+    def test_cpu_success_records_wrapper_closure_after_reverification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary)
+            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            record = json.loads(attestation.read_text())
+            self.assertIs(record["inputs_reverified"], True)
+            self.assertEqual(record["zkos_wrapper"]["inputs"], HELPER.wrapper_pins_metadata())
+            self.assertEqual(record["zkos_wrapper"]["source"]["patched_tree"], HELPER.WRAPPER_PATCHED_TREE)
+            self.assertEqual(set(record["zkos_wrapper"]["package_paths"]), set(HELPER.WRAPPER_PACKAGES))
+            for suffix in ("json", "patch"):
+                relative = "patches/zkos-wrapper-buffered-os-rng." + suffix
+                self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+            self.assertEqual(record, json.loads((build / "build-result.json").read_text()))
+            self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(), (ROOT / "Cargo.lock").read_bytes())
+            self.assertEqual((build / "prover/Cargo.lock").read_bytes(),
+                             (ROOT / "patches/airbender.Cargo.lock").read_bytes())
+
+    def test_cpu_reverification_failure_never_emits_success_attestation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary, reject_reverification=True)
+            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            self.assertFalse(attestation.exists())
+            self.assertFalse((build / "build-result.json").exists())
+
+    def test_cpu_cargo_failure_remains_unverified(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary, cargo_exit_code=9)
+            self.assertEqual(events, ["prepare-wrapper", "cargo"])
+            self.assertFalse(attestation.exists())
+            record = json.loads((build / "build-result.json").read_text())
+            self.assertIs(record["inputs_reverified"], False)
+            self.assertEqual(record["cargo_exit_code"], 9)
+
+    def test_cpu_tooling_drift_never_emits_success_attestation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary, reject_tooling=True)
+            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            self.assertFalse(attestation.exists())
+            self.assertFalse((build / "build-result.json").exists())
 
 
 class MaterializationTests(unittest.TestCase):

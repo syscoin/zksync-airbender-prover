@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Build with one reviewed Airbender patch, without altering the original checkout.
+"""Build with reviewed Airbender and zkos-wrapper patches without altering source checkouts.
 
 Usage: cargo-with-patched-airbender.sh LABEL -- cargo build|test|run|check|clippy|metadata|tree --locked ...
 PROVER_SOURCE_DIR separates reviewed tooling from application source in release CI.
 AIRBENDER_SOURCE_DIR optionally supplies a local Git clone (never modified).
+ZKOS_WRAPPER_SOURCE_DIR optionally supplies the exact pinned wrapper Git clone.
 AIRBENDER_BUILD_ATTESTATION names a fresh absolute success-only JSON output.
 The caller's working directory and absolute CARGO_TARGET_DIR are preserved. By
 default artifacts stay in the application source's target directory. Fresh source
@@ -30,9 +31,24 @@ except ImportError:  # Ubuntu 22.04: installed by apt, never fetched with pip.
 
 TOOLING_ROOT = Path(__file__).resolve().parents[1]
 PIN_PATH = TOOLING_ROOT / "patches/airbender-cuda-device-diagnostics.json"
+WRAPPER_PIN_PATH = TOOLING_ROOT / "patches/zkos-wrapper-buffered-os-rng.json"
 SOURCE_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
                 "multiblock_batch.bin", "multiblock_batch.text")
 ALLOWED_COMMANDS = {"build", "test", "run", "check", "clippy", "metadata", "tree"}
+WRAPPER_UPSTREAM = (
+    "https://github.com/matter-labs/zkos-wrapper.git",
+    "585595f145cb53a09a130706ca36f80ddcac3961",
+    "8c6e6a2ac3fa86708864c740d582ca30afe6851f",
+)
+WRAPPER_LOCK_SOURCE = (
+    "git+https://github.com/matter-labs/zkos-wrapper.git?tag=v0.6.0-rc.2"
+    "#585595f145cb53a09a130706ca36f80ddcac3961"
+)
+WRAPPER_PACKAGES = {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"}
+WRAPPER_CHANGED_PATHS = {
+    "wrapper/src/buffered_os_rng.rs", "wrapper/src/gpu/snark.rs", "wrapper/src/lib.rs",
+}
+WRAPPER_PATCHED_TREE = "843324ec211797720a97b3421e591645809733b9"
 
 
 def require(condition, message):
@@ -58,32 +74,103 @@ def read_toml(path):
         return tomllib.load(source)
 
 
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "duplicate JSON key: " + key)
+        result[key] = value
+    return result
+
+
+def json_document(path):
+    require(path.is_file() and not path.is_symlink(), "invalid JSON input: " + str(path))
+    return json.loads(path.read_text(), object_pairs_hook=unique_object)
+
+
+def load_wrapper_pins(path=WRAPPER_PIN_PATH):
+    pins = json_document(path)
+    require(set(pins) == {"schema_version", "upstream_url", "upstream_commit", "upstream_tree",
+            "upstream_lock_source", "upstream_packages", "patch_file", "patch_sha256",
+            "changed_files", "patched_tree", "purpose"}, "unknown wrapper pin fields")
+    require(pins["schema_version"] == 1 and type(pins["schema_version"]) is int,
+            "unsupported wrapper pin schema")
+    require(tuple(pins[k] for k in ("upstream_url", "upstream_commit", "upstream_tree"))
+            == WRAPPER_UPSTREAM, "unknown wrapper upstream origin")
+    require(pins["upstream_lock_source"] == WRAPPER_LOCK_SOURCE,
+            "unknown wrapper lock source")
+    require(pins["upstream_packages"] == WRAPPER_PACKAGES,
+            "unknown wrapper package graph")
+    require(pins["patch_file"] == "zkos-wrapper-buffered-os-rng.patch"
+            and re.fullmatch(r"[0-9a-f]{64}", pins["patch_sha256"])
+            and pins["patch_sha256"] != "0" * 64, "invalid wrapper patch identity")
+    checked_hash(path.parent / pins["patch_file"], pins["patch_sha256"])
+    require(pins["patched_tree"] == WRAPPER_PATCHED_TREE, "unknown wrapper patched tree")
+    require(isinstance(pins["changed_files"], dict)
+            and set(pins["changed_files"]) == WRAPPER_CHANGED_PATHS,
+            "unknown wrapper source closure")
+    for relative, row in pins["changed_files"].items():
+        require(not Path(relative).is_absolute() and ".." not in Path(relative).parts
+                and str(Path(relative)) == relative, "noncanonical wrapper source route")
+        require(set(row) == {"preimage_sha256", "postimage_sha256", "postimage_size"},
+                "unknown wrapper source fields")
+        is_new = relative == "wrapper/src/buffered_os_rng.rs"
+        require((row["preimage_sha256"] is None) == is_new, "invalid wrapper new-file preimage")
+        require(is_new or isinstance(row["preimage_sha256"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", row["preimage_sha256"])
+                and row["preimage_sha256"] != "0" * 64, "invalid wrapper preimage")
+        require(isinstance(row["postimage_sha256"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", row["postimage_sha256"])
+                and row["postimage_sha256"] != "0" * 64
+                and type(row["postimage_size"]) is int and row["postimage_size"] > 0,
+                "invalid wrapper postimage")
+    require(isinstance(pins["purpose"], str) and pins["purpose"], "missing wrapper purpose")
+    return pins
+
+
+def wrapper_pins_metadata(path=WRAPPER_PIN_PATH):
+    return {"manifest_sha256": sha256(path), "pins": load_wrapper_pins(path)}
+
+
 def run_git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
 
 
-def audit_lock(canonical, overlay, pins):
-    """Allow only the reviewed Git-to-path identity change for every Airbender crate."""
+def audit_lock(canonical, overlay, pins, wrapper_pins=None):
+    """Allow only reviewed Git-to-path identity changes for Airbender and wrapper crates."""
+    wrapper_pins = wrapper_pins or load_wrapper_pins()
     expected = copy.deepcopy(canonical)
     packages = []
+    wrapper_packages = {}
     for package in expected["package"]:
         source = package.get("source", "")
         if "github.com/matter-labs/zksync-airbender" in source:
             require(source == pins["upstream_lock_source"], "mixed Airbender sources in lock")
             packages.append((package["name"], package["version"]))
             del package["source"]
+        elif "github.com/matter-labs/zkos-wrapper" in source:
+            require(source == wrapper_pins["upstream_lock_source"],
+                    "mixed wrapper sources in lock")
+            name, version = package["name"], package["version"]
+            require(name not in wrapper_packages and wrapper_pins["upstream_packages"].get(name) == version,
+                    "unknown wrapper package/version")
+            wrapper_packages[name] = version
+            del package["source"]
     require(len(packages) == pins["upstream_package_count"], "unexpected Airbender package count")
     require(len({name for name, _ in packages}) == len(packages), "duplicate Airbender package name")
-    require(expected == overlay, "lock overlay changes more than Airbender source identity")
+    require(wrapper_packages == wrapper_pins["upstream_packages"],
+            "incomplete wrapper package graph")
+    require(expected == overlay,
+            "lock overlay changes more than Airbender/wrapper source identities")
     return dict(packages)
 
 
-def selected_lock_overlay(source_lock, reference_overlay, pins):
+def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=None):
     """Derive only the reviewed source-identity substitution from the selected lock.
 
     The checked-in overlay remains an immutable tooling reference, not a replacement
     for another compatible application's dependency graph. No Cargo resolution occurs.
     """
+    wrapper_pins = wrapper_pins or load_wrapper_pins()
     require(source_lock.is_file() and not source_lock.is_symlink(), "invalid selected Cargo.lock")
     checked_hash(reference_overlay, pins["overlay_lock_sha256"])
     raw = source_lock.read_bytes()
@@ -93,28 +180,40 @@ def selected_lock_overlay(source_lock, reference_overlay, pins):
     require(len(blocks) == len(canonical["package"]) + 1, "unexpected lock package layout")
     for index, package in enumerate(canonical["package"], 1):
         source = package.get("source", "")
-        if "github.com/matter-labs/zksync-airbender" not in source:
+        airbender = "github.com/matter-labs/zksync-airbender" in source
+        wrapper = "github.com/matter-labs/zkos-wrapper" in source
+        if not airbender and not wrapper:
             continue
-        require(source == pins["upstream_lock_source"], "mixed Airbender sources in lock")
+        if airbender:
+            require(source == pins["upstream_lock_source"], "mixed Airbender sources in lock")
+        else:
+            require(source == wrapper_pins["upstream_lock_source"], "mixed wrapper sources in lock")
+            require(wrapper_pins["upstream_packages"].get(package["name"]) == package["version"],
+                    "unknown wrapper package/version")
         lines = blocks[index].splitlines(keepends=True)
         # Cargo emits this simple quoted source assignment. Refuse alternate layouts
         # instead of guessing which bytes to remove from an application lock.
         expected_line = ("source = " + json.dumps(source)).encode()
         matches = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == expected_line]
-        require(len(matches) == 1, "unexpected Airbender source assignment")
+        require(len(matches) == 1, "unexpected reviewed-source assignment")
         del lines[matches[0]]
         blocks[index] = b"".join(lines)
     overlay_raw = b"".join(blocks)
-    packages = audit_lock(canonical, tomllib.loads(overlay_raw.decode("utf-8")), pins)
+    packages = audit_lock(canonical, tomllib.loads(overlay_raw.decode("utf-8")), pins, wrapper_pins)
     for name, version in packages.items():
         matches = [item for item in reference["package"]
                    if item["name"] == name and item["version"] == version and "source" not in item]
         require(len(matches) == 1, "selected Airbender package differs from tooling reference")
+    for name, version in wrapper_pins["upstream_packages"].items():
+        matches = [item for item in reference["package"]
+                   if item["name"] == name and item["version"] == version and "source" not in item]
+        require(len(matches) == 1, "selected wrapper package differs from tooling reference")
     selection = {
-        "schema_version": 1, "derivation": "airbender-source-identity-only-v1",
+        "schema_version": 2, "derivation": "airbender-wrapper-source-identity-only-v2",
         "canonical_lock_sha256": hashlib.sha256(raw).hexdigest(),
         "overlay_lock_sha256": hashlib.sha256(overlay_raw).hexdigest(),
         "airbender_packages": packages,
+        "zkos_wrapper_packages": wrapper_pins["upstream_packages"],
     }
     return overlay_raw, selection
 
@@ -368,7 +467,7 @@ def package_paths(upstream, expected):
         require(version == expected[name], f"version mismatch for {name}")
         require(name not in paths, f"ambiguous package path for {name}")
         paths[name] = str(Path(relative).parent)
-    require(set(paths) == set(expected), "incomplete Airbender package mapping")
+    require(set(paths) == set(expected), "incomplete reviewed package mapping")
     return dict(sorted(paths.items()))
 
 
@@ -381,6 +480,53 @@ def verify_upstream(upstream, pins):
     require(not run_git(upstream, "diff", "--name-only"), "upstream changed after patch staging")
     require(run_git(upstream, "write-tree") == pins["patched_tree"], "patched tree mismatch")
     checked_hash(upstream / pins["changed_path"], pins["postimage_sha256"])
+
+
+def verify_wrapper(upstream, pins):
+    require(run_git(upstream, "rev-parse", "HEAD") == pins["upstream_commit"],
+            "wrapper HEAD changed")
+    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"],
+            "wrapper upstream tree changed")
+    require(run_git(upstream, "diff", "--name-only", "HEAD").splitlines()
+            == sorted(pins["changed_files"]), "unexpected wrapper changed paths")
+    require(not run_git(upstream, "ls-files", "--others", "--exclude-standard"),
+            "unexpected wrapper untracked files")
+    require(not run_git(upstream, "diff", "--name-only"),
+            "wrapper changed after patch staging")
+    require(run_git(upstream, "write-tree") == pins["patched_tree"],
+            "wrapper patched tree mismatch")
+    for relative, row in pins["changed_files"].items():
+        path = upstream / relative
+        checked_hash(path, row["postimage_sha256"])
+        require(path.stat().st_size == row["postimage_size"],
+                "wrapper postimage size mismatch")
+
+
+def prepare_wrapper(build, pins):
+    upstream = build / "zkos-wrapper"
+    clone_source = os.environ.get("ZKOS_WRAPPER_SOURCE_DIR", pins["upstream_url"])
+    if "ZKOS_WRAPPER_SOURCE_DIR" in os.environ:
+        clone_source = str(Path(clone_source).resolve(strict=True))
+        require(Path(clone_source).is_dir(), "ZKOS_WRAPPER_SOURCE_DIR must be a Git directory")
+    subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
+                    clone_source, str(upstream)], check=True)
+    run_git(upstream, "checkout", "--quiet", "--detach", pins["upstream_commit"])
+    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"],
+            "wrapper upstream tree mismatch")
+    for relative, row in pins["changed_files"].items():
+        path = upstream / relative
+        if row["preimage_sha256"] is None:
+            require(not path.exists() and not path.is_symlink(),
+                    "wrapper new-file preimage already exists")
+        else:
+            checked_hash(path, row["preimage_sha256"])
+    patch = WRAPPER_PIN_PATH.parent / pins["patch_file"]
+    run_git(upstream, "apply", "--check", str(patch))
+    run_git(upstream, "apply", str(patch))
+    run_git(upstream, "add", "--", *sorted(pins["changed_files"]))
+    verify_wrapper(upstream, pins)
+    paths = package_paths(upstream, pins["upstream_packages"])
+    return upstream, clone_source, paths
 
 
 def write_json_exclusive(path, value):
@@ -401,12 +547,15 @@ def main(argv):
     source = Path(os.environ.get("PROVER_SOURCE_DIR", TOOLING_ROOT)).resolve(strict=True)
     require_airbender_only(source, argv[2:], explicit_cpu)
     pins = json.loads(PIN_PATH.read_text())
+    wrapper_pins = load_wrapper_pins()
+    wrapper_inputs = wrapper_pins_metadata()
     require(pins["schema_version"] == 1, "unsupported pin schema")
     patch = PIN_PATH.parent / pins["patch_file"]
     overlay = PIN_PATH.parent / pins["overlay_lock_file"]
     checked_hash(patch, pins["patch_sha256"])
     checked_hash(overlay, pins["overlay_lock_sha256"])
-    overlay_raw, selected_lock = selected_lock_overlay(source / "Cargo.lock", overlay, pins)
+    overlay_raw, selected_lock = selected_lock_overlay(
+        source / "Cargo.lock", overlay, pins, wrapper_pins)
     expected = selected_lock["airbender_packages"]
     attestation = os.environ.get("AIRBENDER_BUILD_ATTESTATION")
     if attestation:
@@ -438,6 +587,7 @@ def main(argv):
     run_git(upstream, "add", "--", pins["changed_path"])
     verify_upstream(upstream, pins)
     paths = package_paths(upstream, expected)
+    wrapper, wrapper_clone_source, wrapper_paths = prepare_wrapper(build, wrapper_pins)
     manifest = workspace / "Cargo.toml"
     application_manifest = read_toml(manifest)
     require("patch" not in application_manifest and "replace" not in application_manifest,
@@ -449,11 +599,24 @@ def main(argv):
         for name, relative in paths.items():
             destination.write(json.dumps(name) + " = { path = "
                               + json.dumps(str(upstream / relative)) + " }\n")
+        destination.write('\n[patch.' + json.dumps(wrapper_pins["upstream_url"]) + ']\n')
+        for name, relative in wrapper_paths.items():
+            destination.write(json.dumps(name) + " = { path = "
+                              + json.dumps(str(wrapper / relative)) + " }\n")
     (workspace / "Cargo.lock").write_bytes(overlay_raw)
     record = {
         "schema_version": 1, "label": label, "pins": pins, "selected_lock": selected_lock,
+        "zkos_wrapper": {
+            "inputs": wrapper_inputs,
+            "source": {"clone_source": wrapper_clone_source,
+                       "upstream_commit": wrapper_pins["upstream_commit"],
+                       "upstream_tree": wrapper_pins["upstream_tree"],
+                       "patched_tree": wrapper_pins["patched_tree"]},
+            "package_paths": wrapper_paths,
+        },
         "tooling_sha256": {str(path.relative_to(TOOLING_ROOT)): sha256(path) for path in
-                           (PIN_PATH, patch, overlay, Path(__file__).resolve(),
+                           (PIN_PATH, patch, overlay, WRAPPER_PIN_PATH,
+                            WRAPPER_PIN_PATH.parent / wrapper_pins["patch_file"], Path(__file__).resolve(),
                             TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")},
         "application_source": str(source), "application_inputs_sha256": source_hashes,
         "workspace": str(workspace), "upstream_clone_source": clone_source,
@@ -470,7 +633,7 @@ def main(argv):
         "started_unix": int(time.time()),
     }
     write_json_exclusive(build / "build-inputs.json", record)
-    print(f"Patched Airbender build inputs: {build / 'build-inputs.json'}", file=sys.stderr, flush=True)
+    print(f"Reviewed source-overlay build inputs: {build / 'build-inputs.json'}", file=sys.stderr, flush=True)
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(target)
     result = subprocess.run(record["cargo_command"], env=env)
@@ -481,11 +644,14 @@ def main(argv):
         write_json_exclusive(build / "build-result.json", record)
         return result.returncode
     verify_upstream(upstream, pins)
+    verify_wrapper(wrapper, wrapper_pins)
     checked_hash(workspace / "Cargo.lock", selected_lock["overlay_lock_sha256"])
     checked_hash(manifest, record["workspace_manifest_sha256"])
     for relative, expected_hash in source_hashes.items():
         if relative not in {"Cargo.toml", "Cargo.lock"}:
             checked_hash(workspace / relative, expected_hash)
+    for relative, expected_hash in record["tooling_sha256"].items():
+        checked_hash(TOOLING_ROOT / relative, expected_hash)
     record["inputs_reverified"] = True
     write_json_exclusive(build / "build-result.json", record)
     if attestation:
@@ -497,5 +663,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
-        print(f"patched Airbender build failed: {error}", file=sys.stderr)
+        print(f"reviewed source-overlay build failed: {error}", file=sys.stderr)
         sys.exit(1)

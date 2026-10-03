@@ -61,13 +61,14 @@ Use `-p` to select the worker package as well as `--bin`: selecting only a binar
 workspace root can unify other workers' GPU features and pull the SNARK CUDA backend into FRI.
 The isolated FRI GPU worker does not require `BELLMAN_CUDA_DIR`; GPU SNARK and combined workers do.
 
-Use the checked-in Cargo wrapper shown below for worker builds and runs. FRI and explicit CPU
-builds retain the pinned diagnostic-only Airbender patch. GPU SNARK and combined builds select
-`--gpu32`, additionally applying the tested memory patches to pinned crypto-GPU and Bellman CUDA
-sources in disposable copies. It audits the complete lock overlay and leaves artifacts under
-the usual `target/` directory. Python 3.11+ or Python 3 with
-the distribution's `python3-tomli` package is required. Direct `cargo` worker builds omit this fix;
-see [build overlay and provenance](docs/airbender-build-overlay.md).
+Use the checked-in Cargo wrapper shown below for worker builds and runs. Every lane prepares exact
+Airbender and `zkos-wrapper` sources in disposable copies, including the diagnostic compatibility
+patch and buffered OS-RNG patch; the isolated FRI binary does not link the wrapper packages. GPU
+SNARK and combined builds select `--gpu32`, additionally applying the tested memory patches to
+pinned crypto-GPU and Bellman CUDA sources. The helper audits the complete lock overlay and leaves
+artifacts under the usual `target/` directory. Python 3.11+ or Python 3 with the distribution's
+`python3-tomli` package is required. Direct `cargo` worker builds omit these reviewed overlays; see
+[build overlay and provenance](docs/airbender-build-overlay.md).
 
 FRI requires a CUDA GPU. Airbender selects a bounded arena from available VRAM; the
 current V32 service validation used a 32 GiB RTX 5090. Physical 24 GiB operation is not

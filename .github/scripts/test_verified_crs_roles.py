@@ -246,12 +246,11 @@ if mutation == 'curl-failure':
                 "runDetails": {"builder": {"id": "offline-test"}}}
         args = ["jq", "-ce", "--argjson", "build_pins", json.dumps(PINS)]
         manifest = ROOT / "patches/airbender-cuda-device-diagnostics.json"
-        airbender = {"manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
-                     "pins": json.loads(manifest.read_text())}
-        args += ["--argjson", "airbender", json.dumps(airbender)]
         spec = importlib.util.spec_from_file_location("gpu_image_identity", ROOT / ".github/scripts/image-sbom-identity.py")
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
+        airbender = helper.airbender_build_pins(manifest, ROOT / "Cargo.lock")
+        args += ["--argjson", "airbender", json.dumps(airbender)]
         gpu = helper.gpu_backend_build_pins(ROOT / "patches/gpu32-memory.json", ROOT / "Cargo.lock")
         for name in ("source_uri", "source_sha", "tooling_uri", "tooling_repository", "tooling_sha",
                      "app_bin_sha256", "app_text_sha256"):

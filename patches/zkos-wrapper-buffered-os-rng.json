@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "upstream_url": "https://github.com/matter-labs/zkos-wrapper.git",
+  "upstream_commit": "585595f145cb53a09a130706ca36f80ddcac3961",
+  "upstream_tree": "8c6e6a2ac3fa86708864c740d582ca30afe6851f",
+  "upstream_lock_source": "git+https://github.com/matter-labs/zkos-wrapper.git?tag=v0.6.0-rc.2#585595f145cb53a09a130706ca36f80ddcac3961",
+  "upstream_packages": {
+    "circuit_mersenne_field": "0.1.0",
+    "zkos-wrapper": "0.1.0"
+  },
+  "patch_file": "zkos-wrapper-buffered-os-rng.patch",
+  "patch_sha256": "6da86d6e8c152b6d9dbd69d97f95ab0df4fcf1ae728fe30df446c8f291419247",
+  "changed_files": {
+    "wrapper/src/buffered_os_rng.rs": {
+      "preimage_sha256": null,
+      "postimage_sha256": "724447b41e44800b379be6931cd8a9966c2e18567d1e96eccc20ac174a78467f",
+      "postimage_size": 6218
+    },
+    "wrapper/src/gpu/snark.rs": {
+      "preimage_sha256": "229dbf8258c201833421a25371ec5d0a750a2d25619ac7dd2a20f1f71c6cbae9",
+      "postimage_sha256": "94d1278e314bf63b50a9bc0d6df0a016d3636b2fb271214bc5caeed4351a6fa5",
+      "postimage_size": 9569
+    },
+    "wrapper/src/lib.rs": {
+      "preimage_sha256": "d11415f2de511cfdeaef708c8a670f6e7e46212dfbd7ff03dd54f61491557346",
+      "postimage_sha256": "6dcc4a1e30245e280ec525bba25d5fcc0ee1d93dae5e9f8c0e6ec1a0d35a31f9",
+      "postimage_size": 32698
+    }
+  },
+  "patched_tree": "843324ec211797720a97b3421e591645809733b9",
+  "purpose": "Use one private 64 KiB fail-closed OS-entropy buffer for CPU and GPU final-SNARK zero-knowledge padding. Security level, circuit domain, constraint layout, verification key, proof format, and randomness distribution are unchanged."
+}

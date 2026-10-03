@@ -13,6 +13,6 @@
   "patched_tree": "46fb7849211ce3f2200bc1d0f8fc74a8bcb8704b",
   "canonical_lock_sha256": "108f48582a1107251b3e4fdf9233e746c9fa62dfac071b0f0d233c6db4a0edf9",
   "overlay_lock_file": "airbender.Cargo.lock",
-  "overlay_lock_sha256": "bf3ea7d6343028191f9d0e22094443c0bbbfc83cc7e200fc184555e181d42899",
+  "overlay_lock_sha256": "f2f5f4b93849767d2d082966ec5549c41223febde75b74b1dafdeb7312b4db56",
   "purpose": "Replace a runtime-versioned bulk CUDA device-properties startup log with the stable scalar SM-count API. No proving, verifier, registry, or guest changes."
 }

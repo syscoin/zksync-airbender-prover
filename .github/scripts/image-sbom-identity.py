@@ -62,16 +62,19 @@ def airbender_build_pins(path, source_lock=None):
         require(artifact.is_file() and not artifact.is_symlink(), f"invalid Airbender {key}")
         require(hashlib.sha256(artifact.read_bytes()).hexdigest() == pins[hash_key],
                 f"Airbender {key} hash mismatch")
-    result = {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "pins": pins}
+    # SYSCOIN: Both CPU and GPU lanes use the same exact wrapper-source overlay.
+    # These are prepared build inputs, not a claim that the FRI-only binary links it.
+    wrapper = Path(__file__).resolve().parents[2] / "scripts/prepare-patched-airbender.py"
+    spec = importlib.util.spec_from_file_location("selected_airbender_lock", wrapper)
+    helper = importlib.util.module_from_spec(spec)
+    exec(compile(wrapper.read_bytes(), str(wrapper), "exec"), helper.__dict__)
+    wrapper_manifest = path.parent / "zkos-wrapper-buffered-os-rng.json"
+    result = {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "pins": pins,
+              "zkos_wrapper": helper.wrapper_pins_metadata(wrapper_manifest)}
     if source_lock is not None:
         # Use the same byte derivation and full semantic audit as the Cargo wrapper.
         # Tooling pins continue to identify immutable reference files; selected_lock
         # identifies the actual source and generated lock used by this build.
-        wrapper = Path(__file__).resolve().parents[2] / "scripts/prepare-patched-airbender.py"
-        spec = importlib.util.spec_from_file_location("selected_airbender_lock", wrapper)
-        helper = importlib.util.module_from_spec(spec)
-        # Keep a verified sparse tooling checkout clean (including untracked files).
-        exec(compile(wrapper.read_bytes(), str(wrapper), "exec"), helper.__dict__)
         _, result["selected_lock"] = helper.selected_lock_overlay(
             source_lock, path.parent / pins["overlay_lock_file"], pins)
     return result

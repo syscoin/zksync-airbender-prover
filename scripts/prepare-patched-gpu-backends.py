@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Apply the exact GPU32 source overlays without mutating shared Git checkouts.
+"""Apply the common proving-source and exact GPU32 overlays in fresh checkouts.
 
-LABEL -- cargo COMMAND --locked ... composes the existing selected-lock-aware
-Airbender overlay with the reviewed GPU graph. --prepare-bellman ABS_FRESH_DIR
+LABEL -- cargo COMMAND --locked ... composes the selected-lock-aware Airbender
+and zkos-wrapper overlays with the reviewed GPU graph. --prepare-bellman ABS_FRESH_DIR
 only creates an attested source tree; the caller builds its production library.
 No CUDA tests, proof, service, or automatic CPU fallback is run by this helper.
 """
@@ -212,11 +212,12 @@ def gpu_backend_pins(manifest, source_lock=None):
             source_lock, base.PIN_PATH.parent / air["overlay_lock_file"], air)
         combined = crypto_lock_overlay(raw, pins)
         result["selected_lock"] = {
-            "derivation": "airbender-and-crypto-gpu-source-identity-only-v1",
+            "derivation": "airbender-wrapper-and-crypto-gpu-source-identity-only-v2",
             "canonical_lock_sha256": selected["canonical_lock_sha256"],
             "airbender_overlay_lock_sha256": selected["overlay_lock_sha256"],
             "combined_overlay_lock_sha256": hashlib.sha256(combined).hexdigest(),
             "airbender_packages": selected["airbender_packages"],
+            "zkos_wrapper_packages": selected["zkos_wrapper_packages"],
             "crypto_packages": CRYPTO_PACKAGES,
         }
     return result
@@ -351,6 +352,8 @@ def main(argv):
     base.cargo_command(argv[2:], Path("placeholder/Cargo.toml"))
     source = Path(os.environ.get("PROVER_SOURCE_DIR", TOOLING_ROOT)).resolve(strict=True)
     air = document(base.PIN_PATH)
+    wrapper_pins = base.load_wrapper_pins()
+    wrapper_inputs = base.wrapper_pins_metadata()
     patch = base.PIN_PATH.parent / air["patch_file"]
     base.checked_hash(patch, air["patch_sha256"])
     overlay_raw, selected_lock = base.selected_lock_overlay(
@@ -391,6 +394,7 @@ def main(argv):
     base.run_git(upstream, "add", "--", air["changed_path"])
     base.verify_upstream(upstream, air)
     air_paths = base.package_paths(upstream, selected_lock["airbender_packages"])
+    wrapper, wrapper_clone, wrapper_paths = base.prepare_wrapper(build, wrapper_pins)
     crypto = build / "crypto-gpu"
     crypto_record = prepare_backend(crypto, "crypto", pins, base)
     crypto_paths = base.package_paths(crypto, CRYPTO_PACKAGES)
@@ -400,6 +404,7 @@ def main(argv):
             "application dependency overrides need review")
     with manifest.open("a", encoding="utf-8") as destination:
         for url, root, paths in ((air["upstream_url"], upstream, air_paths),
+                                 (wrapper_pins["upstream_url"], wrapper, wrapper_paths),
                                  (pins["crypto"]["upstream_url"], crypto, crypto_paths)):
             destination.write('\n[patch.' + json.dumps(url) + ']\n')
             for name, relative in paths.items():
@@ -407,10 +412,20 @@ def main(argv):
     (workspace / "Cargo.lock").write_bytes(combined)
     tooling = (PIN_PATH, *(PIN_PATH.parent / pins[k]["patch_file"] for k in ("crypto", "bellman")),
                base.PIN_PATH, patch, base.PIN_PATH.parent / air["overlay_lock_file"],
+               base.WRAPPER_PIN_PATH,
+               base.WRAPPER_PIN_PATH.parent / wrapper_pins["patch_file"],
                Path(__file__).resolve(), TOOLING_ROOT / "scripts/prepare-patched-airbender.py",
                TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")
     record = {
         "schema_version": 1, "label": label, "pins": air, "selected_lock": selected_lock,
+        "zkos_wrapper": {
+            "inputs": wrapper_inputs,
+            "source": {"clone_source": wrapper_clone,
+                       "upstream_commit": wrapper_pins["upstream_commit"],
+                       "upstream_tree": wrapper_pins["upstream_tree"],
+                       "patched_tree": wrapper_pins["patched_tree"]},
+            "package_paths": wrapper_paths,
+        },
         "gpu_backend_overlay": {"inputs": metadata, "crypto_source": crypto_record, "bellman_native": native},
         "tooling_sha256": {str(p.relative_to(TOOLING_ROOT)): sha256(p) for p in tooling},
         "application_source": str(source), "application_inputs_sha256": source_hashes,
@@ -438,6 +453,7 @@ def main(argv):
         base.write_json_exclusive(build / "build-result.json", record)
         return result.returncode
     base.verify_upstream(upstream, air)
+    base.verify_wrapper(wrapper, wrapper_pins)
     verify_backend(crypto, "crypto", pins, base, crypto_record["tracked_inventory"], record_allowed=True)
     require(bellman_library(native_root, pins, base) == native, "Bellman native/source closure changed")
     base.checked_hash(workspace / "Cargo.lock", metadata["selected_lock"]["combined_overlay_lock_sha256"])
