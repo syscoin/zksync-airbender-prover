@@ -47,9 +47,10 @@ enum Commands {
         output: PathBuf,
     },
     RunProver {
-        /// CPU startup policy: auto tunes only the measured unrestricted Linux GPU
-        /// 24-core/48-thread topology; bounded opts other hosts in; inherit disables tuning.
-        #[arg(long, env = "ZKSYNC_SNARK_CPU_POLICY", default_value = "auto", value_parser = ["auto", "bounded", "inherit"])]
+        /// CPU startup policy: inherit (default) leaves affinity and thread settings unchanged.
+        /// Explicit auto tunes only the measured unrestricted Linux GPU 24-core/48-thread
+        /// topology; bounded explicitly opts other Linux GPU hosts into tuning.
+        #[arg(long, env = "ZKSYNC_SNARK_CPU_POLICY", default_value = "inherit", value_parser = ["auto", "bounded", "inherit"])]
         cpu_policy: String,
         /// Maximum allowed logical CPUs when tuning; physical cores are selected before SMT.
         #[arg(long, env = "ZKSYNC_SNARK_CPU_MAX_LOGICAL", default_value = "31")]
@@ -453,6 +454,7 @@ mod tests {
                 cmd.mut_arg("cpu_policy", |arg| arg.env(None::<&str>))
                     .mut_arg("cpu_max_logical", |arg| arg.env(None::<&str>))
                     .mut_arg("cpu_default_threads", |arg| arg.env(None::<&str>))
+                    .mut_arg("binary_commitment_policy", |arg| arg.env(None::<&str>))
             })
         };
         let base = [
@@ -467,7 +469,30 @@ mod tests {
         ];
         let matches = command().try_get_matches_from(base).unwrap();
         let args = matches.subcommand_matches("run-prover").unwrap();
-        assert_eq!(args.get_one::<String>("cpu_policy").unwrap(), "auto");
+        assert_eq!(args.get_one::<String>("cpu_policy").unwrap(), "inherit");
+        assert_eq!(
+            args.get_one::<BinaryCommitmentPolicy>("binary_commitment_policy")
+                .unwrap(),
+            &BinaryCommitmentPolicy::Bundled
+        );
+        for (policy, expected) in [
+            ("bundled", BinaryCommitmentPolicy::Bundled),
+            ("recompute", BinaryCommitmentPolicy::Recompute),
+        ] {
+            let matches = command()
+                .try_get_matches_from(
+                    base.into_iter()
+                        .chain(["--binary-commitment-policy", policy]),
+                )
+                .unwrap();
+            let args = matches.subcommand_matches("run-prover").unwrap();
+            assert_eq!(args.get_one::<String>("cpu_policy").unwrap(), "inherit");
+            assert_eq!(
+                args.get_one::<BinaryCommitmentPolicy>("binary_commitment_policy")
+                    .unwrap(),
+                &expected
+            );
+        }
         assert_eq!(
             args.get_one::<NonZeroUsize>("cpu_max_logical")
                 .unwrap()
@@ -490,7 +515,7 @@ mod tests {
         assert!(command()
             .try_get_matches_from(base.into_iter().chain(["--cpu-policy", "unknown"]))
             .is_err());
-        for policy in ["bounded", "inherit"] {
+        for policy in ["auto", "bounded", "inherit"] {
             assert!(command()
                 .try_get_matches_from(base.into_iter().chain(["--cpu-policy", policy]))
                 .is_ok());

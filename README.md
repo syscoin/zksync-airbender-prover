@@ -209,15 +209,18 @@ the explicit command above checks the expensive derivation against the bundled v
 
 #### SNARK CPU startup policy
 
-The standalone worker applies CPU settings **before** tracing, Tokio and proving pools start.
-Native binaries, Docker and one-shot/warm rental SNARK workers share this startup path.
-The default `--cpu-policy auto` applies the measured policy on Linux GPU workers when the
-allowed CPUs cover the whole online single-socket **24-physical-core / 48-logical-CPU**
-topology (two SMT threads per core), with no tighter detected CPU quota. Other topologies,
-restricted allocations, missing topology information, CPU-only builds and non-Linux hosts
-inherit their existing settings. `verify-fri`, FRI workers and direct library/combined-service
-callers are unchanged. This is a conservative topology match, not a guarantee of identical
-performance on every CPU with that layout.
+The default `--cpu-policy inherit` leaves CPU affinity and thread environment unchanged,
+with either bundled or recomputed commitments. Explicit CPU tuning is applied **before**
+tracing, Tokio and proving pools start. Native binaries, Docker and one-shot/warm rental
+SNARK workers share this startup path.
+
+Opt-in `--cpu-policy auto` applies the measured policy on Linux GPU workers when the allowed
+CPUs cover the whole online single-socket **24-physical-core / 48-logical-CPU** topology
+(two SMT threads per core), with no tighter detected CPU quota. Other topologies, restricted
+allocations, missing topology information, CPU-only builds and non-Linux hosts inherit their
+existing settings. `verify-fri`, FRI workers and direct library/combined-service callers are
+unchanged. This is a conservative topology match, not a guarantee of identical performance
+on every CPU with that layout.
 
 When tuning applies, the default is at most **31 allowed logical CPUs**, choosing one per
 physical core before SMT siblings. On the benchmark host this reproduces CPUs 0–30 and
@@ -232,7 +235,7 @@ cpuset and does not create a cgroup CPU entitlement.
 
 | Option | Environment | Default |
 | --- | --- | --- |
-| `--cpu-policy auto\|bounded\|inherit` | `ZKSYNC_SNARK_CPU_POLICY` | `auto` |
+| `--cpu-policy auto\|bounded\|inherit` | `ZKSYNC_SNARK_CPU_POLICY` | `inherit` |
 | `--cpu-max-logical` | `ZKSYNC_SNARK_CPU_MAX_LOGICAL` | `31` |
 | `--cpu-default-threads` | `ZKSYNC_SNARK_CPU_DEFAULT_THREADS` | `16` |
 
@@ -242,11 +245,18 @@ affinity/environment changes. CLI values override these environment options; CPU
 limits take effect only when tuning applies. An explicit `bounded` request fails if the
 platform/topology cannot be read or its selected affinity cannot be applied and verified.
 
-One offline fresh-process run of the same buffered-RNG binary and four frozen FRI inputs
-fell from 544.983 s to 452.844 s with these settings, with independent CPU proof verification.
-Startup fell from 400.354 s to 310.060 s; summed timed proving remained approximately
-132–134 s. This single-host observation is not an optimal-core-count claim or a warm-proving
-speedup. Security100, zero knowledge, log-25, verification keys and proof formats are unchanged.
+With the commitment recomputed at startup, an earlier offline fresh-process comparison of
+the same buffered-RNG binary and four frozen FRI inputs fell from 544.983 s to 452.844 s with
+these settings, with independent CPU proof verification. Startup fell from 400.354 s to
+310.060 s; summed timed proving remained approximately 132–134 s.
+
+With the bundled commitment, one fresh-process pair using the same cached-commitment binary
+measured 357.495 s with inherited settings versus 346.981 s with tuning: about 10.515 s (2.9%).
+This single pair does not establish a meaningful general tuning benefit, so automatic CPU
+restrictions are disabled by default. Explicit `auto` or `bounded` remains available,
+including with `--binary-commitment-policy recompute`. Neither comparison establishes an
+optimal core count or a warm-proving speedup. Security100, zero knowledge, log-25, verification
+keys and proof formats are unchanged.
 
 ### Separate FRI and default GPU SNARK deployment
 
