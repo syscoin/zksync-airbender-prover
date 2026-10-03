@@ -5,7 +5,10 @@ from contextlib import ExitStack
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -282,14 +285,76 @@ class WrapperPinTests(unittest.TestCase):
         self.assertNotIn("Clone", rng)
         self.assertIn("not be retained or reused across a process fork", rng)
 
-    def test_ci_executes_dependency_rng_tests_from_the_attested_workspace(self):
+    def test_ci_executes_dependency_rng_tests_from_the_attested_wrapper_workspace(self):
         workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
         self.assertIn('AIRBENDER_BUILD_ATTESTATION="${RUNNER_TEMP}/ci-test-airbender-inputs.json"', workflow)
         self.assertIn("ci-test -- cargo test --locked --no-default-features", workflow)
         self.assertIn("workspace=\"$(jq -er '.workspace' \"${record}\")\"", workflow)
+        self.assertIn('wrapper="$(dirname -- "${workspace}")/zkos-wrapper"', workflow)
         self.assertIn("target=\"$(jq -er '.cargo_target_dir' \"${record}\")\"", workflow)
-        self.assertIn('CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${workspace}/Cargo.toml"', workflow)
+        self.assertIn('CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${wrapper}/Cargo.toml"', workflow)
+        self.assertNotIn('cargo test --manifest-path "${workspace}/Cargo.toml"', workflow)
         self.assertIn("--locked -p zkos-wrapper --lib buffered_os_rng::tests", workflow)
+        self.assertIn('helper.verify_wrapper(Path(sys.argv[1]), helper.load_wrapper_pins())', workflow)
+
+    def test_ci_wrapper_rng_shell_routes_manifest_and_preserves_failure(self):
+        lines = (ROOT / ".github/workflows/ci.yaml").read_text().splitlines()
+        start = lines.index("      - name: Run pinned wrapper RNG tests") + 2
+        body = []
+        for line in lines[start:]:
+            if line.startswith("          "):
+                body.append(line[10:])
+            elif not line.strip():
+                body.append("")
+            else:
+                break
+        script = "\n".join(body)
+        stub = r'''
+import json, os, sys
+from pathlib import Path
+name = Path(sys.argv[0]).name
+if name == "jq":
+    record = json.loads(Path(sys.argv[-1]).read_text())
+    print(record[sys.argv[-2].removeprefix(".")])
+    raise SystemExit(0)
+if name == "python3":
+    source = sys.stdin.read()
+    assert "helper.verify_wrapper" in source and "helper.load_wrapper_pins" in source
+    event = {"kind": "verify", "wrapper": sys.argv[-1]}
+else:
+    assert name == "cargo"
+    event = {"kind": "cargo", "argv": sys.argv[1:], "target": os.environ["CARGO_TARGET_DIR"]}
+with Path(os.environ["WORKFLOW_CALL_LOG"]).open("a") as output:
+    output.write(json.dumps(event) + "\n")
+raise SystemExit(int(os.environ["WRAPPER_TEST_EXIT_CODE"]) if name == "cargo" else 0)
+'''
+        for status in (0, 7):
+            with self.subTest(status=status), tempfile.TemporaryDirectory(prefix="wrapper ci ") as temporary:
+                root = Path(temporary)
+                commands = root / "commands"
+                commands.mkdir()
+                for name in ("jq", "python3", "cargo"):
+                    executable = commands / name
+                    executable.write_text("#!" + sys.executable + "\n" + stub)
+                    executable.chmod(0o700)
+                workspace, target = root / "snapshot build/prover", root / "target cache"
+                (root / "ci-test-airbender-inputs.json").write_text(json.dumps({
+                    "workspace": str(workspace), "cargo_target_dir": str(target)}))
+                log = root / "calls.jsonl"
+                result = subprocess.run(["bash", "-eu", "-c", script], cwd=ROOT, capture_output=True,
+                                        text=True, env={**os.environ, "RUNNER_TEMP": str(root),
+                                        "PATH": str(commands) + os.pathsep + os.environ.get("PATH", ""),
+                                        "WORKFLOW_CALL_LOG": str(log), "WRAPPER_TEST_EXIT_CODE": str(status)})
+                self.assertEqual(result.returncode, status, result.stderr)
+                events = [json.loads(line) for line in log.read_text().splitlines()]
+                wrapper = workspace.parent / "zkos-wrapper"
+                self.assertEqual(events, [
+                    {"kind": "verify", "wrapper": str(wrapper)},
+                    {"kind": "cargo", "target": str(target), "argv": [
+                        "test", "--manifest-path", str(wrapper / "Cargo.toml"), "--locked",
+                        "-p", "zkos-wrapper", "--lib", "buffered_os_rng::tests"]},
+                    {"kind": "verify", "wrapper": str(wrapper)},
+                ])
 
     def test_prepare_uses_isolated_clone_exact_pin_and_reverification(self):
         pins = HELPER.load_wrapper_pins()
