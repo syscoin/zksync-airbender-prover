@@ -5761,6 +5761,7 @@ name = "zksync_os_snark_prover"
 version = "0.8.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "bincode 2.0.1",
  "clap",
@@ -5782,6 +5783,7 @@ dependencies = [
  "vise-exporter",
  "zkos-wrapper",
  "zksync_sequencer_proof_client",
+ "zksync_solidity_vk_codegen",
 ]
 
 [[package]]

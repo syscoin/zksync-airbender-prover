@@ -29,8 +29,9 @@ def parent_lock_bytes():
     for name, removed in (
         ("zksync_os_fri_prover", (b' "sha2 0.10.9",\n',)),
         ("zksync_os_snark_prover", (
-            b' "base64 0.22.1",\n', b' "bincode 2.0.1",\n', b' "libc",\n',
+            b' "async-trait",\n', b' "base64 0.22.1",\n', b' "bincode 2.0.1",\n', b' "libc",\n',
             b' "riscv_transpiler",\n', b' "sha2 0.10.9",\n', b' "verifier_common",\n',
+            b' "zksync_solidity_vk_codegen",\n',
         )),
     ):
         blocks = raw.split(b"[[package]]\n")
@@ -100,6 +101,15 @@ class LockOverlayTests(unittest.TestCase):
             self.assertEqual(lock.read_bytes(), parent_lock_bytes())
             with self.assertRaisesRegex(ValueError, "more than Airbender"):
                 HELPER.audit_lock(old, self.overlay, PINS)
+
+    def test_parent_lock_fixture_preserves_exact_historical_bytes(self):
+        raw = parent_lock_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),
+                         "6dc78e75804154521c118e6210e39ddc5fa6fb23342c7be3dae57fc89834c4d3")
+        old = HELPER.tomllib.loads(raw.decode())
+        package = next(row for row in old["package"] if row["name"] == "zksync_os_snark_prover")
+        self.assertNotIn("async-trait", package["dependencies"])
+        self.assertNotIn("zksync_solidity_vk_codegen", package["dependencies"])
 
     def test_selected_incompatible_revision_version_and_reference_drift_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -187,17 +197,124 @@ class LockOverlayTests(unittest.TestCase):
 
     def test_logger_patch_has_no_proving_changes(self):
         source = (ROOT / "patches/airbender-cuda-device-diagnostics.patch").read_text()
-        self.assertEqual(source.count("diff --git "), 5)
+        self.assertEqual(source.count("diff --git "), 8)
         source = next("diff --git " + section for section in source.split("diff --git ")
                       if section.startswith("a/gpu_prover/src/execution/gpu_worker.rs "))
-        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),
-                         "768e9305dd5ebacff733a172f40fcabd5b333c212bc9582424526dcb16f257e2")
+        # Diff index IDs and hunk context changed when the cumulative patch was
+        # regenerated. Every ordered added/removed production line is identical
+        # to the historical diagnostics patch, and its full postimage is pinned.
+        edits = "\n".join(line for line in source.splitlines()
+                          if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+        self.assertEqual(hashlib.sha256(edits.encode()).hexdigest(),
+                         "829c7aeb3aeff7aa135223eb5e38abc15a9f7fb9f2ba81be2cafb19d7b3eaa4a")
+        self.assertEqual(PINS["changed_files"]["gpu_prover/src/execution/gpu_worker.rs"]["postimage_sha256"],
+                         "3a809535fd15cf2b6a456881c0b9a4dddec606ae0d95ce17c928987dd76aca84")
         additions = "\n".join(line[1:] for line in source.splitlines()
                               if line.startswith("+") and not line.startswith("+++"))
         self.assertIn("device_get_attribute(CudaDeviceAttr::MultiProcessorCount, device_id)?", additions)
         self.assertNotIn("get_device_properties", additions)
         self.assertNotIn("unsafe", additions)
         self.assertNotIn("CStr", additions)
+
+
+class StreamedInitTeardownPatchTests(unittest.TestCase):
+    """Static source-integration guards, not CUDA execution or queue-lag tests."""
+
+    def setUp(self):
+        raw = (ROOT / "patches/airbender-cuda-device-diagnostics.patch").read_text()
+        sections = raw.split("diff --git ")[1:]
+        self.sections = {section.splitlines()[0].split()[1][2:]: section for section in sections}
+        self.assertEqual(len(sections), len(self.sections))
+        self.module_path = "gpu_prover/src/execution/empty_inits_and_teardowns.rs"
+        self.module = self.additions(self.module_path) + "\n"
+        self.production = self.module.split("#[cfg(test)]", 1)[0]
+
+    def additions(self, path):
+        return "\n".join(line[1:] for line in self.sections[path].splitlines()
+                         if line.startswith("+") and not line.startswith("+++"))
+
+    def test_exact_closed_overlay_scope_and_existing_postimages_are_preserved(self):
+        expected = {
+            "execution_utils/src/lib.rs": "ef863d1a3e09648348e5ff6daddab7469bcb42fa74bd63172459d3a6337f3049",
+            "execution_utils/src/setup_summaries.rs": "f88bc6142088e6255b1356e70d031d6557445560984debe2d329d70042ab2b02",
+            "execution_utils/src/unrolled_gpu.rs": "13ae69259a2791b8e8a9343da975ba04eb6e0535b4c11143c929a768307a3110",
+            "gpu_prover/src/execution/gpu_worker.rs": "3a809535fd15cf2b6a456881c0b9a4dddec606ae0d95ce17c928987dd76aca84",
+            "gpu_prover/src/execution/cpu_worker.rs": "9d6a3b83f1148f1bf60394a6c98d713e84733a362cfab3e9b97c49d13165dbbd",
+            self.module_path: "412f5d778cef22834c845aa72628e5822ce350fa47fa23816567e3fc88d9003c",
+            "gpu_prover/src/execution/simulation_runner.rs": "1d792692fd0f585753b8865dfba68043ba66690066fad2ac6f23620e9105ebc0",
+            "tools/cli/src/prover_utils.rs": "8aa93a6fb387d298076012989b1b73069c5883b5b2d1dd2e0014fe563a42e2d8",
+        }
+        self.assertEqual(set(self.sections), set(expected))
+        self.assertEqual(set(PINS["changed_files"]), set(expected))
+        for path, digest in expected.items():
+            self.assertEqual(PINS["changed_files"][path]["postimage_sha256"], digest)
+        self.assertEqual(PINS["patched_tree"], "ce019f951b7cce9418c4e3fdea4d9fc16b7d943c")
+        self.assertIsNone(PINS["changed_files"][self.module_path]["preimage_sha256"])
+        self.assertEqual(hashlib.sha256(self.module.encode()).hexdigest(), expected[self.module_path])
+        self.assertEqual(len(self.module.encode()), PINS["changed_files"][self.module_path]["postimage_size"])
+        # No circuit, verifier, security-parameter, or allocator-pool source is
+        # among the eight changed paths. The new module is carried by the patch.
+        self.assertFalse(any(path.startswith(("circuit_defs/", "verifier/", "full_statement_verifier/"))
+                             for path in self.sections))
+
+    def test_per_word_geometry_conservative_monotone_release_and_fail_closed_finish(self):
+        self.assertIn("max_it_instances: ram_words.div_ceil(cycles_per_circuit)", self.production)
+        self.assertIn("let completed_circuits = cycles_so_far / self.cycles_per_circuit;", self.production)
+        self.assertIn("let frontier = completed_circuits.saturating_sub(self.max_it_instances);", self.production)
+        self.assertIn("self.next_sequence_id = frontier.max(start);", self.production)
+        self.assertIn("start..self.next_sequence_id", self.production)
+        self.assertIn("self.next_sequence_id <= empty_circuits", self.production)
+        self.assertIn("self.next_sequence_id..empty_circuits", self.production)
+        self.assertIn("assert_ne!(cycles_per_circuit, 0);", self.production)
+        self.assertIn("const RAM_WORDS: usize = (1 << 30) / size_of::<u32>();", self.module)
+        self.assertIn("const CYCLES_PER_CIRCUIT: usize = (1 << 23) - 1;", self.module)
+        ram_words, usable_rows = 1 << 28, (1 << 23) - 1
+        self.assertEqual((ram_words + usable_rows - 1) // usable_rows, 33)
+
+    def test_unified_only_activation_and_exact_final_marker_suffix(self):
+        worker = self.sections["gpu_prover/src/execution/cpu_worker.rs"]
+        added = self.additions("gpu_prover/src/execution/cpu_worker.rs")
+        self.assertIn("runner.empty_it_streamer = (!T::IS_SPLIT).then(|| {", added)
+        self.assertIn("memory_holder.memory.len(),", added)
+        self.assertIn("setups::unified_reduced_machine::NUM_CYCLES,", added)
+        self.assertIn("let empty_cycles = total_cycles - count;", worker)
+        self.assertIn("let empty_circuits = empty_cycles / per_circuit_count;", worker)
+        self.assertIn(".finish(empty_circuits);", added)
+        self.assertIn("for sequence_id in remaining_empty {", added)
+        self.assertIn("-            for sequence_id in 0..empty_circuits {", worker)
+        self.assertEqual(added.count("!T::IS_SPLIT"), 1)
+
+    def test_streaming_module_is_wired_before_snapshot_trace_allocation(self):
+        runner = self.sections["gpu_prover/src/execution/simulation_runner.rs"]
+        added = self.additions("gpu_prover/src/execution/simulation_runner.rs")
+        self.assertIn('#[path = "empty_inits_and_teardowns.rs"]', added)
+        self.assertIn("pub(crate) use empty_inits_and_teardowns::EmptyInitsAndTeardownsStreamer;", added)
+        self.assertIn("empty_it_streamer: None,", added)
+        self.assertIn("(self.empty_it_streamer.as_mut(), self.results.as_ref())", added)
+        self.assertIn("((timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP) as usize;", added)
+        self.assertIn("for sequence_id in streamer.release(cycles_so_far) {", added)
+        self.assertIn("inits_and_teardowns: None,", added)
+        self.assertIn(".send(WorkerResult::InitsAndTeardownsData(data))", added)
+        self.assertLess(runner.index("streamer.release(cycles_so_far)"),
+                        runner.index("let trace = self.trace.take().unwrap();"))
+        self.assertLess(runner.index("streamer.release(cycles_so_far)"),
+                        runner.index("let result = WorkerResult::SnapshotProduced;"))
+
+    def test_dependency_free_regression_coverage_is_retained(self):
+        self.assertEqual(self.module.count("#[test]"), 7)
+        for name in (
+            "pinned_per_word_geometry_has_thirty_three_trailing_instances",
+            "partial_circuits_and_repeated_snapshots_do_not_release_early_or_duplicate",
+            "all_final_occupancies_preserve_the_original_exact_prefix",
+            "delegation_bursts_cannot_exceed_the_ram_word_bound",
+            "finite_pool_model_progresses_beyond_forty_six_circuits",
+            "split_mode_none_keeps_all_markers_for_finalization",
+            "finalization_fails_closed_if_a_future_layout_violates_the_bound",
+        ):
+            self.assertIn("fn " + name + "()", self.module)
+        self.assertIn("const POOL: usize = 384;", self.module)
+        self.assertIn("for completed in 1..=160", self.module)
+        self.assertIn("streamed unified init/teardown prefix exceeds the final empty prefix", self.module)
 
 
 class AirbenderPinTests(unittest.TestCase):
@@ -310,6 +427,7 @@ class AirbenderPinTests(unittest.TestCase):
             lambda p: p["changed_files"].update({"../unexpected": {}}),
             lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(preimage_sha256=None),
             lambda p: p["changed_files"]["execution_utils/src/setup_summaries.rs"].update(preimage_sha256="f" * 64),
+            lambda p: p["changed_files"]["gpu_prover/src/execution/empty_inits_and_teardowns.rs"].update(preimage_sha256="f" * 64),
             lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(postimage_sha256="0" * 64),
             lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(postimage_size=True),
             lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(extra=1),
@@ -343,15 +461,19 @@ class AirbenderPinTests(unittest.TestCase):
             root = Path(temporary)
             with patch.object(HELPER, "checked_hash") as hashes:
                 HELPER.check_airbender_preimages(root, PINS)
-                self.assertEqual(hashes.call_count, 4)
+                self.assertEqual(hashes.call_count, 6)
                 for relative, row in PINS["changed_files"].items():
                     if row["preimage_sha256"] is not None:
                         hashes.assert_any_call(root / relative, row["preimage_sha256"])
-                new = root / "execution_utils/src/setup_summaries.rs"
-                new.parent.mkdir(parents=True)
-                new.symlink_to(root / "missing")
-                with self.assertRaisesRegex(ValueError, "preimage already exists"):
-                    HELPER.check_airbender_preimages(root, PINS)
+                for relative in ("execution_utils/src/setup_summaries.rs",
+                                 "gpu_prover/src/execution/empty_inits_and_teardowns.rs"):
+                    with self.subTest(new_file=relative):
+                        new = root / relative
+                        new.parent.mkdir(parents=True, exist_ok=True)
+                        new.symlink_to(root / "missing")
+                        with self.assertRaisesRegex(ValueError, "preimage already exists"):
+                            HELPER.check_airbender_preimages(root, PINS)
+                        new.unlink()
 
     def test_reverification_rejects_git_state_hash_size_and_symlink_drift(self):
         with tempfile.TemporaryDirectory() as temporary:

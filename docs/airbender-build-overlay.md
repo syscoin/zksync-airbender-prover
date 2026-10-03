@@ -3,9 +3,32 @@
 Worker builds use `scripts/cargo-with-patched-airbender.sh LABEL -- cargo ... --locked`.
 The common source overlay retains Airbender
 `03454c7a41053a4b88bb421e97fb9efe893a92f5` and applies only
-`patches/airbender-cuda-device-diagnostics.patch`. This replaces a runtime-versioned bulk
-device-properties startup log with the scalar SM-count query already used by operational GPU
-sizing. It changes no proving, verification, allocation, guest, or registry dependency code.
+`patches/airbender-cuda-device-diagnostics.patch`. The cumulative overlay replaces a
+runtime-versioned bulk device-properties startup log with the scalar SM-count query already used
+by operational GPU sizing, supports authenticated compact FRI setup summaries, and backports
+[upstream PR 403](https://github.com/matter-labs/zksync-airbender/pull/403)'s empty unified
+init/teardown marker streaming. It does not change circuits, verification, guest code, security
+parameters, proof format, registry dependencies, or the configured 384-entry host allocator pool.
+
+The streaming backport uses this pinned revision's per-word geometry, not upstream PR 403's newer
+window layout: `MemoryHolder.memory` contains `2^28` words, collection emits at most one I&T record
+per word, and a unified circuit holds `2^23 - 1` records. Thus no more than
+`ceil(2^28 / (2^23 - 1)) = 33` trailing circuits can contain I&T data, even for delegation bursts.
+Before snapshot tracing requests another host allocator, the simulator releases only the leading
+`floor(cycles_so_far / (2^23 - 1)) - 33` markers (saturating at zero). Finalization retains the
+original exact `floor((total_cycles - record_count) / (2^23 - 1))` empty prefix and sends only its
+not-yet-streamed suffix, asserting that the streamed prefix does not exceed it. Split-mode
+simulation and the CPU pipeline model retain their original post-run protocol. Only result-message
+timing changes; the circuit sequence identities and witness partitioning remain unchanged.
+
+The patched `gpu_prover/src/execution/empty_inits_and_teardowns.rs` production module has seven
+dependency-free tests and can be checked without CUDA with
+`rustc --edition=2021 --test PATH_TO_PATCHED_SOURCE/gpu_prover/src/execution/empty_inits_and_teardowns.rs -o /tmp/empty-it-tests`
+followed by `/tmp/empty-it-tests`. Coverage includes the pinned 33-instance bound, exhaustive
+reduced-geometry final prefixes, partial circuits, repeated snapshots, worst-case RAM occupancy
+with irregular delegation-heavy advances, split-mode absence, and fail-closed finalization. A
+160-circuit finite-pool model checks marker-driven reclamation beyond 46 circuits under completed
+replay/GPU work; it does not qualify native queue lag, performance, or proof-byte equivalence.
 
 The same preparation also retains `zkos-wrapper`
 `585595f145cb53a09a130706ca36f80ddcac3961` and applies only

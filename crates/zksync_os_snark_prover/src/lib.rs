@@ -249,26 +249,7 @@ pub fn create_snark_wrapper_with_cache_and_policy(
         Some(cache) => SnarkWrapper::from_host_cache(cache)?,
         None => {
             let config = build_wrapper_config(trusted_setup_file, app_bin_path)?;
-            match commitment_policy {
-                BinaryCommitmentPolicy::Bundled => {
-                    let started = Instant::now();
-                    let commitment = binary_commitment::load_bundled_commitment(
-                        config.bin.as_deref().expect("explicit bin"),
-                        config.text.as_deref().expect("explicit text"),
-                    )?;
-                    tracing::info!(
-                        "Validated bundled binary commitment in {:.3}s",
-                        started.elapsed().as_secs_f64()
-                    );
-                    SnarkWrapper::new_with_binary_commitment(config, commitment)?
-                }
-                BinaryCommitmentPolicy::Recompute => {
-                    tracing::info!(
-                        "Explicitly recomputing binary commitment from program artifacts"
-                    );
-                    SnarkWrapper::new(config)?
-                }
-            }
+            create_snark_wrapper_from_config_with_policy(config, commitment_policy)?
         }
     };
 
@@ -284,6 +265,32 @@ pub fn create_snark_wrapper_with_cache_and_policy(
     }
 
     Ok(wrapper)
+}
+
+/// Apply the same authenticated commitment policy to every cache-less build,
+/// including a CPU-cold phase-3 config carrying its verified compression VK.
+fn create_snark_wrapper_from_config_with_policy(
+    config: SnarkWrapperConfig,
+    commitment_policy: BinaryCommitmentPolicy,
+) -> anyhow::Result<SnarkWrapper> {
+    match commitment_policy {
+        BinaryCommitmentPolicy::Bundled => {
+            let started = Instant::now();
+            let commitment = binary_commitment::load_bundled_commitment(
+                config.bin.as_deref().expect("explicit bin"),
+                config.text.as_deref().expect("explicit text"),
+            )?;
+            tracing::info!(
+                "Validated bundled binary commitment in {:.3}s",
+                started.elapsed().as_secs_f64()
+            );
+            SnarkWrapper::new_with_binary_commitment(config, commitment)
+        }
+        BinaryCommitmentPolicy::Recompute => {
+            tracing::info!("Explicitly recomputing binary commitment from program artifacts");
+            SnarkWrapper::new(config)
+        }
+    }
 }
 
 /// SYSCOIN: Build the wrapper config that binds the app program at `app_bin_path` into the VK via
@@ -847,7 +854,10 @@ pub async fn run_inner(
                             &wrapper_source.app_bin_path,
                         )?;
                         config.compression_vk = Some(compression_vk);
-                        let mut wrapper = SnarkWrapper::new(config)?;
+                        let mut wrapper = create_snark_wrapper_from_config_with_policy(
+                            config,
+                            wrapper_source.commitment_policy,
+                        )?;
                         let actual_vk_hash = format!(
                             "{:?}",
                             calculate_verification_key_hash(wrapper.snark_vk()?.clone())
@@ -964,6 +974,103 @@ mod tests {
             .is_ok());
         assert!(source.verify_cold_wrapper_vk("other", "validated").is_err());
         assert!(source.verify_cold_wrapper_vk("validated", "other").is_err());
+    }
+
+    // Constructor-only CPU regressions: do not derive a setup or prove with the
+    // placeholder compression VK. It only checks that the carried config survives.
+    #[cfg(not(feature = "gpu"))]
+    fn cold_policy_test_config(phase_three: bool) -> zkos_wrapper::SnarkWrapperConfig {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        zkos_wrapper::SnarkWrapperConfig {
+            bin: Some(root.join("multiblock_batch.bin")),
+            text: Some(root.join("multiblock_batch.text")),
+            threads: Some(1),
+            check_aux_params: true,
+            compression_vk: phase_three.then(Default::default),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn bundled_policy_is_preserved_across_startup_all_phases_and_cold_rebuild() {
+        let config = cold_policy_test_config(false);
+        let expected = super::binary_commitment::load_bundled_commitment(
+            config.bin.as_deref().unwrap(),
+            config.text.as_deref().unwrap(),
+        )
+        .unwrap();
+        for (stage, phase_three) in [
+            ("pre-lease", false),
+            ("phase-one-two", false),
+            ("phase-three", true),
+            ("next-job-rebuild", false),
+        ] {
+            let config = cold_policy_test_config(phase_three);
+            let carried_vk = config.compression_vk.as_ref().map(|vk| format!("{vk:?}"));
+            let mut wrapper = super::create_snark_wrapper_from_config_with_policy(
+                config,
+                super::BinaryCommitmentPolicy::Bundled,
+            )
+            .unwrap();
+            // Resolving the bundled commitment must never synthesize recursion setups,
+            // including when only the verified phase-2 VK is carried into phase 3.
+            let commitment = wrapper.resolved_binary_commitment().unwrap();
+            assert_eq!(commitment.end_params, expected.end_params, "{stage}");
+            assert_eq!(commitment.aux_params, expected.aux_params, "{stage}");
+            if let Some(carried_vk) = carried_vk {
+                assert_eq!(
+                    format!("{:?}", wrapper.compression_vk().unwrap()),
+                    carried_vk
+                );
+            }
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn explicit_recompute_stays_lazy_across_startup_all_phases_and_cold_rebuild() {
+        for (stage, phase_three) in [
+            ("pre-lease", false),
+            ("phase-one-two", false),
+            ("phase-three", true),
+            ("next-job-rebuild", false),
+        ] {
+            let mut config = cold_policy_test_config(phase_three);
+            // A regular file cannot contain a child path. Successful construction
+            // proves that recompute does not silently select bundled authentication.
+            config.bin = config.bin.map(|path| path.join("missing"));
+            config.text = config.text.map(|path| path.join("missing"));
+            let carried_vk = config.compression_vk.as_ref().map(|vk| format!("{vk:?}"));
+            let mut wrapper = super::create_snark_wrapper_from_config_with_policy(
+                config,
+                super::BinaryCommitmentPolicy::Recompute,
+            )
+            .unwrap_or_else(|error| panic!("{stage}: {error:#}"));
+            // Do not resolve the commitment: explicitly recomputing it is expensive.
+            if let Some(carried_vk) = carried_vk {
+                assert_eq!(
+                    format!("{:?}", wrapper.compression_vk().unwrap()),
+                    carried_vk
+                );
+            }
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn bundled_rebuilds_reject_changed_app_without_recompute_fallback() {
+        for phase_three in [false, true] {
+            let mut config = cold_policy_test_config(phase_three);
+            std::mem::swap(&mut config.bin, &mut config.text);
+            let error = super::create_snark_wrapper_from_config_with_policy(
+                config,
+                super::BinaryCommitmentPolicy::Bundled,
+            )
+            .err()
+            .expect("a changed app must fail closed in every cold wrapper build");
+            assert!(format!("{error:#}").contains("bundled commitment app binary"));
+        }
     }
 
     #[test]

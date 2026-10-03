@@ -58,9 +58,12 @@ AIRBENDER_UPSTREAM = (
 AIRBENDER_CHANGED_PATHS = {
     "execution_utils/src/lib.rs", "execution_utils/src/setup_summaries.rs",
     "execution_utils/src/unrolled_gpu.rs", "gpu_prover/src/execution/gpu_worker.rs",
+    "gpu_prover/src/execution/cpu_worker.rs",
+    "gpu_prover/src/execution/simulation_runner.rs",
+    "gpu_prover/src/execution/empty_inits_and_teardowns.rs",
     "tools/cli/src/prover_utils.rs",
 }
-AIRBENDER_PATCHED_TREE = "5968cc57e4e927c4ad206241cb123b159bbd6925"
+AIRBENDER_PATCHED_TREE = "ce019f951b7cce9418c4e3fdea4d9fc16b7d943c"
 
 
 def require(condition, message):
@@ -127,7 +130,8 @@ def load_airbender_pins(path=PIN_PATH):
     for relative, row in pins["changed_files"].items():
         require(isinstance(row, dict) and set(row) == {"preimage_sha256", "postimage_sha256", "postimage_size"},
                 "unknown Airbender source fields")
-        is_new = relative == "execution_utils/src/setup_summaries.rs"
+        is_new = relative in {"execution_utils/src/setup_summaries.rs",
+                              "gpu_prover/src/execution/empty_inits_and_teardowns.rs"}
         require((row["preimage_sha256"] is None) == is_new, "invalid Airbender new-file preimage")
         for key in ("preimage_sha256", "postimage_sha256"):
             if key == "preimage_sha256" and is_new:
