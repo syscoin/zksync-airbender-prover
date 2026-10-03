@@ -80,6 +80,16 @@ def option_values(tokens, *names):
 
 
 class ProverRoleRecipeTests(unittest.TestCase):
+    def test_snark_cpu_policy_precedes_runtime_and_is_not_a_library_side_effect(self):
+        source = (ROOT / "crates/zksync_os_snark_prover/src/main.rs").read_text()
+        main = source[source.index("fn main() ->"):source.index("#[cfg(test)]")]
+        self.assertLess(main.index("Cli::parse()"), main.index("cpu_startup::apply("))
+        self.assertLess(main.index("cpu_startup::apply("), main.index("init_tracing()"))
+        self.assertLess(main.index("cpu_startup::apply("), main.index("tokio::runtime::Builder"))
+        self.assertIn('cpu_startup::apply(config, cfg!(feature = "gpu"))', main)
+        self.assertIn("if let Commands::RunProver", main)
+        self.assertNotIn("cpu_startup::apply", (ROOT / "crates/zksync_os_snark_prover/src/lib.rs").read_text())
+
     def assert_role(self, tokens, binary, gpu):
         package = ROLES[binary][0]
         self.assertEqual(option_values(tokens, "-p", "--package"), [package])

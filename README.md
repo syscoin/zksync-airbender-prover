@@ -170,6 +170,47 @@ Specify optional `--iterations` argument to run SNARK prover N times and then ex
 The same timeout, decompression, and multi-sequencer scheduling rules described for the FRI
 prover apply here.
 
+#### SNARK CPU startup policy
+
+The standalone worker applies CPU settings **before** tracing, Tokio and proving pools start.
+Native binaries, Docker and one-shot/warm rental SNARK workers share this startup path.
+The default `--cpu-policy auto` applies the measured policy on Linux GPU workers when the
+allowed CPUs cover the whole online single-socket **24-physical-core / 48-logical-CPU**
+topology (two SMT threads per core), with no tighter detected CPU quota. Other topologies,
+restricted allocations, missing topology information, CPU-only builds and non-Linux hosts
+inherit their existing settings. `verify-fri`, FRI workers and direct library/combined-service
+callers are unchanged. This is a conservative topology match, not a guarantee of identical
+performance on every CPU with that layout.
+
+When tuning applies, the default is at most **31 allowed logical CPUs**, choosing one per
+physical core before SMT siblings. On the benchmark host this reproduces CPUs 0–30 and
+retains all 24 physical cores. Missing `RAYON_NUM_THREADS`, `BELLMAN_NUM_THREADS` and
+`OMP_NUM_THREADS` default to **16**, bounded by the selected CPU count and detected effective
+parallelism. Existing operator values are preserved verbatim for each library to interpret
+(including Rayon's `0` automatic mode). Airbender's explicitly sized
+startup pool follows affinity (31 here), **not** `RAYON_NUM_THREADS`; Bellman/OMP defaults
+reproduce the benchmark environment without claiming those variables caused the speedup.
+The effective mask and thread environment are logged. Affinity never expands an existing
+cpuset and does not create a cgroup CPU entitlement.
+
+| Option | Environment | Default |
+| --- | --- | --- |
+| `--cpu-policy auto\|bounded\|inherit` | `ZKSYNC_SNARK_CPU_POLICY` | `auto` |
+| `--cpu-max-logical` | `ZKSYNC_SNARK_CPU_MAX_LOGICAL` | `31` |
+| `--cpu-default-threads` | `ZKSYNC_SNARK_CPU_DEFAULT_THREADS` | `16` |
+
+Use `--cpu-policy bounded` to explicitly opt a different Linux GPU host into this policy,
+with optional positive CPU/thread limits. Use `--cpu-policy inherit` to disable all startup
+affinity/environment changes. CLI values override these environment options; CPU/thread
+limits take effect only when tuning applies. An explicit `bounded` request fails if the
+platform/topology cannot be read or its selected affinity cannot be applied and verified.
+
+One offline fresh-process run of the same buffered-RNG binary and four frozen FRI inputs
+fell from 544.983 s to 452.844 s with these settings, with independent CPU proof verification.
+Startup fell from 400.354 s to 310.060 s; summed timed proving remained approximately
+132–134 s. This single-host observation is not an optimal-core-count claim or a warm-proving
+speedup. Security100, zero knowledge, log-25, verification keys and proof formats are unchanged.
+
 ### Separate FRI and default GPU SNARK deployment
 
 <!-- SYSCOIN: Keep FRI residency separate from the server-leased combine/wrap worker. -->

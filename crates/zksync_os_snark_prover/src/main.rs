@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,6 +15,8 @@ use zksync_sequencer_proof_client::{
     parse_configured_sequencer_endpoints, resume_pending_submissions, wait_for_operator_shutdown,
     OpaqueSequencerEndpoint, SequencerProofClient,
 };
+
+mod cpu_startup;
 
 #[derive(Default, Debug, Serialize, Deserialize, Parser, Clone)]
 pub struct SetupOptions {
@@ -43,6 +46,17 @@ enum Commands {
         output: PathBuf,
     },
     RunProver {
+        /// CPU startup policy: auto tunes only the measured unrestricted Linux GPU
+        /// 24-core/48-thread topology; bounded opts other hosts in; inherit disables tuning.
+        #[arg(long, env = "ZKSYNC_SNARK_CPU_POLICY", default_value = "auto", value_parser = ["auto", "bounded", "inherit"])]
+        cpu_policy: String,
+        /// Maximum allowed logical CPUs when tuning; physical cores are selected before SMT.
+        #[arg(long, env = "ZKSYNC_SNARK_CPU_MAX_LOGICAL", default_value = "31")]
+        cpu_max_logical: NonZeroUsize,
+        /// Default Rayon/Bellman/OMP thread environment, unless explicitly set by the operator.
+        /// This does not override explicitly sized Airbender pools.
+        #[arg(long, env = "ZKSYNC_SNARK_CPU_DEFAULT_THREADS", default_value = "16")]
+        cpu_default_threads: NonZeroUsize,
         /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
         ///
         /// Format: http[s]://[username:password@]host:port. Do not put credentials on argv; set
@@ -154,8 +168,35 @@ async fn stop_metrics(
 }
 
 fn main() -> anyhow::Result<()> {
-    init_tracing();
     let cli = Cli::parse();
+    // SYSCOIN: Apply process affinity/environment before tracing, Tokio, Rayon or
+    // any proving thread can be created. Docker, native releases and rentals all
+    // enter here. Verification and the shared library do not acquire this policy.
+    let cpu_startup = if let Commands::RunProver {
+        cpu_policy,
+        cpu_max_logical,
+        cpu_default_threads,
+        ..
+    } = &cli.command
+    {
+        let config = cpu_startup::Config {
+            policy: cpu_policy.parse().map_err(anyhow::Error::msg)?,
+            max_logical: cpu_max_logical.get(),
+            default_threads: cpu_default_threads.get(),
+        };
+        // SAFETY: This executable has not spawned any threads or initialized
+        // tracing/runtime/proving libraries. Cli::parse is synchronous.
+        Some(
+            unsafe { cpu_startup::apply(config, cfg!(feature = "gpu")) }
+                .context("failed to apply SNARK CPU startup policy")?,
+        )
+    } else {
+        None
+    };
+    init_tracing();
+    if let Some(policy) = cpu_startup {
+        tracing::info!("SNARK CPU startup: {policy}");
+    }
 
     // Verification must remain available without initializing proving, GPU, or CRS state.
     if let Commands::VerifyFri {
@@ -193,6 +234,9 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::VerifyFri { .. } => unreachable!("verification returned before prover startup"),
         Commands::RunProver {
+            cpu_policy: _,
+            cpu_max_logical: _,
+            cpu_default_threads: _,
             sequencer_urls,
             setup:
                 SetupOptions {
@@ -342,6 +386,59 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory as _;
+
+    #[test]
+    fn cpu_startup_policy_defaults_and_limits_are_explicit() {
+        // Clear only these Clap argument environment sources, not process-global
+        // environment, so parallel tests also work in an operator's configured shell.
+        let command = || {
+            Cli::command().mut_subcommand("run-prover", |cmd| {
+                cmd.mut_arg("cpu_policy", |arg| arg.env(None::<&str>))
+                    .mut_arg("cpu_max_logical", |arg| arg.env(None::<&str>))
+                    .mut_arg("cpu_default_threads", |arg| arg.env(None::<&str>))
+            })
+        };
+        let base = [
+            "snark-prover",
+            "run-prover",
+            "--output-dir",
+            "out",
+            "--trusted-setup-file",
+            "setup.key",
+            "--submission-dir",
+            "/tmp/snark-test-spool",
+        ];
+        let matches = command().try_get_matches_from(base).unwrap();
+        let args = matches.subcommand_matches("run-prover").unwrap();
+        assert_eq!(args.get_one::<String>("cpu_policy").unwrap(), "auto");
+        assert_eq!(
+            args.get_one::<NonZeroUsize>("cpu_max_logical")
+                .unwrap()
+                .get(),
+            31
+        );
+        assert_eq!(
+            args.get_one::<NonZeroUsize>("cpu_default_threads")
+                .unwrap()
+                .get(),
+            16
+        );
+        for flag in ["--cpu-max-logical", "--cpu-default-threads"] {
+            for bad in ["0", "-1", "not-a-number"] {
+                assert!(command()
+                    .try_get_matches_from(base.into_iter().chain([flag, bad]))
+                    .is_err());
+            }
+        }
+        assert!(command()
+            .try_get_matches_from(base.into_iter().chain(["--cpu-policy", "unknown"]))
+            .is_err());
+        for policy in ["bounded", "inherit"] {
+            assert!(command()
+                .try_get_matches_from(base.into_iter().chain(["--cpu-policy", policy]))
+                .is_ok());
+        }
+    }
 
     #[test]
     fn wrapper_cache_policy_is_typed_opt_in() {

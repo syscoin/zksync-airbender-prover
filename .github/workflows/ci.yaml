@@ -38,6 +38,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Check SNARK CPU startup policy without CUDA
+        run: |
+          cargo fmt --manifest-path .github/tests/snark-cpu-startup/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path .github/tests/snark-cpu-startup/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path .github/tests/snark-cpu-startup/Cargo.toml
+
       - name: Check isolated prover build recipes
         run: python3 -B .github/scripts/test_prover_role_recipes.py
 

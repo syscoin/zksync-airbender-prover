@@ -1,0 +1,12 @@
+[package]
+name = "snark-cpu-startup-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Isolate process-policy tests from CUDA, the CRS and the proving dependency graph.
+[workspace]
+
+[dependencies]
+# Match the production workspace lockfile's platform bindings.
+libc = "=0.2.176"
