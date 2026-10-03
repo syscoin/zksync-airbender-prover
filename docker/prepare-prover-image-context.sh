@@ -35,6 +35,8 @@ readonly tooling_files=(
     patches/airbender-cuda-device-diagnostics.patch
     patches/airbender-cuda-device-diagnostics.json
     patches/airbender.Cargo.lock
+    patches/zkos-wrapper-buffered-os-rng.json
+    patches/zkos-wrapper-buffered-os-rng.patch
     patches/gpu32-memory.json
     patches/crypto-gpu32-memory.patch
     patches/bellman-gpu32-memory.patch
@@ -63,6 +65,8 @@ readonly tooling_data_files=(
     patches/airbender-cuda-device-diagnostics.patch
     patches/airbender-cuda-device-diagnostics.json
     patches/airbender.Cargo.lock
+    patches/zkos-wrapper-buffered-os-rng.json
+    patches/zkos-wrapper-buffered-os-rng.patch
     patches/gpu32-memory.json
     patches/crypto-gpu32-memory.patch
     patches/bellman-gpu32-memory.patch

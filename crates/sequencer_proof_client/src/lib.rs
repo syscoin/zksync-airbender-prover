@@ -37,7 +37,10 @@ pub const MAX_PROOF_SUBMISSION_BODY_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_FRI_PICK_RESPONSE_BYTES: usize = 384 * 1024 * 1024;
 /// SYSCOIN: Authority-free diagnostics retain their smaller independent defensive ceiling.
 pub const MAX_FRI_PEEK_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-pub const MAX_SNARK_JOB_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+/// SYSCOIN: Negotiated, decompressed aggregate-pick capacity; the proof-count cap is independent.
+pub const MAX_SNARK_JOB_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+/// SYSCOIN: Tokenless diagnostics retain the legacy bound, independently of production picks.
+pub const MAX_SNARK_PEEK_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_STATUS_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_FRI_DIAGNOSTIC_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_FRIS_PER_SNARK_JOB: usize = 100;
@@ -837,6 +840,8 @@ mod tests {
     fn malicious_snark_ranges_counts_and_authority_fail_before_proof_decode() {
         let vk_hash = format!("0x{}", "11".repeat(32));
         let token = ProverLeaseToken::from(format!("0x{}", "22".repeat(32)));
+        assert_eq!(MAX_FRIS_PER_SNARK_JOB, 100);
+        validate_snark_payload_shape(1, 100, &vk_hash, Some(&token), 100).unwrap();
         for (from, to, count, expected) in [
             (
                 u64::from(u32::MAX) + 1,

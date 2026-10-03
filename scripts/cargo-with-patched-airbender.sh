@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# SYSCOIN: A disposable, pinned source overlay avoids modifying shared Cargo caches.
+# SYSCOIN: Disposable, pinned source overlays avoid modifying shared Cargo caches.
 set -euo pipefail
 tooling_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly tooling_root
-# SYSCOIN: GPU wrapping additionally requires the exact reviewed crypto/CUDA
-# memory overlay. CPU and FRI-only callers retain the original Airbender lane.
+# SYSCOIN: Every lane prepares exact Airbender and zkos-wrapper sources. GPU
+# wrapping additionally requires the reviewed crypto/CUDA memory overlay.
 preparer=prepare-patched-airbender.py
 if [[ "${1:-}" == "--gpu32" ]]; then
   preparer=prepare-patched-gpu-backends.py

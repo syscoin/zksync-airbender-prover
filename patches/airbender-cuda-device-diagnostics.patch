@@ -1,7 +1,740 @@
+diff --git a/execution_utils/src/lib.rs b/execution_utils/src/lib.rs
+index ea31de9b..674d91cb 100644
+--- a/execution_utils/src/lib.rs
++++ b/execution_utils/src/lib.rs
+@@ -19,6 +19,8 @@ mod proofs;
+ #[cfg(feature = "verifier_binaries")]
+ mod recursion;
+ mod recursion_strategy;
++#[cfg(feature = "verifier_binaries")]
++pub mod setup_summaries;
+ mod verifiers;
+
+ pub mod unified_circuit;
+diff --git a/execution_utils/src/setup_summaries.rs b/execution_utils/src/setup_summaries.rs
+new file mode 100644
+index 00000000..236afd34
+--- /dev/null
++++ b/execution_utils/src/setup_summaries.rs
+@@ -0,0 +1,276 @@
++//! Compact host-side recursion metadata, not GPU proving precomputations.
++//!
++//! Callers loading these summaries must authenticate the complete serialized artifact,
++//! the bin/text pairs and circuit implementation. `validate` checks internal consistency
++//! against the actual binaries; it deliberately does not rederive the Merkle caps.
++
++use crate::unified_circuit::compute_unified_setup_for_machine_configuration;
++use crate::unrolled::{compute_setup_for_machine_configuration, UnrolledProgramSetup};
++use crate::{verifier_binaries, RecursionArtifact, RecursionLayer};
++use riscv_transpiler::common_constants::circuit_families::*;
++use riscv_transpiler::cycle::{
++    IMStandardIsaConfigWithUnsignedMulDiv, IWithoutByteAccessIsaConfigWithDelegation,
++};
++use sha3::Digest;
++use verifier_common::SecurityModel;
++
++const BASE_FAMILIES: &[u8] = &[
++    ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX,
++    JUMP_BRANCH_SLT_CIRCUIT_FAMILY_IDX,
++    SHIFT_BINARY_CSR_CIRCUIT_FAMILY_IDX,
++    MUL_DIV_CIRCUIT_FAMILY_IDX,
++    LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX,
++    LOAD_STORE_SUBWORD_ONLY_CIRCUIT_FAMILY_IDX,
++];
++const UNROLLED_FAMILIES: &[u8] = &[
++    ADD_SUB_LUI_AUIPC_MOP_CIRCUIT_FAMILY_IDX,
++    JUMP_BRANCH_SLT_CIRCUIT_FAMILY_IDX,
++    SHIFT_BINARY_CSR_CIRCUIT_FAMILY_IDX,
++    LOAD_STORE_WORD_ONLY_CIRCUIT_FAMILY_IDX,
++];
++const UNIFIED_FAMILIES: &[u8] = &[REDUCED_MACHINE_CIRCUIT_FAMILY_IDX];
++
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct ProgramSetupSummaries {
++    pub security_bits: u32,
++    pub base: UnrolledProgramSetup,
++    pub recursion_unrolled: UnrolledProgramSetup,
++    pub recursion_unified: UnrolledProgramSetup,
++}
++
++fn security_bits(security: SecurityModel) -> u32 {
++    match security {
++        SecurityModel::Security80 => 80,
++        SecurityModel::Security100 => 100,
++    }
++}
++
++fn padded(bytes: &[u8]) -> Vec<u8> {
++    let mut bytes = bytes.to_vec();
++    setups::pad_bytecode_bytes_for_proving(&mut bytes);
++    bytes
++}
++
++impl ProgramSetupSummaries {
++    /// Explicit slow reference path. This computes all three CPU setup trees.
++    pub fn compute(security: SecurityModel, base_binary: &[u8], base_text: &[u8]) -> Self {
++        let recursion =
++            |layer, kind| padded(verifier_binaries::recursion_artifact(security, layer, kind));
++        Self {
++            security_bits: security_bits(security),
++            base: compute_setup_for_machine_configuration::<IMStandardIsaConfigWithUnsignedMulDiv>(
++                &padded(base_binary),
++                &padded(base_text),
++            ),
++            recursion_unrolled: compute_setup_for_machine_configuration::<
++                IWithoutByteAccessIsaConfigWithDelegation,
++            >(
++                &recursion(RecursionLayer::Unrolled, RecursionArtifact::Bin),
++                &recursion(RecursionLayer::Unrolled, RecursionArtifact::Txt),
++            ),
++            recursion_unified: compute_unified_setup_for_machine_configuration::<
++                IWithoutByteAccessIsaConfigWithDelegation,
++            >(
++                &recursion(RecursionLayer::Unified, RecursionArtifact::Bin),
++                &recursion(RecursionLayer::Unified, RecursionArtifact::Txt),
++            ),
++        }
++    }
++
++    /// Cheap consistency checks only: callers must separately authenticate cap provenance.
++    pub fn validate(&self, security: SecurityModel, base_binary: &[u8]) -> Result<(), String> {
++        if self.security_bits != security_bits(security) {
++            return Err("setup summaries security mismatch".into());
++        }
++        validate_level("base", &self.base, base_binary, BASE_FAMILIES)?;
++        validate_level(
++            "recursion-unrolled",
++            &self.recursion_unrolled,
++            verifier_binaries::recursion_artifact(
++                security,
++                RecursionLayer::Unrolled,
++                RecursionArtifact::Bin,
++            ),
++            UNROLLED_FAMILIES,
++        )?;
++        validate_level(
++            "recursion-unified",
++            &self.recursion_unified,
++            verifier_binaries::recursion_artifact(
++                security,
++                RecursionLayer::Unified,
++                RecursionArtifact::Bin,
++            ),
++            UNIFIED_FAMILIES,
++        )
++    }
++
++    pub fn program_commitment(&self) -> [u32; 8] {
++        let (chain, preimage) = UnrolledProgramSetup::begin_recursion_chain(&self.base.end_params);
++        let (chain, preimage) = UnrolledProgramSetup::continue_recursion_chain(
++            &self.recursion_unrolled.end_params,
++            &chain,
++            &preimage,
++        );
++        UnrolledProgramSetup::continue_recursion_chain(
++            &self.recursion_unified.end_params,
++            &chain,
++            &preimage,
++        )
++        .0
++    }
++}
++
++fn validate_level(
++    name: &str,
++    setup: &UnrolledProgramSetup,
++    binary: &[u8],
++    families: &[u8],
++) -> Result<(), String> {
++    let invalid = |field| format!("{name} setup summary {field} mismatch");
++    if !setup
++        .circuit_families_setups
++        .keys()
++        .copied()
++        .eq(families.iter().copied())
++    {
++        return Err(invalid("circuit families"));
++    }
++    if binary.len() % 4 != 0 || binary.len() > riscv_transpiler::common_constants::ROM_WORD_SIZE * 4
++    {
++        return Err(invalid("binary length"));
++    }
++    let binary = padded(binary);
++    let words: Vec<_> = binary
++        .chunks_exact(4)
++        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
++        .collect();
++    let mut exits = words
++        .windows(crate::EXIT_SEQUENCE.len())
++        .enumerate()
++        .filter(|(_, window)| *window == crate::EXIT_SEQUENCE);
++    let Some((offset, _)) = exits.next() else {
++        return Err(invalid("exit sequence"));
++    };
++    if exits.next().is_some() {
++        return Err(invalid("exit sequence"));
++    }
++    let final_pc = ((offset + crate::EXIT_SEQUENCE.len() - 1) * 4) as u32;
++    if setup.expected_final_pc != final_pc {
++        return Err(invalid("final PC"));
++    }
++    let binary_hash: [u8; 32] = sha3::Keccak256::digest(&binary).into();
++    if setup.binary_hash != binary_hash {
++        return Err(invalid("binary hash"));
++    }
++    let caps: Vec<_> = setup.circuit_families_setups.values().collect();
++    let end_params = if families == UNIFIED_FAMILIES {
++        if !setup
++            .inits_and_teardowns_setup
++            .iter()
++            .all(|cap| cap.cap.iter().all(|word| *word == [0; 8]))
++        {
++            return Err(invalid("unified dummy caps"));
++        }
++        crate::compute_end_parameters_for_unified_circuit(final_pc, caps[0])
++    } else {
++        crate::compute_end_parameters_for_unrolled_circuits(
++            final_pc,
++            &caps,
++            &setup.inits_and_teardowns_setup,
++        )
++    };
++    if setup.end_params != end_params {
++        return Err(invalid("end parameters"));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{CAP_SIZE, NUM_COSETS};
++    use verifier_common::prover::definitions::MerkleTreeCap;
++
++    fn synthetic_summary(binary: &[u8], families: &[u8]) -> UnrolledProgramSetup {
++        let caps = [MerkleTreeCap::<CAP_SIZE>::dummy(); NUM_COSETS];
++        UnrolledProgramSetup::new_from_setups_and_binary(
++            &padded(binary),
++            &families.iter().map(|id| (*id, caps)).collect::<Vec<_>>(),
++            &caps,
++        )
++    }
++
++    fn fixture(security: SecurityModel) -> (ProgramSetupSummaries, Vec<u8>) {
++        let binary: Vec<_> = crate::EXIT_SEQUENCE
++            .iter()
++            .flat_map(|word| word.to_le_bytes())
++            .collect();
++        let embedded =
++            |layer| verifier_binaries::recursion_artifact(security, layer, RecursionArtifact::Bin);
++        let summaries = ProgramSetupSummaries {
++            security_bits: security_bits(security),
++            base: synthetic_summary(&binary, BASE_FAMILIES),
++            recursion_unrolled: synthetic_summary(
++                embedded(RecursionLayer::Unrolled),
++                UNROLLED_FAMILIES,
++            ),
++            recursion_unified: synthetic_summary(
++                embedded(RecursionLayer::Unified),
++                UNIFIED_FAMILIES,
++            ),
++        };
++        (summaries, binary)
++    }
++
++    #[test]
++    fn setup_summaries_validate_both_security_shapes_and_chain() {
++        for security in [SecurityModel::Security80, SecurityModel::Security100] {
++            let (summaries, binary) = fixture(security);
++            summaries.validate(security, &binary).unwrap();
++            let encoded = serde_json::to_vec(&summaries).unwrap();
++            let decoded: ProgramSetupSummaries = serde_json::from_slice(&encoded).unwrap();
++            assert_eq!(decoded.program_commitment(), summaries.program_commitment());
++            let mut unknown = serde_json::to_value(&summaries).unwrap();
++            unknown["unrecognized"] = serde_json::json!(true);
++            assert!(serde_json::from_value::<ProgramSetupSummaries>(unknown).is_err());
++        }
++    }
++
++    #[test]
++    fn setup_summaries_reject_metadata_mutations() {
++        let security = SecurityModel::Security100;
++        let (original, binary) = fixture(security);
++        assert!(original
++            .validate(SecurityModel::Security80, &binary)
++            .is_err());
++        for mutate in [
++            (|s: &mut ProgramSetupSummaries| s.base.expected_final_pc ^= 4)
++                as fn(&mut ProgramSetupSummaries),
++            |s| s.base.binary_hash[0] ^= 1,
++            |s| s.base.end_params[0] ^= 1,
++            |s| {
++                s.base.circuit_families_setups.remove(&BASE_FAMILIES[0]);
++            },
++            |s| s.recursion_unrolled.end_params[0] ^= 1,
++            |s| s.recursion_unified.inits_and_teardowns_setup[0].cap[0][0] ^= 1,
++            |s| {
++                s.recursion_unified
++                    .circuit_families_setups
++                    .get_mut(&UNIFIED_FAMILIES[0])
++                    .unwrap()[0]
++                    .cap[0][0] ^= 1
++            },
++        ] {
++            let mut changed = original.clone();
++            mutate(&mut changed);
++            assert!(changed.validate(security, &binary).is_err());
++        }
++        assert!(original.validate(security, &[]).is_err());
++        assert!(original.validate(security, &[0]).is_err());
++        let mut changed_binary = binary.clone();
++        changed_binary.extend_from_slice(&binary);
++        assert!(original.validate(security, &changed_binary).is_err());
++    }
++}
+diff --git a/execution_utils/src/unrolled_gpu.rs b/execution_utils/src/unrolled_gpu.rs
+index f5d1bab5..2bed4c3a 100644
+--- a/execution_utils/src/unrolled_gpu.rs
++++ b/execution_utils/src/unrolled_gpu.rs
+@@ -1,4 +1,5 @@
+ use crate::get_padded_binary;
++use crate::setup_summaries::ProgramSetupSummaries;
+ use crate::unified_recursion_target_family_proofs;
+ use crate::unrolled::{
+     compute_setup_for_machine_configuration, flatten_proof_into_responses_for_unrolled_recursion,
+@@ -13,7 +14,7 @@ use gpu_prover::{
+ use setups::{
+     binary_u8_to_u32, get_unified_circuit_artifact_for_machine_type,
+     get_unrolled_circuits_artifacts_for_machine_type, pad_bytecode_bytes_for_proving,
+-    pad_bytecode_for_proving, read_binary, CompiledCircuitsSet,
++    pad_bytecode_for_proving, CompiledCircuitsSet,
+ };
+ use verifier_common::security_100::Security100Marker;
+ use verifier_common::security_80::Security80Marker;
+@@ -166,6 +167,91 @@ impl UnrolledProver {
+         prover_configuration: ExecutionProverConfiguration,
+         max_level: UnrolledProverLevel,
+     ) -> Self {
++        Self::new_inner(
++            security,
++            path_without_bin,
++            prover_configuration,
++            max_level,
++            None,
++            None,
++        )
++        .expect("failed to initialize prover")
++    }
++
++    /// Use authenticated compact summaries while retaining normal GPU precomputations.
++    pub fn new_with_setup_summaries(
++        security: SecurityModel,
++        path_without_bin: &String,
++        prover_configuration: ExecutionProverConfiguration,
++        max_level: UnrolledProverLevel,
++        summaries: ProgramSetupSummaries,
++    ) -> Result<Self, String> {
++        if max_level != UnrolledProverLevel::RecursionUnified {
++            return Err("setup summaries require recursion-unified target".into());
++        }
++        Self::new_inner(
++            security,
++            path_without_bin,
++            prover_configuration,
++            max_level,
++            Some(summaries),
++            None,
++        )
++    }
++
++    /// Consume the exact bin/text bytes authenticated by the caller, without reopening files.
++    pub fn new_with_setup_summaries_and_program_bytes(
++        security: SecurityModel,
++        path_without_bin: &String,
++        prover_configuration: ExecutionProverConfiguration,
++        max_level: UnrolledProverLevel,
++        summaries: ProgramSetupSummaries,
++        base_binary: Vec<u8>,
++        base_text: Vec<u8>,
++    ) -> Result<Self, String> {
++        if max_level != UnrolledProverLevel::RecursionUnified {
++            return Err("setup summaries require recursion-unified target".into());
++        }
++        Self::new_inner(
++            security,
++            path_without_bin,
++            prover_configuration,
++            max_level,
++            Some(summaries),
++            Some((base_binary, base_text)),
++        )
++    }
++
++    fn new_inner(
++        security: SecurityModel,
++        path_without_bin: &String,
++        prover_configuration: ExecutionProverConfiguration,
++        max_level: UnrolledProverLevel,
++        summaries: Option<ProgramSetupSummaries>,
++        program_bytes: Option<(Vec<u8>, Vec<u8>)>,
++    ) -> Result<Self, String> {
++        // Read once: validation and GPU setup must consume the same binary bytes.
++        let bin_path = format!("{}.bin", path_without_bin);
++        let text_path = format!("{}.text", path_without_bin);
++        let (binary, text) = match program_bytes {
++            Some(bytes) => bytes,
++            None => (
++                std::fs::read(&bin_path).map_err(|e| format!("{bin_path}: {e}"))?,
++                std::fs::read(&text_path).map_err(|e| format!("{text_path}: {e}"))?,
++            ),
++        };
++        for (name, bytes) in [("binary", &binary), ("text", &text)] {
++            if bytes.len() % 4 != 0
++                || bytes.len() > riscv_transpiler::common_constants::ROM_WORD_SIZE * 4
++            {
++                return Err(format!("invalid program {name} length"));
++            }
++        }
++        if let Some(summaries) = &summaries {
++            summaries.validate(security, &binary)?;
++        }
++        let binary_u32 = binary_u8_to_u32(&binary);
++        let text_u32 = binary_u8_to_u32(&text);
+         let mut prover = match security {
+             SecurityModel::Security80 => RuntimeExecutionProver::Security80(ExecutionProver::<
+                 Security80Marker,
+@@ -179,10 +265,6 @@ impl UnrolledProver {
+         let mut level_data = BTreeMap::new();
+
+         {
+-            let bin_path = format!("{}.bin", path_without_bin);
+-            let text_path = format!("{}.text", path_without_bin);
+-            let (binary, binary_u32) = read_binary(Path::new(&bin_path));
+-            let (text, text_u32) = read_binary(Path::new(&text_path));
+             prover.add_binary(
+                 UnrolledProverLevel::Base as usize,
+                 ExecutionKind::Unrolled,
+@@ -191,16 +273,22 @@ impl UnrolledProver {
+                 text_u32.clone(),
+                 None,
+             );
+-            info!("Computing base layer setup");
+             let mut padded_binary = binary.clone();
+             pad_bytecode_bytes_for_proving(&mut padded_binary);
+             let mut padded_text = text.clone();
+             pad_bytecode_bytes_for_proving(&mut padded_text);
+             let mut padded_binary_u32 = binary_u32.clone();
+             pad_bytecode_for_proving(&mut padded_binary_u32);
+-            let setup = compute_setup_for_machine_configuration::<
+-                IMStandardIsaConfigWithUnsignedMulDiv,
+-            >(&padded_binary, &padded_text);
++            let setup = match &summaries {
++                Some(summaries) => summaries.base.clone(),
++                None => {
++                    info!("Computing base layer setup");
++                    compute_setup_for_machine_configuration::<IMStandardIsaConfigWithUnsignedMulDiv>(
++                        &padded_binary,
++                        &padded_text,
++                    )
++                }
++            };
+             let compiled_layouts = get_unrolled_circuits_artifacts_for_machine_type::<
+                 IMStandardIsaConfigWithUnsignedMulDiv,
+             >(&padded_binary_u32);
+@@ -242,16 +330,21 @@ impl UnrolledProver {
+                 text_u32.clone(),
+                 None,
+             );
+-            info!("Computing recursion in unrolled layer setup");
+             let mut padded_binary = binary.clone();
+             pad_bytecode_bytes_for_proving(&mut padded_binary);
+             let mut padded_text = text.clone();
+             pad_bytecode_bytes_for_proving(&mut padded_text);
+             let mut padded_binary_u32 = binary_u32.clone();
+             pad_bytecode_for_proving(&mut padded_binary_u32);
+-            let setup = compute_setup_for_machine_configuration::<
+-                IWithoutByteAccessIsaConfigWithDelegation,
+-            >(&padded_binary, &padded_text);
++            let setup = match &summaries {
++                Some(summaries) => summaries.recursion_unrolled.clone(),
++                None => {
++                    info!("Computing recursion in unrolled layer setup");
++                    compute_setup_for_machine_configuration::<
++                        IWithoutByteAccessIsaConfigWithDelegation,
++                    >(&padded_binary, &padded_text)
++                }
++            };
+             let compiled_layouts = get_unrolled_circuits_artifacts_for_machine_type::<
+                 IWithoutByteAccessIsaConfigWithDelegation,
+             >(&padded_binary_u32);
+@@ -297,16 +390,21 @@ impl UnrolledProver {
+                 text_u32.clone(),
+                 None,
+             );
+-            info!("Computing recursion in unified layer setup");
+             let mut padded_binary = binary.clone();
+             pad_bytecode_bytes_for_proving(&mut padded_binary);
+             let mut padded_text = text.clone();
+             pad_bytecode_bytes_for_proving(&mut padded_text);
+             let mut padded_binary_u32 = binary_u32.clone();
+             pad_bytecode_for_proving(&mut padded_binary_u32);
+-            let setup = compute_unified_setup_for_machine_configuration::<
+-                IWithoutByteAccessIsaConfigWithDelegation,
+-            >(&padded_binary, &padded_text);
++            let setup = match &summaries {
++                Some(summaries) => summaries.recursion_unified.clone(),
++                None => {
++                    info!("Computing recursion in unified layer setup");
++                    compute_unified_setup_for_machine_configuration::<
++                        IWithoutByteAccessIsaConfigWithDelegation,
++                    >(&padded_binary, &padded_text)
++                }
++            };
+             let compiled_layouts = get_unified_circuit_artifact_for_machine_type::<
+                 IWithoutByteAccessIsaConfigWithDelegation,
+             >(&padded_binary_u32);
+@@ -329,11 +427,11 @@ impl UnrolledProver {
+             level_data.insert(UnrolledProverLevel::RecursionUnified, data);
+         }
+
+-        Self {
++        Ok(Self {
+             max_level,
+             level_data,
+             prover,
+-        }
++        })
+     }
+
+     pub fn prove(
+diff --git a/gpu_prover/src/execution/cpu_worker.rs b/gpu_prover/src/execution/cpu_worker.rs
+index 25d86655..a5ac4147 100644
+--- a/gpu_prover/src/execution/cpu_worker.rs
++++ b/gpu_prover/src/execution/cpu_worker.rs
+@@ -3,7 +3,8 @@ use crate::circuit_type::{CircuitType, UnrolledCircuitType};
+ use crate::execution::messages::SimulationResult;
+ use crate::execution::messages::{InitsAndTeardownsData, WorkerResult};
+ use crate::execution::simulation_runner::{
+-    LockedBoxedMemoryHolder, LockedBoxedTraceChunk, SimulationRunner, Snapshot,
++    EmptyInitsAndTeardownsStreamer, LockedBoxedMemoryHolder, LockedBoxedTraceChunk,
++    SimulationRunner, Snapshot,
+ };
+ use crate::execution::tracing::{Tracer, TracingType};
+ use crate::machine_type::MachineType;
+@@ -51,7 +52,7 @@ pub(crate) fn run_simulator<
+     trace!("BATCH[{batch_id}] SIMULATOR started");
+     let mut non_determinism_guard = non_determinism.lock().unwrap();
+     let non_determinism_source = non_determinism_guard.take().unwrap();
+-    let runner = SimulationRunner::<_, T>::new(
++    let mut runner = SimulationRunner::<_, T>::new(
+         batch_id,
+         machine_type,
+         non_determinism_source,
+@@ -62,6 +63,15 @@ pub(crate) fn run_simulator<
+         free_allocators.clone(),
+         abort,
+     );
++    // The pinned unified circuit has one I&T record per usable row. Collection
++    // emits at most one record per RAM word, so its trailing I&T occupancy is
++    // bounded even if a delegation touches many words in a single VM cycle.
++    runner.empty_it_streamer = (!T::IS_SPLIT).then(|| {
++        EmptyInitsAndTeardownsStreamer::new(
++            memory_holder.memory.len(),
++            setups::unified_reduced_machine::NUM_CYCLES,
++        )
++    });
+     let runner = runner.run(
+         binary_image,
+         text_section,
+@@ -76,6 +86,7 @@ pub(crate) fn run_simulator<
+         abort,
+         state,
+         is_aborted,
++        empty_it_streamer,
+         ..
+     } = runner;
+     *non_determinism_guard = Some(non_determinism_source);
+@@ -101,7 +112,12 @@ pub(crate) fn run_simulator<
+             let total_cycles = (timestamp_diff / TIMESTAMP_STEP) as usize;
+             let empty_cycles = total_cycles - count;
+             let empty_circuits = empty_cycles / per_circuit_count;
+-            for sequence_id in 0..empty_circuits {
++            // Preserve this revision's exact final empty prefix, including a
++            // partial final circuit; emit only markers not already streamed.
++            let remaining_empty = empty_it_streamer
++                .expect("unified simulation requires an empty init/teardown streamer")
++                .finish(empty_circuits);
++            for sequence_id in remaining_empty {
+                 let data = InitsAndTeardownsData {
+                     circuit_type: CircuitType::Unrolled(UnrolledCircuitType::Unified),
+                     sequence_id,
+diff --git a/gpu_prover/src/execution/empty_inits_and_teardowns.rs b/gpu_prover/src/execution/empty_inits_and_teardowns.rs
+new file mode 100644
+index 00000000..d1e99973
+--- /dev/null
++++ b/gpu_prover/src/execution/empty_inits_and_teardowns.rs
+@@ -0,0 +1,155 @@
++use std::ops::Range;
++
++/// Release only the leading unified circuits that cannot contain I&T records.
++///
++/// At this revision collection emits at most one record per RAM word and packs
++/// `cycles_per_circuit` records per unified circuit. Thus at most
++/// `ceil(ram_words / cycles_per_circuit)` trailing circuits can contain I&T,
++/// regardless of delegation accesses or their distribution among snapshots.
++/// This is the old per-word geometry, not the newer per-window geometry.
++pub(crate) struct EmptyInitsAndTeardownsStreamer {
++    pub next_sequence_id: usize,
++    cycles_per_circuit: usize,
++    max_it_instances: usize,
++}
++
++impl EmptyInitsAndTeardownsStreamer {
++    pub fn new(ram_words: usize, cycles_per_circuit: usize) -> Self {
++        assert_ne!(cycles_per_circuit, 0);
++        Self {
++            next_sequence_id: 0,
++            cycles_per_circuit,
++            max_it_instances: ram_words.div_ceil(cycles_per_circuit),
++        }
++    }
++
++    pub fn release(&mut self, cycles_so_far: usize) -> Range<usize> {
++        let completed_circuits = cycles_so_far / self.cycles_per_circuit;
++        let frontier = completed_circuits.saturating_sub(self.max_it_instances);
++        let start = self.next_sequence_id;
++        self.next_sequence_id = frontier.max(start);
++        start..self.next_sequence_id
++    }
++
++    pub fn finish(self, empty_circuits: usize) -> Range<usize> {
++        // The run-time frontier is an architectural bound, not a prediction of
++        // final occupancy. Fail closed if future layout changes violate it.
++        assert!(
++            self.next_sequence_id <= empty_circuits,
++            "streamed unified init/teardown prefix exceeds the final empty prefix"
++        );
++        self.next_sequence_id..empty_circuits
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const RAM_WORDS: usize = (1 << 30) / size_of::<u32>();
++    const CYCLES_PER_CIRCUIT: usize = (1 << 23) - 1;
++
++    #[test]
++    fn pinned_per_word_geometry_has_thirty_three_trailing_instances() {
++        let streamer = EmptyInitsAndTeardownsStreamer::new(RAM_WORDS, CYCLES_PER_CIRCUIT);
++        assert_eq!(streamer.max_it_instances, 33);
++        assert_eq!(RAM_WORDS.div_ceil(CYCLES_PER_CIRCUIT), 33);
++        assert!(32 * CYCLES_PER_CIRCUIT < RAM_WORDS);
++        assert!(RAM_WORDS <= 33 * CYCLES_PER_CIRCUIT);
++    }
++
++    #[test]
++    fn partial_circuits_and_repeated_snapshots_do_not_release_early_or_duplicate() {
++        let mut streamer = EmptyInitsAndTeardownsStreamer::new(25, 10);
++        assert!(streamer.release(29).is_empty());
++        assert!(streamer.release(39).is_empty());
++        assert_eq!(streamer.release(40), 0..1);
++        assert!(streamer.release(40).is_empty());
++        assert_eq!(streamer.release(105), 1..7);
++        assert!(streamer.release(104).is_empty());
++        assert_eq!(streamer.finish((105 - 25) / 10), 7..8);
++    }
++
++    #[test]
++    fn all_final_occupancies_preserve_the_original_exact_prefix() {
++        // Exhaustive reduced geometry includes partial final circuits and RAM
++        // sizes not divisible by the per-circuit capacity.
++        for ram_words in 0..=50 {
++            for per_circuit in 1..=12 {
++                for total_cycles in 0..=150 {
++                    for records in 0..=ram_words.min(total_cycles) {
++                        let mut streamer =
++                            EmptyInitsAndTeardownsStreamer::new(ram_words, per_circuit);
++                        let mut ids = Vec::new();
++                        for cycles in (0..total_cycles).step_by(7) {
++                            ids.extend(streamer.release(cycles));
++                        }
++                        ids.extend(streamer.release(total_cycles));
++                        let final_empty = (total_cycles - records) / per_circuit;
++                        ids.extend(streamer.finish(final_empty));
++                        assert_eq!(ids, (0..final_empty).collect::<Vec<_>>());
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn delegation_bursts_cannot_exceed_the_ram_word_bound() {
++        let total_cycles = 101 * CYCLES_PER_CIRCUIT + 57;
++        let mut streamer = EmptyInitsAndTeardownsStreamer::new(RAM_WORDS, CYCLES_PER_CIRCUIT);
++        let mut ids = Vec::new();
++        // Large, irregular cycle advances model delegation-heavy snapshots;
++        // occupancy is the architectural worst case: every RAM word touched.
++        for circuits in [0, 1, 32, 33, 34, 47, 65, 100] {
++            let cycles = circuits * CYCLES_PER_CIRCUIT;
++            let released = streamer.release(cycles);
++            let guaranteed_empty = cycles.saturating_sub(RAM_WORDS) / CYCLES_PER_CIRCUIT;
++            assert!(released.end <= guaranteed_empty);
++            ids.extend(released);
++        }
++        ids.extend(streamer.release(total_cycles));
++        let final_empty = (total_cycles - RAM_WORDS) / CYCLES_PER_CIRCUIT;
++        ids.extend(streamer.finish(final_empty));
++        assert_eq!(ids, (0..final_empty).collect::<Vec<_>>());
++    }
++
++    #[test]
++    fn finite_pool_model_progresses_beyond_forty_six_circuits() {
++        const POOL: usize = 384;
++        const PER_CIRCUIT: usize = 8;
++        const OTHER_LIVE: usize = 16;
++        let mut streamer = EmptyInitsAndTeardownsStreamer::new(RAM_WORDS, CYCLES_PER_CIRCUIT);
++        let mut retained = 0;
++        for completed in 1..=160 {
++            // Same ordering as process_trace: release before allocating this
++            // snapshot's tracing chunks. This model assumes earlier replay/GPU
++            // work has completed; native queue/snapshot lag is not modeled.
++            let released = streamer.release(completed * CYCLES_PER_CIRCUIT);
++            retained -= released.len() * PER_CIRCUIT;
++            assert!(retained + PER_CIRCUIT + OTHER_LIVE <= POOL);
++            retained += PER_CIRCUIT;
++        }
++        assert_eq!(retained, 33 * PER_CIRCUIT);
++        assert!(47 * PER_CIRCUIT + OTHER_LIVE > POOL);
++    }
++
++    #[test]
++    fn split_mode_none_keeps_all_markers_for_finalization() {
++        let mut streamer: Option<EmptyInitsAndTeardownsStreamer> = None;
++        let released = streamer.as_mut().map(|s| s.release(1000));
++        assert!(released.is_none());
++        let remaining = streamer.map_or(0..17, |s| s.finish(17));
++        assert_eq!(remaining, 0..17);
++    }
++
++    #[test]
++    #[should_panic(
++        expected = "streamed unified init/teardown prefix exceeds the final empty prefix"
++    )]
++    fn finalization_fails_closed_if_a_future_layout_violates_the_bound() {
++        let mut streamer = EmptyInitsAndTeardownsStreamer::new(25, 10);
++        assert_eq!(streamer.release(100), 0..7);
++        streamer.finish(6);
++    }
++}
 diff --git a/gpu_prover/src/execution/gpu_worker.rs b/gpu_prover/src/execution/gpu_worker.rs
+index 90ec085c..eb444ece 100644
 --- a/gpu_prover/src/execution/gpu_worker.rs
 +++ b/gpu_prover/src/execution/gpu_worker.rs
-@@ -16,10 +16,10 @@
+@@ -16,10 +16,10 @@ use crate::prover::setup::SetupPrecomputations;
  use crate::prover::tracing_data::{InitsAndTeardownsTransfer, TracingDataTransfer};
  use crate::witness::trace_unrolled::get_aux_arguments_boundary_values;
  use crossbeam_channel::{Receiver, Sender};
@@ -14,7 +747,7 @@ diff --git a/gpu_prover/src/execution/gpu_worker.rs b/gpu_prover/src/execution/g
  use std::mem;
  use std::ops::Deref;
  use std::process::exit;
-@@ -62,14 +62,9 @@
+@@ -62,14 +62,9 @@ fn gpu_worker<S: SecurityMarker>(
      trace!("GPU_WORKER[{device_id}] started");
      Precomputations::ensure_initialized();
      set_device(device_id)?;
@@ -32,3 +765,169 @@ diff --git a/gpu_prover/src/execution/gpu_worker.rs b/gpu_prover/src/execution/g
      let requested_preset = prover_context_config.gpu_memory_preset;
      let mut context = ProverContext::new(&prover_context_config)?;
      let preset = context.get_memory_preset();
+diff --git a/gpu_prover/src/execution/simulation_runner.rs b/gpu_prover/src/execution/simulation_runner.rs
+index a62de81b..4a31ca86 100644
+--- a/gpu_prover/src/execution/simulation_runner.rs
++++ b/gpu_prover/src/execution/simulation_runner.rs
+@@ -1,4 +1,5 @@
+-use crate::execution::messages::WorkerResult;
++use crate::circuit_type::{CircuitType, UnrolledCircuitType};
++use crate::execution::messages::{InitsAndTeardownsData, WorkerResult};
+ use crate::execution::tracing::{DataTraceRanges, TracingDataProducers, TracingType};
+ use crate::execution::A;
+ use crate::machine_type::MachineType;
+@@ -23,6 +24,10 @@ use std::sync::{Arc, Mutex};
+ use std::time::{Duration, Instant};
+ use type_map::concurrent::TypeMap;
+
++#[path = "empty_inits_and_teardowns.rs"]
++mod empty_inits_and_teardowns;
++pub(crate) use empty_inits_and_teardowns::EmptyInitsAndTeardownsStreamer;
++
+ #[cfg(not(target_arch = "x86_64"))]
+ use self::compat::{Context, JittedCode};
+ #[cfg(target_arch = "x86_64")]
+@@ -167,6 +172,7 @@ pub(crate) struct SimulationRunner<
+     pub trace: Option<LockedBoxedTraceChunk>,
+     pub snapshot_index: usize,
+     pub tracing_data_producers: Option<T::Producers>,
++    pub empty_it_streamer: Option<EmptyInitsAndTeardownsStreamer>,
+     pub instant: Option<Instant>,
+     pub total_elapsed: Duration,
+     pub is_aborted: bool,
+@@ -201,6 +207,7 @@ impl<ND: NonDeterminismCSRSource + Send + 'static, T: TracingType + 'static>
+             trace: None,
+             snapshot_index: 0,
+             tracing_data_producers,
++            empty_it_streamer: None,
+             instant: None,
+             total_elapsed: Default::default(),
+             is_aborted: false,
+@@ -294,6 +301,26 @@ impl<ND: NonDeterminismCSRSource + Send + 'static, T: TracingType + 'static>
+             self.is_aborted = true;
+             return;
+         }
++        // Send provably empty unified markers before process_snapshot can block
++        // receiving a host allocator. This lets earlier tracing results pair
++        // and dispatch instead of pinning their allocators until the VM ends.
++        if let (Some(streamer), Some(results)) =
++            (self.empty_it_streamer.as_mut(), self.results.as_ref())
++        {
++            let cycles_so_far = ((timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP) as usize;
++            for sequence_id in streamer.release(cycles_so_far) {
++                let data = InitsAndTeardownsData {
++                    circuit_type: CircuitType::Unrolled(UnrolledCircuitType::Unified),
++                    sequence_id,
++                    inits_and_teardowns: None,
++                };
++                results
++                    .send(WorkerResult::InitsAndTeardownsData(data))
++                    .expect(
++                    "simulation results channel closed while streaming empty init/teardown markers",
++                );
++            }
++        }
+         let trace = self.trace.take().unwrap();
+         let result = WorkerResult::SnapshotProduced;
+         self.results.as_ref().unwrap().send(result).unwrap();
+diff --git a/tools/cli/src/prover_utils.rs b/tools/cli/src/prover_utils.rs
+index adbdd65a..7f18a36a 100644
+--- a/tools/cli/src/prover_utils.rs
++++ b/tools/cli/src/prover_utils.rs
+@@ -1,4 +1,5 @@
+ use clap::ValueEnum;
++use execution_utils::setup_summaries::ProgramSetupSummaries;
+ use execution_utils::setups::{
+     binary_u8_to_u32, get_unified_circuit_artifact_for_machine_type,
+     get_unrolled_circuits_artifacts_for_machine_type, pad_bytecode_bytes_for_proving,
+@@ -301,6 +302,49 @@ pub fn default_backend_for_build() -> ProverBackend {
+
+ impl ProgramProver {
+     pub fn new(source: ProgramSource, config: ProgramProverConfig) -> Result<Self, String> {
++        Self::new_inner(source, config, None, None)
++    }
++
++    /// Inject authenticated summaries for GPU recursion-unified proving only.
++    /// This skips host CPU cap derivation, not GPU proving precomputations.
++    pub fn new_with_setup_summaries(
++        source: ProgramSource,
++        config: ProgramProverConfig,
++        summaries: ProgramSetupSummaries,
++    ) -> Result<Self, String> {
++        if config.backend != ProverBackend::Gpu || config.target != ProofTarget::RecursionUnified {
++            return Err("setup summaries require GPU backend and recursion-unified target".into());
++        }
++        Self::new_inner(source, config, Some(summaries), None)
++    }
++
++    /// Use the exact bytes authenticated with the summaries, without reopening source files.
++    pub fn new_with_setup_summaries_and_program_bytes(
++        source: ProgramSource,
++        config: ProgramProverConfig,
++        summaries: ProgramSetupSummaries,
++        base_binary: Vec<u8>,
++        base_text: Vec<u8>,
++    ) -> Result<Self, String> {
++        if config.backend != ProverBackend::Gpu || config.target != ProofTarget::RecursionUnified {
++            return Err("setup summaries require GPU backend and recursion-unified target".into());
++        }
++        Self::new_inner(
++            source,
++            config,
++            Some(summaries),
++            Some((base_binary, base_text)),
++        )
++    }
++
++    fn new_inner(
++        source: ProgramSource,
++        config: ProgramProverConfig,
++        summaries: Option<ProgramSetupSummaries>,
++        program_bytes: Option<(Vec<u8>, Vec<u8>)>,
++    ) -> Result<Self, String> {
++        #[cfg(not(feature = "gpu"))]
++        let _ = (&summaries, &program_bytes);
+         if config.target == ProofTarget::RecursionCombined {
+             return Err(
+                 "recursion-combined proofs are produced from existing recursion-unified \
+@@ -330,12 +374,34 @@ impl ProgramProver {
+                         }
+                     };
+
+-                    ProgramProverInner::Gpu(UnrolledProver::new(
+-                        config.security_level.model(),
+-                        &path_without_bin,
+-                        prover_configuration,
+-                        max_level,
+-                    ))
++                    let prover = match (summaries, program_bytes) {
++                        (Some(summaries), Some((binary, text))) => {
++                            UnrolledProver::new_with_setup_summaries_and_program_bytes(
++                                config.security_level.model(),
++                                &path_without_bin,
++                                prover_configuration,
++                                max_level,
++                                summaries,
++                                binary,
++                                text,
++                            )?
++                        }
++                        (Some(summaries), None) => UnrolledProver::new_with_setup_summaries(
++                            config.security_level.model(),
++                            &path_without_bin,
++                            prover_configuration,
++                            max_level,
++                            summaries,
++                        )?,
++                        (None, None) => UnrolledProver::new(
++                            config.security_level.model(),
++                            &path_without_bin,
++                            prover_configuration,
++                            max_level,
++                        ),
++                        (None, Some(_)) => unreachable!("program bytes require summaries"),
++                    };
++                    ProgramProverInner::Gpu(prover)
+                 }
+                 #[cfg(not(feature = "gpu"))]
+                 {

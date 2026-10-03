@@ -8,9 +8,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zksync_airbender_cli::prover_utils::{
-    verify_artifact, GpuMemoryPreset, ProgramProver, ProgramProverConfig, ProgramSource,
-    ProofTarget, ProverBackend, SecurityLevel,
+    verify_artifact, GpuMemoryPreset, ProgramProverConfig, ProgramSource, ProofTarget,
+    ProverBackend, SecurityLevel,
 };
+use zksync_os_fri_prover::{create_prover_with_config_and_setup_policy, FriSetupPolicy};
 
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_PROGRAM_BYTES: usize = 64 * 1024 * 1024;
@@ -46,6 +47,9 @@ struct Args {
     gpu_memory_preset: MemoryPreset,
     #[arg(long, default_value_t = 8)]
     gpu_replay_threads: usize,
+    /// Same authenticated setup policy as the production FRI worker.
+    #[arg(long, value_enum, default_value_t = FriSetupPolicy::Bundled)]
+    fri_setup_policy: FriSetupPolicy,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -114,7 +118,7 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>> {
 
 fn input_words(bytes: &[u8], expected_words: u64) -> Result<Vec<u32>> {
     ensure!(
-        !bytes.is_empty() && bytes.len() % 4 == 0,
+        !bytes.is_empty() && bytes.len().is_multiple_of(4),
         "input must contain complete, nonempty little-endian u32 words"
     );
     ensure!(
@@ -245,7 +249,8 @@ fn main() -> Result<()> {
         MemoryPreset::Low => GpuMemoryPreset::Low,
     };
     let setup_start = Instant::now();
-    let prover = ProgramProver::new(source.clone(), config).map_err(anyhow::Error::msg)?;
+    let prover =
+        create_prover_with_config_and_setup_policy(source.clone(), config, args.fri_setup_policy)?;
     let setup_ms = setup_start.elapsed().as_millis();
     let actual_commitment = prover
         .program_commitment()
@@ -282,6 +287,7 @@ fn main() -> Result<()> {
         "target": "recursion-unified",
         "gpu_memory_preset": args.gpu_memory_preset,
         "gpu_replay_threads": args.gpu_replay_threads,
+        "fri_setup_policy": args.fri_setup_policy.to_string(),
         "setup_ms": setup_ms,
         "prove_wall_ms": prove_ms,
         "verify_ms": verify_start.elapsed().as_millis(),

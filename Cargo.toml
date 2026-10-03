@@ -93,7 +93,7 @@ codegen-units = 256
 overflow-checks = true
 
 [profile.release.package."zkos-wrapper"]
-opt-level = 1
+opt-level = 2
 codegen-units = 256
 overflow-checks = true
 

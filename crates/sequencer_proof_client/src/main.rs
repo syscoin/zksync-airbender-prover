@@ -46,7 +46,14 @@ const fn max_manual_fri_job_artifact_bytes(max_pick_response_bytes: usize) -> us
 
 const MAX_MANUAL_FRI_JOB_ARTIFACT_BYTES: usize =
     max_manual_fri_job_artifact_bytes(MAX_FRI_PICK_RESPONSE_BYTES);
-const MAX_MANUAL_SNARK_JOB_ARTIFACT_BYTES: usize = MAX_SNARK_JOB_RESPONSE_BYTES * 8;
+// SYSCOIN: Final proof files do not inherit the aggregate-input transport expansion.
+const MAX_MANUAL_SNARK_PROOF_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
+
+fn max_manual_snark_job_artifact_bytes(max_pick_response_bytes: usize) -> Result<usize> {
+    max_pick_response_bytes
+        .checked_mul(8)
+        .ok_or_else(|| anyhow!("manual SNARK job artifact limit overflows this platform"))
+}
 
 struct BoundedWriter<W> {
     inner: W,
@@ -575,6 +582,8 @@ async fn main() -> Result<()> {
             );
         }
         Commands::PickSnark { path } => {
+            // SYSCOIN: Reject an unrepresentable artifact budget before acquiring authority.
+            let artifact_limit = max_manual_snark_job_artifact_bytes(MAX_SNARK_JOB_RESPONSE_BYTES)?;
             // SYSCOIN: Reserve an owner-only destination before aggregate authority is
             // leased. Only explicit no-job removes it; every ambiguous outcome remains visible.
             let mut destination = ReservedJobPath::new(&path)?;
@@ -599,7 +608,7 @@ async fn main() -> Result<()> {
                         sequencer_endpoint: url.as_str(),
                         job: &snark_proof_inputs,
                     };
-                    destination.publish_json(&saved_job, MAX_MANUAL_SNARK_JOB_ARTIFACT_BYTES)?;
+                    destination.publish_json(&saved_job, artifact_limit)?;
                     tracing::info!(
                         "Saved SNARK job for batches [{}, {}] with vk {} to path {}",
                         snark_proof_inputs.from_batch_number,
@@ -619,8 +628,10 @@ async fn main() -> Result<()> {
             proof_path,
         } => {
             // SYSCOIN: Range/VK/capability come from the private pick artifact, not argv.
-            let job: SavedSnarkJobAuthority =
-                deserialize_private_job_bounded(&job_path, MAX_MANUAL_SNARK_JOB_ARTIFACT_BYTES)?;
+            let job: SavedSnarkJobAuthority = deserialize_private_job_bounded(
+                &job_path,
+                max_manual_snark_job_artifact_bytes(MAX_SNARK_JOB_RESPONSE_BYTES)?,
+            )?;
             ensure_manual_job_endpoint(&job.sequencer_endpoint, url.as_str())?;
             tracing::info!(
                 "Submitting SNARK proof for batches [{}, {}] with proof from {proof_path} to sequencer at {}",
@@ -629,7 +640,7 @@ async fn main() -> Result<()> {
                 url
             );
             let snark_wrapper: SnarkWrapperProof =
-                deserialize_proof_bounded(&proof_path, MAX_SNARK_JOB_RESPONSE_BYTES)?;
+                deserialize_proof_bounded(&proof_path, MAX_MANUAL_SNARK_PROOF_ARTIFACT_BYTES)?;
             client
                 .submit_snark_proof(
                     job.from_batch_number,
@@ -888,6 +899,13 @@ mod tests {
             MAX_MANUAL_FRI_JOB_ARTIFACT_BYTES,
             max_manual_fri_job_artifact_bytes(MAX_FRI_PICK_RESPONSE_BYTES)
         );
+    }
+
+    #[test]
+    fn snark_artifact_limit_rejects_overflow_and_preserves_final_proof_file_cap() {
+        assert_eq!(max_manual_snark_job_artifact_bytes(1_024).unwrap(), 8_192);
+        assert!(max_manual_snark_job_artifact_bytes(usize::MAX).is_err());
+        assert_eq!(MAX_MANUAL_SNARK_PROOF_ARTIFACT_BYTES, 256 * 1024 * 1024);
     }
 
     #[cfg(unix)]

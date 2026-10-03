@@ -23,6 +23,7 @@ COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
 COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py ./scripts/
 COPY patches/airbender-cuda-device-diagnostics.patch patches/airbender-cuda-device-diagnostics.json patches/airbender.Cargo.lock ./patches/
+COPY patches/zkos-wrapper-buffered-os-rng.json patches/zkos-wrapper-buffered-os-rng.patch ./patches/
 
 # SYSCOIN: Match the hardened release topology: CPU-only wrapping, without the GPU feature.
 RUN AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-cpu-airbender-build-inputs.json \

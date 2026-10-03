@@ -784,7 +784,16 @@ class AdapterValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(runpod.Error, "image_file_hash_mismatch"):
                     job.verify_image(selected)
 
-    def test_native_environment_does_not_inherit_secrets(self):
+    def test_native_environment_strips_secrets_and_scopes_stage_settings(self):
+        runtime = {
+            "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY": "recompute",
+            "ZKSYNC_SNARK_CPU_POLICY": "bounded",
+            "ZKSYNC_SNARK_CPU_MAX_LOGICAL": "31",
+            "ZKSYNC_SNARK_CPU_DEFAULT_THREADS": "16",
+            "RAYON_NUM_THREADS": "16",
+            "BELLMAN_NUM_THREADS": "16",
+            "OMP_NUM_THREADS": "16",
+        }
         class Process:
             def wait(self, timeout=None):
                 return 0
@@ -792,12 +801,21 @@ class AdapterValidationTests(unittest.TestCase):
                 return 0
         with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {
             "RUNPOD_API_KEY": "provider", "PRIVATE_KEY": "staking", "ZKSYNC_SEQUENCER_URLS": "secret",
+            "ZKSYNC_FRI_SETUP_POLICY": "recompute",
+            **runtime,
         }), patch.object(worker.subprocess, "Popen", return_value=Process()) as popen:
-            worker.run_native(["fixed-worker"], Path(temporary), 1)
-        env = popen.call_args.kwargs["env"]
-        self.assertNotIn("RUNPOD_API_KEY", env)
-        self.assertNotIn("PRIVATE_KEY", env)
-        self.assertNotIn("ZKSYNC_SEQUENCER_URLS", env)
+            worker.run_native([job.BINARIES["FRI"]], Path(temporary), 1)
+            worker.run_native([job.BINARIES["SNARK"]], Path(temporary), 1)
+        fri_env = popen.call_args_list[0].kwargs["env"]
+        snark_env = popen.call_args_list[1].kwargs["env"]
+        for env in (fri_env, snark_env):
+            self.assertNotIn("RUNPOD_API_KEY", env)
+            self.assertNotIn("PRIVATE_KEY", env)
+            self.assertNotIn("ZKSYNC_SEQUENCER_URLS", env)
+        self.assertTrue(runtime.keys().isdisjoint(fri_env))
+        self.assertEqual(fri_env["ZKSYNC_FRI_SETUP_POLICY"], "recompute")
+        self.assertNotIn("ZKSYNC_FRI_SETUP_POLICY", snark_env)
+        self.assertEqual({name: snark_env.get(name) for name in runtime}, runtime)
 
 
 if __name__ == "__main__":

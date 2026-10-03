@@ -61,13 +61,14 @@ Use `-p` to select the worker package as well as `--bin`: selecting only a binar
 workspace root can unify other workers' GPU features and pull the SNARK CUDA backend into FRI.
 The isolated FRI GPU worker does not require `BELLMAN_CUDA_DIR`; GPU SNARK and combined workers do.
 
-Use the checked-in Cargo wrapper shown below for worker builds and runs. FRI and explicit CPU
-builds retain the pinned diagnostic-only Airbender patch. GPU SNARK and combined builds select
-`--gpu32`, additionally applying the tested memory patches to pinned crypto-GPU and Bellman CUDA
-sources in disposable copies. It audits the complete lock overlay and leaves artifacts under
-the usual `target/` directory. Python 3.11+ or Python 3 with
-the distribution's `python3-tomli` package is required. Direct `cargo` worker builds omit this fix;
-see [build overlay and provenance](docs/airbender-build-overlay.md).
+Use the checked-in Cargo wrapper shown below for worker builds and runs. Every lane prepares exact
+Airbender and `zkos-wrapper` sources in disposable copies, including the diagnostic compatibility
+patch and buffered OS-RNG patch; the isolated FRI binary does not link the wrapper packages. GPU
+SNARK and combined builds select `--gpu32`, additionally applying the tested memory patches to
+pinned crypto-GPU and Bellman CUDA sources. The helper audits the complete lock overlay and leaves
+artifacts under the usual `target/` directory. Python 3.11+ or Python 3 with the distribution's
+`python3-tomli` package is required. Direct `cargo` worker builds omit these reviewed overlays; see
+[build overlay and provenance](docs/airbender-build-overlay.md).
 
 FRI requires a CUDA GPU. Airbender selects a bounded arena from available VRAM; the
 current V32 service validation used a 32 GiB RTX 5090. Physical 24 GiB operation is not
@@ -83,6 +84,32 @@ bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --rel
 
 Specify optional `--iterations` argument to run FRI prover N times and then exit.
 Specify optional `--path` argument if you want to serialize FRI proof to file.
+
+Dedicated FRI and combined-service FRI startup default to `--fri-setup-policy bundled`
+(environment: `ZKSYNC_FRI_SETUP_POLICY`). The reviewed, embedded release artifact contains the compact
+base/unrolled/unified setup summaries, not full traces or secret setup material. Before GPU
+initialization it checks the artifact digest, exact app `.bin` and `.text` hashes, both embedded
+recursion programs, Security100/V32/circuit identities, cap geometry, derived end parameters,
+and the complete registered program commitment. GPU registration consumes those same validated
+byte snapshots without reopening the program paths. Unknown or changed inputs fail closed; there
+is no operator-supplied cache and no automatic recomputation fallback. Normal GPU registration,
+proof generation, and all program/queue checks remain in place. Explicit
+`--fri-setup-policy recompute` retains the original CPU derivation path.
+
+To independently derive and compare every bundled cap word and metadata field without GPU
+initialization, a CRS, or proof generation:
+
+```bash
+bash scripts/cargo-with-patched-airbender.sh fri-setup-verify -- \
+  cargo run --locked --release -p zksync_os_fri_prover --example bundled_fri_setup -- --verify
+```
+
+For release regeneration, replace `--verify` with `--output /absolute/new-fri-setups.json`.
+The output must not already exist. Review the complete artifact and its reported digest before
+updating the compiled release pin; generating a file alone never changes the runtime bundle.
+The offline FRI diagnostic accepts the same `--fri-setup-policy bundled|recompute` option and
+records the selection alongside its existing `setup_ms`/proof/verification timings.
+
 `--request-timeout-secs` controls the 600s total request backstop. Connect timeout is
 5s and read inactivity timeout is 10s. Large compressed sequencer responses are decoded
 automatically.
@@ -91,8 +118,14 @@ the sequencer conservatively filters complete base64/JSON size before leasing, a
 reuses the advertised scalar as its streaming read bound. This is a deployment capacity gate, not
 a canonical V8 input bound. Raising it requires raising the worker, sequencer clamp, and
 trusted-proxy spool together.
-Authority-free FRI peeks remain independently capped at 64 MiB, while queue/failed-proof
-diagnostics and SNARK aggregate responses retain their class-specific defensive bounds.
+SNARK workers advertise a 512 MiB complete decompressed aggregate-pick capacity, still limited
+to 100 FRI proofs. Updated sequencers default to 256 MiB when that advertisement is absent,
+so older workers retain their previous bound; the trusted-proxy spool must support 512 MiB.
+The larger budget accommodates 100 roughly 2.6 MB proofs after base64 expansion, but is not
+a universal worst-case guarantee: response size and the independent durable-journal limits
+may still split a larger aggregate before 100. HTTP compression does not reduce the enforced
+decompressed budget. Authority-free FRI and SNARK peeks remain capped at 64 MiB and 256 MiB,
+respectively, and queue/failed-proof diagnostics retain their class-specific defensive bounds.
 Specify `--sequencer-urls` to provide a comma-separated list. Status is probed concurrently
 with a bounded fan-out and a two-second hint deadline; the oldest unassigned head is tried
 first, and every client remains in the pick fallback if status is empty, slow, unavailable,
@@ -162,6 +195,94 @@ RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-cpu-
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.
 The same timeout, decompression, and multi-sequencer scheduling rules described for the FRI
 prover apply here.
+
+#### Bundled binary commitment (default)
+
+SNARK workers use the checked-in
+[`syscoin-v32-security100-commitment.json`](crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json)
+by default. Its two eight-word arrays are **64 bytes of public circuit constants**, not
+proof-specific randomness or secret setup material. The small JSON metadata file is
+embedded into the executable, so clones, native builds and Docker images need no separate
+commitment download. This avoids rebuilding the three CPU program setups solely to
+recover those constants on each cold start; it does not persist the large wrapper setups
+or eliminate their initialization.
+
+Startup validates the exact app `.bin`/`.text` and embedded Security100 recursion artifact
+sizes/hashes, the security/domain/version metadata, and the registered program commitment.
+It still derives the actual wrapper VK and requires the registered VK before claiming
+work. A mismatched app/artifact fails closed: there is no silent slow fallback, no disabled
+auxiliary-commitment check, and no change to fresh per-proof zero-knowledge randomness.
+
+Both the standalone SNARK worker and combined prover service accept
+`--binary-commitment-policy bundled|recompute` (environment:
+`ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY`). The default is **`bundled`**. `recompute` explicitly
+uses the original derivation path for development or release validation; it still requires
+the resulting app-bound VK to be registered. Warm host caches retain whichever commitment
+was authenticated at startup, and CPU-cold reconstruction preserves the chosen policy.
+
+To independently recompute and compare all 64 bytes without loading a CRS or producing a
+proof (this is intentionally slow, not a setup/startup step):
+
+```sh
+bash scripts/cargo-with-patched-airbender.sh verify-commitment -- \
+  cargo run --locked --release --no-default-features -p zksync_os_snark_prover \
+  --example verify_bundled_commitment
+```
+
+Changing application/verifier binaries or the circuit requires reviewing/regenerating the
+artifact and its pins together. Normal tests check metadata and reject altered inputs;
+the explicit command above checks the expensive derivation against the bundled value.
+
+#### SNARK CPU startup policy
+
+The default `--cpu-policy inherit` leaves CPU affinity and thread environment unchanged,
+with either bundled or recomputed commitments. Explicit CPU tuning is applied **before**
+tracing, Tokio and proving pools start. Native binaries, Docker and one-shot/warm rental
+SNARK workers share this startup path.
+
+Opt-in `--cpu-policy auto` applies the measured policy on Linux GPU workers when the allowed
+CPUs cover the whole online single-socket **24-physical-core / 48-logical-CPU** topology
+(two SMT threads per core), with no tighter detected CPU quota. Other topologies, restricted
+allocations, missing topology information, CPU-only builds and non-Linux hosts inherit their
+existing settings. `verify-fri`, FRI workers and direct library/combined-service callers are
+unchanged. This is a conservative topology match, not a guarantee of identical performance
+on every CPU with that layout.
+
+When tuning applies, the default is at most **31 allowed logical CPUs**, choosing one per
+physical core before SMT siblings. On the benchmark host this reproduces CPUs 0–30 and
+retains all 24 physical cores. Missing `RAYON_NUM_THREADS`, `BELLMAN_NUM_THREADS` and
+`OMP_NUM_THREADS` default to **16**, bounded by the selected CPU count and detected effective
+parallelism. Existing operator values are preserved verbatim for each library to interpret
+(including Rayon's `0` automatic mode). Airbender's explicitly sized
+startup pool follows affinity (31 here), **not** `RAYON_NUM_THREADS`; Bellman/OMP defaults
+reproduce the benchmark environment without claiming those variables caused the speedup.
+The effective mask and thread environment are logged. Affinity never expands an existing
+cpuset and does not create a cgroup CPU entitlement.
+
+| Option | Environment | Default |
+| --- | --- | --- |
+| `--cpu-policy auto\|bounded\|inherit` | `ZKSYNC_SNARK_CPU_POLICY` | `inherit` |
+| `--cpu-max-logical` | `ZKSYNC_SNARK_CPU_MAX_LOGICAL` | `31` |
+| `--cpu-default-threads` | `ZKSYNC_SNARK_CPU_DEFAULT_THREADS` | `16` |
+
+Use `--cpu-policy bounded` to explicitly opt a different Linux GPU host into this policy,
+with optional positive CPU/thread limits. Use `--cpu-policy inherit` to disable all startup
+affinity/environment changes. CLI values override these environment options; CPU/thread
+limits take effect only when tuning applies. An explicit `bounded` request fails if the
+platform/topology cannot be read or its selected affinity cannot be applied and verified.
+
+With the commitment recomputed at startup, an earlier offline fresh-process comparison of
+the same buffered-RNG binary and four frozen FRI inputs fell from 544.983 s to 452.844 s with
+these settings, with independent CPU proof verification. Startup fell from 400.354 s to
+310.060 s; summed timed proving remained approximately 132–134 s.
+
+With the bundled commitment, one fresh-process pair using the same cached-commitment binary
+measured 357.495 s with inherited settings versus 346.981 s with tuning: about 10.515 s (2.9%).
+This single pair does not establish a meaningful general tuning benefit, so automatic CPU
+restrictions are disabled by default. Explicit `auto` or `bounded` remains available,
+including with `--binary-commitment-policy recompute`. Neither comparison establishes an
+optimal core count or a warm-proving speedup. Security100, zero knowledge, log-25, verification
+keys and proof formats are unchanged.
 
 ### Separate FRI and default GPU SNARK deployment
 

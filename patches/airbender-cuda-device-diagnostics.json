@@ -1,18 +1,57 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "upstream_url": "https://github.com/matter-labs/zksync-airbender",
   "upstream_commit": "03454c7a41053a4b88bb421e97fb9efe893a92f5",
   "upstream_tree": "3af54eb50c31d8e78575434c3f0ab4386891c131",
   "upstream_lock_source": "git+https://github.com/matter-labs/zksync-airbender?tag=v0.6.0-rc.2#03454c7a41053a4b88bb421e97fb9efe893a92f5",
   "upstream_package_count": 46,
   "patch_file": "airbender-cuda-device-diagnostics.patch",
-  "patch_sha256": "768e9305dd5ebacff733a172f40fcabd5b333c212bc9582424526dcb16f257e2",
-  "changed_path": "gpu_prover/src/execution/gpu_worker.rs",
-  "preimage_sha256": "8791e121106596623eaeedde6c863da1fd8f9533dd13a69d01f49c59bdcff255",
-  "postimage_sha256": "3a809535fd15cf2b6a456881c0b9a4dddec606ae0d95ce17c928987dd76aca84",
-  "patched_tree": "46fb7849211ce3f2200bc1d0f8fc74a8bcb8704b",
-  "canonical_lock_sha256": "108f48582a1107251b3e4fdf9233e746c9fa62dfac071b0f0d233c6db4a0edf9",
+  "patch_sha256": "82c28104d44d396e2a5596bc54ccf496b98a5fd1aee01073748ae1aad20b8583",
+  "changed_files": {
+    "execution_utils/src/lib.rs": {
+      "preimage_sha256": "0bb7ad548956ec6b2e31b79b5a2952fd6cef51bc5580432c70475e71ce31150e",
+      "postimage_sha256": "ef863d1a3e09648348e5ff6daddab7469bcb42fa74bd63172459d3a6337f3049",
+      "postimage_size": 49001
+    },
+    "execution_utils/src/setup_summaries.rs": {
+      "preimage_sha256": null,
+      "postimage_sha256": "f88bc6142088e6255b1356e70d031d6557445560984debe2d329d70042ab2b02",
+      "postimage_size": 10432
+    },
+    "execution_utils/src/unrolled_gpu.rs": {
+      "preimage_sha256": "5eb60930c22bc4878bdbf4c72c79e4f49d285ecd787c47015a1261257cf53b6d",
+      "postimage_sha256": "13ae69259a2791b8e8a9343da975ba04eb6e0535b4c11143c929a768307a3110",
+      "postimage_size": 24813
+    },
+    "gpu_prover/src/execution/cpu_worker.rs": {
+      "preimage_sha256": "7123c26e5df2b1cb3f286fb605ec4b04e295084da85430d927eba3bda864afd7",
+      "postimage_sha256": "9d6a3b83f1148f1bf60394a6c98d713e84733a362cfab3e9b97c49d13165dbbd",
+      "postimage_size": 14119
+    },
+    "gpu_prover/src/execution/empty_inits_and_teardowns.rs": {
+      "preimage_sha256": null,
+      "postimage_sha256": "412f5d778cef22834c845aa72628e5822ce350fa47fa23816567e3fc88d9003c",
+      "postimage_size": 6644
+    },
+    "gpu_prover/src/execution/gpu_worker.rs": {
+      "preimage_sha256": "8791e121106596623eaeedde6c863da1fd8f9533dd13a69d01f49c59bdcff255",
+      "postimage_sha256": "3a809535fd15cf2b6a456881c0b9a4dddec606ae0d95ce17c928987dd76aca84",
+      "postimage_size": 15148
+    },
+    "gpu_prover/src/execution/simulation_runner.rs": {
+      "preimage_sha256": "0c0f917cd9e2672ff3e62d2cf49c3a1b4b49a72b83ce2a6d8e15c4539d19d3de",
+      "postimage_sha256": "1d792692fd0f585753b8865dfba68043ba66690066fad2ac6f23620e9105ebc0",
+      "postimage_size": 15554
+    },
+    "tools/cli/src/prover_utils.rs": {
+      "preimage_sha256": "7d8b0d96a840bcd7772142878149db161fef8df1c755b4d81ee8e4b1586c0608",
+      "postimage_sha256": "8aa93a6fb387d298076012989b1b73069c5883b5b2d1dd2e0014fe563a42e2d8",
+      "postimage_size": 83432
+    }
+  },
+  "patched_tree": "ce019f951b7cce9418c4e3fdea4d9fc16b7d943c",
+  "canonical_lock_sha256": "20001baf6cc46060d24513f3ea228cb50b50d35e829ed6639ce8de2080470dd6",
   "overlay_lock_file": "airbender.Cargo.lock",
-  "overlay_lock_sha256": "bf3ea7d6343028191f9d0e22094443c0bbbfc83cc7e200fc184555e181d42899",
-  "purpose": "Replace a runtime-versioned bulk CUDA device-properties startup log with the stable scalar SM-count API. No proving, verifier, registry, or guest changes."
+  "overlay_lock_sha256": "d56ba29043343032da487f98deb8440667c8bd7e8b61bcd498e85c2f7ca99d35",
+  "purpose": "Keep ABI-stable scalar CUDA startup diagnostics, authenticated compact FRI setup-summary injection, and backport PR 403's streaming empty unified init/teardown markers using the pinned per-word RAM bound of 33 trailing instances. Final marker identities, split mode, host allocator pool, GPU proving precomputations, circuits, verifiers, and guests remain unchanged; legacy CPU summary derivation remains available."
 }

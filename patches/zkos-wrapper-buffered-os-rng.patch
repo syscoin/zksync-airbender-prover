@@ -1,0 +1,383 @@
+diff --git a/wrapper/src/buffered_os_rng.rs b/wrapper/src/buffered_os_rng.rs
+new file mode 100644
+index 0000000..7c8919a
+--- /dev/null
++++ b/wrapper/src/buffered_os_rng.rs
+@@ -0,0 +1,191 @@
++use bellman::{
++    rand::{CryptoRng, RngCore, rngs::OsRng},
++    rand_crate::Error,
++};
++
++const OS_ENTROPY_BUFFER_BYTES: usize = 64 * 1024;
++
++/// Amortizes operating-system entropy calls while preserving the underlying byte
++/// sequence and distribution.
++///
++/// A refill is published only after `try_fill_bytes` succeeds. On failure `position`
++/// remains exhausted, so no partially overwritten or stale refill can be consumed and
++/// the next request retries a complete fresh refill.
++///
++/// This private RNG is constructed for one synchronous padding finalization and must
++/// not be retained or reused across a process fork.
++pub(crate) struct BufferedOsRng<R = OsRng> {
++    inner: R,
++    bytes: Box<[u8]>,
++    position: usize,
++}
++
++impl BufferedOsRng<OsRng> {
++    pub(crate) fn new() -> Self {
++        Self::from_rng(OsRng)
++    }
++}
++
++impl<R: RngCore> BufferedOsRng<R> {
++    fn from_rng(inner: R) -> Self {
++        Self {
++            inner,
++            bytes: vec![0; OS_ENTROPY_BUFFER_BYTES].into_boxed_slice(),
++            position: OS_ENTROPY_BUFFER_BYTES,
++        }
++    }
++
++    fn refill(&mut self) -> Result<(), Error> {
++        debug_assert_eq!(self.bytes.len(), OS_ENTROPY_BUFFER_BYTES);
++        debug_assert_eq!(self.position, OS_ENTROPY_BUFFER_BYTES);
++        self.inner.try_fill_bytes(&mut self.bytes)?;
++        self.position = 0;
++        Ok(())
++    }
++}
++
++impl<R: RngCore> RngCore for BufferedOsRng<R> {
++    fn next_u32(&mut self) -> u32 {
++        let mut bytes = [0; 4];
++        self.fill_bytes(&mut bytes);
++        u32::from_le_bytes(bytes)
++    }
++
++    fn next_u64(&mut self) -> u64 {
++        let mut bytes = [0; 8];
++        self.fill_bytes(&mut bytes);
++        u64::from_le_bytes(bytes)
++    }
++
++    fn fill_bytes(&mut self, destination: &mut [u8]) {
++        self.try_fill_bytes(destination)
++            .expect("operating-system entropy unavailable for zero-knowledge padding");
++    }
++
++    fn try_fill_bytes(&mut self, mut destination: &mut [u8]) -> Result<(), Error> {
++        while !destination.is_empty() {
++            if self.position == OS_ENTROPY_BUFFER_BYTES {
++                self.refill()?;
++            }
++            let count = destination
++                .len()
++                .min(OS_ENTROPY_BUFFER_BYTES - self.position);
++            destination[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
++            self.position += count;
++            destination = &mut destination[count..];
++        }
++        Ok(())
++    }
++}
++
++impl<R: RngCore + CryptoRng> CryptoRng for BufferedOsRng<R> {}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use bellman::{pairing::bn256::Fr, rand::Rand};
++    use std::num::NonZeroU32;
++
++    #[derive(Default)]
++    struct StreamRng {
++        position: usize,
++        calls: usize,
++        fail_next: bool,
++    }
++
++    impl RngCore for StreamRng {
++        fn next_u32(&mut self) -> u32 {
++            let mut bytes = [0; 4];
++            self.fill_bytes(&mut bytes);
++            u32::from_le_bytes(bytes)
++        }
++
++        fn next_u64(&mut self) -> u64 {
++            let mut bytes = [0; 8];
++            self.fill_bytes(&mut bytes);
++            u64::from_le_bytes(bytes)
++        }
++
++        fn fill_bytes(&mut self, destination: &mut [u8]) {
++            self.try_fill_bytes(destination).unwrap();
++        }
++
++        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), Error> {
++            self.calls += 1;
++            if self.fail_next {
++                self.fail_next = false;
++                destination.fill(0xff);
++                return Err(Error::from(NonZeroU32::new(Error::CUSTOM_START).unwrap()));
++            }
++            for byte in destination {
++                *byte = (self.position % 251) as u8;
++                self.position += 1;
++            }
++            Ok(())
++        }
++    }
++
++    impl CryptoRng for StreamRng {}
++
++    #[test]
++    fn mixed_stream_matches_across_refill_boundaries() {
++        let mut direct = StreamRng::default();
++        let mut buffered = BufferedOsRng::from_rng(StreamRng::default());
++        for count in [0, 1, OS_ENTROPY_BUFFER_BYTES - 20, 7, 19, 8, 3] {
++            assert_eq!(direct.next_u32(), buffered.next_u32());
++            assert_eq!(direct.next_u64(), buffered.next_u64());
++            let mut expected = vec![0; count];
++            let mut actual = vec![0; count];
++            direct.fill_bytes(&mut expected);
++            buffered.fill_bytes(&mut actual);
++            assert_eq!(actual, expected);
++        }
++    }
++
++    #[test]
++    fn field_element_stream_matches_across_many_refills() {
++        let mut direct = StreamRng::default();
++        let mut buffered = BufferedOsRng::from_rng(StreamRng::default());
++        for _ in 0..10_000 {
++            assert_eq!(Fr::rand(&mut direct), Fr::rand(&mut buffered));
++        }
++    }
++
++    #[test]
++    fn refills_are_full_sized_and_fresh() {
++        let mut buffered = BufferedOsRng::from_rng(StreamRng::default());
++        let mut first = vec![0; OS_ENTROPY_BUFFER_BYTES];
++        buffered.fill_bytes(&mut first);
++        assert_eq!(buffered.inner.calls, 1);
++        assert_eq!(buffered.inner.position, OS_ENTROPY_BUFFER_BYTES);
++        let mut next = [0; 1];
++        buffered.fill_bytes(&mut next);
++        assert_eq!(buffered.inner.calls, 2);
++        assert_eq!(buffered.inner.position, 2 * OS_ENTROPY_BUFFER_BYTES);
++        assert_eq!(next[0], (OS_ENTROPY_BUFFER_BYTES % 251) as u8);
++    }
++
++    #[test]
++    fn failed_refill_is_not_consumed_and_is_retried() {
++        let mut buffered = BufferedOsRng::from_rng(StreamRng {
++            fail_next: true,
++            ..StreamRng::default()
++        });
++        let mut output = [0x11; 8];
++        assert!(buffered.try_fill_bytes(&mut output).is_err());
++        assert_eq!(output, [0x11; 8]);
++        assert_eq!(buffered.position, OS_ENTROPY_BUFFER_BYTES);
++        assert_eq!(buffered.inner.calls, 1);
++
++        buffered.try_fill_bytes(&mut output).unwrap();
++        assert_eq!(output, [0, 1, 2, 3, 4, 5, 6, 7]);
++        assert_eq!(buffered.inner.calls, 2);
++    }
++
++    #[test]
++    fn crypto_rng_marker_is_preserved_conditionally() {
++        fn require_crypto_rng<T: CryptoRng>() {}
++        require_crypto_rng::<BufferedOsRng<StreamRng>>();
++        require_crypto_rng::<BufferedOsRng<OsRng>>();
++    }
++}
+diff --git a/wrapper/src/gpu/snark.rs b/wrapper/src/gpu/snark.rs
+index 1a47997..055acb7 100644
+--- a/wrapper/src/gpu/snark.rs
++++ b/wrapper/src/gpu/snark.rs
+@@ -1,5 +1,4 @@
+ use anyhow::Context as _;
+-use bellman::rand;
+ use proof_compression::{
+     PlonkSnarkWrapperLogN, ProofSystemDefinition, SnarkWrapperProofSystem,
+     hardcoded_canonical_g2_bases,
+@@ -22,7 +21,7 @@ use zksync_gpu_prover::{
+ 
+ use crate::{
+     CompressionProof, CompressionVK, L1_VERIFIER_DOMAIN_SIZE_LOG, SnarkWrapperCircuit,
+-    SnarkWrapperFunction, SnarkWrapperProof, SnarkWrapperVK,
++    SnarkWrapperFunction, SnarkWrapperProof, SnarkWrapperVK, buffered_os_rng::BufferedOsRng,
+ };
+ 
+ type PlonkSnarkWrapper = PlonkSnarkWrapperLogN<L1_VERIFIER_DOMAIN_SIZE_LOG>;
+@@ -204,7 +203,7 @@ pub(crate) fn gpu_snark_prove_with_manager(
+         tracing::info!("using zk (padding) proving");
+         const NUM_PADDING_TERMS: usize = 2 + 2 + 2; // worst case witness polys are opened at 2 points, plus there are
+         // indirect openings of grand product for permutation and for lookup
+-        let mut rng = rand::rngs::OsRng;
++        let mut rng = BufferedOsRng::new();
+         proving_assembly.finalize_to_size_log_2_with_randomization(
+             finalization_hint.trailing_zeros() as usize,
+             NUM_PADDING_TERMS,
+diff --git a/wrapper/src/lib.rs b/wrapper/src/lib.rs
+index 3fae70b..ffa7a33 100644
+--- a/wrapper/src/lib.rs
++++ b/wrapper/src/lib.rs
+@@ -9,6 +9,7 @@ compile_error!("features `security_80` and `security_100` are mutually exclusive
+ #[cfg(all(not(feature = "security_80"), not(feature = "security_100")))]
+ compile_error!("one of `security_80` or `security_100` must be enabled");
+ 
++mod buffered_os_rng;
+ pub mod circuits;
+ mod inner_verifiers;
+ pub mod interface;
+@@ -26,7 +27,6 @@ use boojum::cs::implementations::witness;
+ use boojum::field::U64Representable;
+ pub use unified_reduced_machine_verifier as risc_verifier;
+ 
+-use bellman::rand;
+ use boojum::algebraic_props::round_function::AbsorptionModeOverwrite;
+ use boojum::algebraic_props::sponge::GoldilocksPoseidon2Sponge;
+ use boojum::config::{ProvingCSConfig, SetupCSConfig};
+@@ -76,6 +76,16 @@ pub(crate) mod active_security {
+         crate::risc_verifier::verifier_common::SecurityModel::Security100;
+ }
+ 
++/// Security level selected by this wrapper's enabled feature, for authenticating
++/// precomputed binary commitments without deriving recursion-layer setups.
++pub const fn binary_commitment_security_bits() -> u32 {
++    use risc_verifier::verifier_common::SecurityModel;
++    match active_security::ACTIVE_SECURITY_MODEL {
++        SecurityModel::Security80 => 80,
++        SecurityModel::Security100 => 100,
++    }
++}
++
+ pub type GL = boojum::field::goldilocks::GoldilocksField;
+ pub type GLExt2 = boojum::field::goldilocks::GoldilocksExt2;
+ pub type RiscLeafInclusionVerifier = CircuitBlake2sForEverythingVerifier<GL>;
+@@ -447,7 +457,7 @@ pub fn prove_snark_wrapper(
+         tracing::info!("using zk (padding) proving");
+         const NUM_PADDING_TERMS: usize = 2 + 2 + 2; // worst case witness polys are opened at 2 points, plus there are
+         // indirect openings of grand product for permutation and for lookup
+-        let mut rng = rand::rngs::OsRng;
++        let mut rng = buffered_os_rng::BufferedOsRng::new();
+         assembly.finalize_to_size_log_2_with_randomization(
+             L1_VERIFIER_DOMAIN_SIZE_LOG,
+             NUM_PADDING_TERMS,
+diff --git a/wrapper/src/wrapper/mod.rs b/wrapper/src/wrapper/mod.rs
+index aaac22f..c16a774 100644
+--- a/wrapper/src/wrapper/mod.rs
++++ b/wrapper/src/wrapper/mod.rs
+@@ -92,6 +92,27 @@ impl SnarkWrapper {
+         })
+     }
+ 
++    /// Build a wrapper using a precomputed commitment for the configured program.
++    ///
++    /// The caller must authenticate the commitment against the exact base and recursion
++    /// binaries and active security configuration before calling this constructor. This
++    /// does not validate those inputs by recomputing their commitment. All ordinary
++    /// constructor validation, setup derivation, and proof verification remain enabled.
++    pub fn new_with_binary_commitment(
++        config: SnarkWrapperConfig,
++        binary_commitment: BinaryCommitment,
++    ) -> anyhow::Result<Self> {
++        let mut wrapper = Self::new(config)?;
++        wrapper.binary_commitment = Some(binary_commitment);
++        Ok(wrapper)
++    }
++
++    /// Return this session's binary commitment, deriving and caching it on first use
++    /// after [`Self::new`], or reusing the value from [`Self::new_with_binary_commitment`].
++    pub fn resolved_binary_commitment(&mut self) -> anyhow::Result<BinaryCommitment> {
++        self.binary_commitment()
++    }
++
+     /// Build a wrapper that adopts the setup caches (and configuration) of a previous
+     /// session. See [`SnarkWrapperHostCache`].
+     pub fn from_host_cache(cache: SnarkWrapperHostCache) -> anyhow::Result<Self> {
+@@ -425,6 +446,79 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn precomputed_commitment_security_matches_enabled_feature() {
++        #[cfg(feature = "security_80")]
++        assert_eq!(crate::binary_commitment_security_bits(), 80);
++        #[cfg(feature = "security_100")]
++        assert_eq!(crate::binary_commitment_security_bits(), 100);
++    }
++
++    #[test]
++    fn precomputed_commitment_preserves_values_config_and_host_cache() {
++        let commitment = BinaryCommitment {
++            end_params: [17; 8],
++            aux_params: [29; 8],
++        };
++        // These files do not exist: resolving the supplied commitment must not read
++        // them or compute any recursion-layer setups.
++        let config = SnarkWrapperConfig {
++            bin: Some(PathBuf::from("missing-precomputed-test.bin")),
++            text: Some(PathBuf::from("missing-precomputed-test.text")),
++            threads: Some(1),
++            check_aux_params: true,
++            ..SnarkWrapperConfig::default()
++        };
++        let mut wrapper = SnarkWrapper::new_with_binary_commitment(config, commitment)
++            .expect("precomputed wrapper is created");
++        let resolved = wrapper.resolved_binary_commitment().unwrap();
++        assert_eq!(resolved.end_params, commitment.end_params);
++        assert_eq!(resolved.aux_params, commitment.aux_params);
++        assert!(wrapper.config.check_aux_params);
++        assert_eq!(wrapper.config.threads, Some(1));
++        let mut restored = SnarkWrapper::from_host_cache(wrapper.into_host_cache()).unwrap();
++        let resolved = restored.resolved_binary_commitment().unwrap();
++        assert_eq!(resolved.end_params, commitment.end_params);
++        assert_eq!(resolved.aux_params, commitment.aux_params);
++        assert!(restored.config.check_aux_params);
++    }
++
++    #[test]
++    fn precomputed_commitment_preserves_constructor_validation() {
++        let commitment = BinaryCommitment {
++            end_params: [17; 8],
++            aux_params: [29; 8],
++        };
++        let mismatched_paths = SnarkWrapperConfig {
++            bin: Some(PathBuf::from("only-one-path.bin")),
++            ..SnarkWrapperConfig::default()
++        };
++        let error = SnarkWrapper::new_with_binary_commitment(mismatched_paths, commitment)
++            .err()
++            .expect("one binary path must remain invalid");
++        assert!(error.to_string().contains("Both --bin and --text"));
++
++        let directory = tempfile::tempdir().unwrap();
++        let invalid_setup = SnarkWrapperConfig {
++            trusted_setup: Some(directory.path().to_path_buf()),
++            ..SnarkWrapperConfig::default()
++        };
++        let error = SnarkWrapper::new_with_binary_commitment(invalid_setup, commitment)
++            .err()
++            .expect("a directory must remain invalid as a trusted setup");
++        assert!(error.to_string().contains("Trusted setup path must point to a file"));
++    }
++
++    #[test]
++    fn precomputed_commitment_does_not_change_legacy_lazy_constructor() {
++        let config = SnarkWrapperConfig {
++            threads: Some(1),
++            ..config_with_base_program()
++        };
++        let wrapper = SnarkWrapper::new(config).unwrap();
++        assert!(wrapper.binary_commitment.is_none());
++    }
++
+     #[test]
+     fn host_cache_roundtrip_preserves_binary_commitment() {
+         let mut wrapper =

@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -8,12 +9,15 @@ use protocol_version::SupportedProtocolVersions;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use zksync_os_snark_prover::{
-    init_tracing, metrics, run_linking_fri_snark_with_cache_policy, WrapperCachePolicy,
+    init_tracing, metrics, run_linking_fri_snark_with_policies, BinaryCommitmentPolicy,
+    WrapperCachePolicy,
 };
 use zksync_sequencer_proof_client::{
     parse_configured_sequencer_endpoints, resume_pending_submissions, wait_for_operator_shutdown,
     OpaqueSequencerEndpoint, SequencerProofClient,
 };
+
+mod cpu_startup;
 
 #[derive(Default, Debug, Serialize, Deserialize, Parser, Clone)]
 pub struct SetupOptions {
@@ -43,6 +47,18 @@ enum Commands {
         output: PathBuf,
     },
     RunProver {
+        /// CPU startup policy: inherit (default) leaves affinity and thread settings unchanged.
+        /// Explicit auto tunes only the measured unrestricted Linux GPU 24-core/48-thread
+        /// topology; bounded explicitly opts other Linux GPU hosts into tuning.
+        #[arg(long, env = "ZKSYNC_SNARK_CPU_POLICY", default_value = "inherit", value_parser = ["auto", "bounded", "inherit"])]
+        cpu_policy: String,
+        /// Maximum allowed logical CPUs when tuning; physical cores are selected before SMT.
+        #[arg(long, env = "ZKSYNC_SNARK_CPU_MAX_LOGICAL", default_value = "31")]
+        cpu_max_logical: NonZeroUsize,
+        /// Default Rayon/Bellman/OMP thread environment, unless explicitly set by the operator.
+        /// This does not override explicitly sized Airbender pools.
+        #[arg(long, env = "ZKSYNC_SNARK_CPU_DEFAULT_THREADS", default_value = "16")]
+        cpu_default_threads: NonZeroUsize,
         /// SYSCOIN: Sequencer URL(s) for oldest-unassigned-head scheduling. Comma-separated.
         ///
         /// Format: http[s]://[username:password@]host:port. Do not put credentials on argv; set
@@ -71,6 +87,9 @@ enum Commands {
         /// cpu-cold is rejected by GPU builds and repeats setup to reduce live host memory.
         #[arg(long, value_enum, default_value_t = WrapperCachePolicy::Warm)]
         wrapper_cache_policy: WrapperCachePolicy,
+        /// Load the checked-in commitment by default; recompute is for artifact validation/upgrades.
+        #[arg(long, env = "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY", value_enum, default_value_t = BinaryCommitmentPolicy::Bundled)]
+        binary_commitment_policy: BinaryCommitmentPolicy,
         /// Number of iterations before exiting. Only successfully generated proofs count. If not specified, runs indefinitely
         #[arg(long)]
         iterations: Option<usize>,
@@ -154,8 +173,35 @@ async fn stop_metrics(
 }
 
 fn main() -> anyhow::Result<()> {
-    init_tracing();
     let cli = Cli::parse();
+    // SYSCOIN: Apply process affinity/environment before tracing, Tokio, Rayon or
+    // any proving thread can be created. Docker, native releases and rentals all
+    // enter here. Verification and the shared library do not acquire this policy.
+    let cpu_startup = if let Commands::RunProver {
+        cpu_policy,
+        cpu_max_logical,
+        cpu_default_threads,
+        ..
+    } = &cli.command
+    {
+        let config = cpu_startup::Config {
+            policy: cpu_policy.parse().map_err(anyhow::Error::msg)?,
+            max_logical: cpu_max_logical.get(),
+            default_threads: cpu_default_threads.get(),
+        };
+        // SAFETY: This executable has not spawned any threads or initialized
+        // tracing/runtime/proving libraries. Cli::parse is synchronous.
+        Some(
+            unsafe { cpu_startup::apply(config, cfg!(feature = "gpu")) }
+                .context("failed to apply SNARK CPU startup policy")?,
+        )
+    } else {
+        None
+    };
+    init_tracing();
+    if let Some(policy) = cpu_startup {
+        tracing::info!("SNARK CPU startup: {policy}");
+    }
 
     // Verification must remain available without initializing proving, GPU, or CRS state.
     if let Commands::VerifyFri {
@@ -193,6 +239,9 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::VerifyFri { .. } => unreachable!("verification returned before prover startup"),
         Commands::RunProver {
+            cpu_policy: _,
+            cpu_max_logical: _,
+            cpu_default_threads: _,
             sequencer_urls,
             setup:
                 SetupOptions {
@@ -201,6 +250,7 @@ fn main() -> anyhow::Result<()> {
                 },
             app_bin_path,
             wrapper_cache_policy,
+            binary_commitment_policy,
             iterations,
             prometheus_port,
             prometheus_bind_address,
@@ -294,7 +344,7 @@ fn main() -> anyhow::Result<()> {
                 // rather than polling it on the OS-sized main thread via `block_on`.
                 let runtime_handle = tokio::runtime::Handle::current();
                 let mut prover_task = tokio::task::spawn_blocking(move || {
-                    runtime_handle.block_on(run_linking_fri_snark_with_cache_policy(
+                    runtime_handle.block_on(run_linking_fri_snark_with_policies(
                         clients,
                         output_dir,
                         trusted_setup_file,
@@ -303,6 +353,7 @@ fn main() -> anyhow::Result<()> {
                         disable_zk,
                         stop_receiver,
                         wrapper_cache_policy,
+                        binary_commitment_policy,
                     ))
                 });
 
@@ -342,6 +393,134 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory as _;
+
+    #[test]
+    fn bundled_commitment_is_default_with_explicit_recompute_option() {
+        let command = || {
+            Cli::command().mut_subcommand("run-prover", |cmd| {
+                cmd.mut_arg("binary_commitment_policy", |arg| arg.env(None::<&str>))
+            })
+        };
+        let base = [
+            "snark-prover",
+            "run-prover",
+            "--output-dir",
+            "out",
+            "--trusted-setup-file",
+            "setup.key",
+            "--submission-dir",
+            "/tmp/snark-commitment-test-spool",
+        ];
+        let matches = command().try_get_matches_from(base).unwrap();
+        assert_eq!(
+            matches
+                .subcommand_matches("run-prover")
+                .unwrap()
+                .get_one::<BinaryCommitmentPolicy>("binary_commitment_policy"),
+            Some(&BinaryCommitmentPolicy::Bundled)
+        );
+        for (value, expected) in [
+            ("bundled", BinaryCommitmentPolicy::Bundled),
+            ("recompute", BinaryCommitmentPolicy::Recompute),
+        ] {
+            let matches = command()
+                .try_get_matches_from(
+                    base.into_iter()
+                        .chain(["--binary-commitment-policy", value]),
+                )
+                .unwrap();
+            assert_eq!(
+                matches
+                    .subcommand_matches("run-prover")
+                    .unwrap()
+                    .get_one::<BinaryCommitmentPolicy>("binary_commitment_policy"),
+                Some(&expected)
+            );
+        }
+        assert!(command()
+            .try_get_matches_from(
+                base.into_iter()
+                    .chain(["--binary-commitment-policy", "unknown"])
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn cpu_startup_policy_defaults_and_limits_are_explicit() {
+        // Clear only these Clap argument environment sources, not process-global
+        // environment, so parallel tests also work in an operator's configured shell.
+        let command = || {
+            Cli::command().mut_subcommand("run-prover", |cmd| {
+                cmd.mut_arg("cpu_policy", |arg| arg.env(None::<&str>))
+                    .mut_arg("cpu_max_logical", |arg| arg.env(None::<&str>))
+                    .mut_arg("cpu_default_threads", |arg| arg.env(None::<&str>))
+                    .mut_arg("binary_commitment_policy", |arg| arg.env(None::<&str>))
+            })
+        };
+        let base = [
+            "snark-prover",
+            "run-prover",
+            "--output-dir",
+            "out",
+            "--trusted-setup-file",
+            "setup.key",
+            "--submission-dir",
+            "/tmp/snark-test-spool",
+        ];
+        let matches = command().try_get_matches_from(base).unwrap();
+        let args = matches.subcommand_matches("run-prover").unwrap();
+        assert_eq!(args.get_one::<String>("cpu_policy").unwrap(), "inherit");
+        assert_eq!(
+            args.get_one::<BinaryCommitmentPolicy>("binary_commitment_policy")
+                .unwrap(),
+            &BinaryCommitmentPolicy::Bundled
+        );
+        for (policy, expected) in [
+            ("bundled", BinaryCommitmentPolicy::Bundled),
+            ("recompute", BinaryCommitmentPolicy::Recompute),
+        ] {
+            let matches = command()
+                .try_get_matches_from(
+                    base.into_iter()
+                        .chain(["--binary-commitment-policy", policy]),
+                )
+                .unwrap();
+            let args = matches.subcommand_matches("run-prover").unwrap();
+            assert_eq!(args.get_one::<String>("cpu_policy").unwrap(), "inherit");
+            assert_eq!(
+                args.get_one::<BinaryCommitmentPolicy>("binary_commitment_policy")
+                    .unwrap(),
+                &expected
+            );
+        }
+        assert_eq!(
+            args.get_one::<NonZeroUsize>("cpu_max_logical")
+                .unwrap()
+                .get(),
+            31
+        );
+        assert_eq!(
+            args.get_one::<NonZeroUsize>("cpu_default_threads")
+                .unwrap()
+                .get(),
+            16
+        );
+        for flag in ["--cpu-max-logical", "--cpu-default-threads"] {
+            for bad in ["0", "-1", "not-a-number"] {
+                assert!(command()
+                    .try_get_matches_from(base.into_iter().chain([flag, bad]))
+                    .is_err());
+            }
+        }
+        assert!(command()
+            .try_get_matches_from(base.into_iter().chain(["--cpu-policy", "unknown"]))
+            .is_err());
+        for policy in ["auto", "bounded", "inherit"] {
+            assert!(command()
+                .try_get_matches_from(base.into_iter().chain(["--cpu-policy", policy]))
+                .is_ok());
+        }
+    }
 
     #[test]
     fn wrapper_cache_policy_is_typed_opt_in() {

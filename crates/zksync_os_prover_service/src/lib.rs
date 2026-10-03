@@ -12,6 +12,8 @@ use clap::Parser;
 use protocol_version::SupportedProtocolVersions;
 use tokio::sync::watch;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
+use zksync_os_fri_prover::FriSetupPolicy;
+use zksync_os_snark_prover::{BinaryCommitmentPolicy, WrapperCachePolicy};
 use zksync_sequencer_proof_client::{
     claim_first_snark_job, hinted_client_indices, ordered_client_indices,
     parse_configured_sequencer_endpoints, resume_pending_submissions, JobQueueStage,
@@ -228,7 +230,34 @@ pub fn init_tracing() {
 
 // SYSCOIN: The combined worker retains every acquired lease through durable handoff or definitive
 // manager disposition and observes one cooperative stop signal between phases.
-pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
+pub async fn run(args: Args, stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
+    run_with_binary_commitment_policy(args, stop_receiver, BinaryCommitmentPolicy::default()).await
+}
+
+/// Run the combined worker with an explicit fixed-commitment policy. Existing callers of
+/// [`run`] use the checked-in commitment by default; recomputation is an operator opt-in.
+pub async fn run_with_binary_commitment_policy(
+    args: Args,
+    stop_receiver: watch::Receiver<bool>,
+    binary_commitment_policy: BinaryCommitmentPolicy,
+) -> anyhow::Result<()> {
+    run_with_setup_policies(
+        args,
+        stop_receiver,
+        binary_commitment_policy,
+        FriSetupPolicy::default(),
+    )
+    .await
+}
+
+/// Select FRI summaries independently from the SNARK fixed-commitment policy.
+/// Both compatibility entry points retain authenticated bundled FRI setup by default.
+pub async fn run_with_setup_policies(
+    mut args: Args,
+    mut stop_receiver: watch::Receiver<bool>,
+    binary_commitment_policy: BinaryCommitmentPolicy,
+    fri_setup_policy: FriSetupPolicy,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.snark_probe_interval_secs > 0,
         "SNARK probe interval must be positive"
@@ -284,10 +313,12 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
     // SYSCOIN: Use the dedicated worker's authenticated pre-lease initialization, then retain
     // only its host cache. Missing/corrupt setup and an app-bound VK mismatch must fail before the
     // combined service can acquire either FRI or SNARK work.
-    let mut wrapper_source = zksync_os_snark_prover::WrapperSource::new_validated(
+    let mut wrapper_source = zksync_os_snark_prover::WrapperSource::new_validated_with_policies(
         args.trusted_setup_file.clone(),
         binary_path.clone(),
         &supported_versions,
+        WrapperCachePolicy::Warm,
+        binary_commitment_policy,
     )
     .context("initialize combined-service app-bound SNARK wrapper before queue polling")?;
 
@@ -385,7 +416,10 @@ pub async fn run(mut args: Args, mut stop_receiver: watch::Receiver<bool>) -> an
             return Ok(());
         }
         if fri_prover.is_none() {
-            let prover = zksync_os_fri_prover::create_prover(&binary_path)?;
+            let prover = zksync_os_fri_prover::create_prover_with_setup_policy(
+                &binary_path,
+                fri_setup_policy,
+            )?;
             let program_commitment = zksync_os_fri_prover::program_commitment(&prover).context(
                 "program commitment unavailable (CPU backend); cannot verify the app binary",
             )?;
@@ -445,6 +479,52 @@ mod tests {
 
     use super::*;
     use clap::CommandFactory as _;
+
+    #[tokio::test]
+    async fn commitment_policy_entrypoints_keep_shared_validation_before_network_or_setup() {
+        let invalid_args = || {
+            Args::try_parse_from([
+                "prover-service",
+                "--output-dir",
+                "out",
+                "--trusted-setup-file",
+                "missing-setup.key",
+                "--submission-dir",
+                "/tmp/combined-prover-commitment-test-submissions",
+                "--snark-probe-interval-secs",
+                "0",
+                "--sequencer-urls",
+                "http://127.0.0.1:1",
+            ])
+            .expect("invalid interval must parse before shared semantic validation")
+        };
+        let (_stop_sender, stop_receiver) = watch::channel(false);
+        let error = run(invalid_args(), stop_receiver.clone())
+            .await
+            .expect_err("legacy entrypoint must retain early validation");
+        assert_eq!(error.to_string(), "SNARK probe interval must be positive");
+        for policy in [
+            BinaryCommitmentPolicy::Bundled,
+            BinaryCommitmentPolicy::Recompute,
+        ] {
+            let error =
+                run_with_binary_commitment_policy(invalid_args(), stop_receiver.clone(), policy)
+                    .await
+                    .expect_err("explicit policy must use the same validation before any setup");
+            assert_eq!(error.to_string(), "SNARK probe interval must be positive");
+            for fri_policy in [FriSetupPolicy::Bundled, FriSetupPolicy::Recompute] {
+                let error = run_with_setup_policies(
+                    invalid_args(),
+                    stop_receiver.clone(),
+                    policy,
+                    fri_policy,
+                )
+                .await
+                .expect_err("both policies retain validation before setup");
+                assert_eq!(error.to_string(), "SNARK probe interval must be positive");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn snark_acquire_times_out_instead_of_looping_forever() {

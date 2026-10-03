@@ -27,6 +27,7 @@ clap.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["full"] }
@@ -38,6 +39,5 @@ url.workspace = true
 gpu = ["zksync_airbender_cli/gpu"]
 
 [dev-dependencies]
-sha2.workspace = true
 # SYSCOIN: Validate the app commitment carried through unified recursion.
 zkos_wrapper.workspace = true

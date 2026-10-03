@@ -143,18 +143,26 @@ def command(release, endpoint, directory):
     return args
 
 
-def native_environment():
+def native_environment(snark=False):
     # The child receives runtime settings only, even if an operator accidentally started the
     # adapter in an environment containing provider or wallet credentials.
     env = {name: os.environ[name] for name in (
         "PATH", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES") if name in os.environ}
+    if snark:
+        env.update({name: os.environ[name] for name in (
+            "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY",
+            "ZKSYNC_SNARK_CPU_POLICY", "ZKSYNC_SNARK_CPU_MAX_LOGICAL",
+            "ZKSYNC_SNARK_CPU_DEFAULT_THREADS", "RAYON_NUM_THREADS",
+            "BELLMAN_NUM_THREADS", "OMP_NUM_THREADS") if name in os.environ})
+    elif "ZKSYNC_FRI_SETUP_POLICY" in os.environ:
+        env["ZKSYNC_FRI_SETUP_POLICY"] = os.environ["ZKSYNC_FRI_SETUP_POLICY"]
     env["RUST_MIN_STACK"] = "268435456"
     return env
 
 
 def run_native(args, directory, timeout):
-    env = native_environment()
+    env = native_environment(bool(args and args[0] == job.BINARIES["SNARK"]))
     process = subprocess.Popen(args, cwd=directory, env=env, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, start_new_session=True)
     try:

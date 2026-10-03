@@ -2,8 +2,11 @@
 
 GPU SNARK wrapping and the combined service default to the GPU build. CPU wrapping
 is explicit (`--no-default-features`, or Docker's `cpu` target); a GPU error does
-not silently select a different prover. FRI-only builds retain their existing
-Airbender overlay and do not acquire this second overlay or the compact SNARK CRS.
+not silently select a different prover. Every lane uses the common exact Airbender
+and `zkos-wrapper` source preparation described in
+[Pinned proving-source overlays](airbender-build-overlay.md). The isolated FRI
+binary does not link `zkos-wrapper`, and does not acquire this GPU-memory overlay
+or the compact SNARK CRS.
 
 The GPU path composes two independently pinned dependency sources:
 
@@ -15,7 +18,7 @@ postimage, size and patched Git tree. Existing source checkouts and shared Cargo
 caches are never edited. The security-100 configuration, log2-domain 25, all
 29 polynomial slots, proof format, guest program and verification key are unchanged.
 
-The legacy Airbender-only lane inspects the selected application's package,
+The common source-overlay lane inspects the selected application's package,
 default and forwarded features before creating a build snapshot. Default or
 explicit SNARK/combined GPU activation requires `--gpu32`; it cannot accidentally
 compile an unpatched GPU wrapper. Scoped FRI GPU commands remain supported.
@@ -67,20 +70,23 @@ requires the attested production `build/src/libbellman-cuda.a`, `BUILD_TESTS=OFF
 and matching CMake source/architectures; it will not silently rebuild an unpatched
 native backend. Test libraries are intentionally separate: the earlier upstream
 test-library build was not a linkable production artifact for the Rust worker.
-Optional `BELLMAN_SOURCE_DIR`, `CRYPTO_GPU_SOURCE_DIR` and `AIRBENDER_SOURCE_DIR`
-provide local Git clone origins; they are cloned without hardlinks and never modified.
+Optional `BELLMAN_SOURCE_DIR`, `CRYPTO_GPU_SOURCE_DIR`, `AIRBENDER_SOURCE_DIR` and
+`ZKOS_WRAPPER_SOURCE_DIR` provide local Git clone origins; they are cloned without
+hardlinks and never modified.
 
 `PROVER_SOURCE_DIR` can select another compatible application checkout. The helper
-first uses the existing selected-lock-aware Airbender derivation, then removes only
-eight pinned crypto Git source identities, normalizes six exact dependency edges,
-and orders two path/registry package pairs as Cargo expects. All other selected
-versions, checksums and edges are preserved. The historical experiment's combined
-lock is **not** imposed on another application's graph. Incompatible sources fail
-closed and require a new reviewed overlay.
+first uses the common selected-lock derivation, removing only 46 Airbender and two
+`zkos-wrapper` Git source identities, then removes eight pinned crypto Git source
+identities, normalizes six exact dependency edges, and orders two path/registry
+package pairs as Cargo expects. All other selected versions, checksums and edges are
+preserved. The historical experiment's combined lock is **not** imposed on another
+application's graph. Incompatible sources fail closed and require a new reviewed overlay.
 
-The success-only attestation retains the original `pins` / `selected_lock`
-Airbender fields. `gpu_backend_overlay.inputs` separately identifies the GPU pin
-manifest and selected **combined** lock digest. Its sibling fields contain complete
+The success-only attestation retains the common `pins`, `selected_lock` and
+`zkos_wrapper` fields. The outer `selected_lock` identifies 46 Airbender and two wrapper
+packages. `gpu_backend_overlay.inputs.selected_lock` adds the eight crypto packages and
+identifies the selected **combined** lock digest; `gpu_backend_overlay.inputs` also binds
+the GPU pin manifest. Its sibling fields contain complete
 actual crypto/native source inventories, production-library digest and CMake
 configuration digest. `gpu_backend_pins(manifest, source_lock)` is the same pure
 metadata API used by image/SBOM provenance; it does not run Git, Cargo or CUDA.

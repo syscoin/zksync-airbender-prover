@@ -48,3 +48,7 @@ url.workspace = true
 # CPU-only builds remain explicit via --no-default-features (and cpu-cold when run).
 default = ["gpu"]
 gpu = ["zkos_wrapper/gpu", "zksync_airbender_cli/gpu"]
+
+[dev-dependencies]
+async-trait.workspace = true
+crypto_codegen.workspace = true

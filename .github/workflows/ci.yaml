@@ -38,6 +38,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Check SNARK CPU startup policy without CUDA
+        run: |
+          cargo fmt --manifest-path .github/tests/snark-cpu-startup/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path .github/tests/snark-cpu-startup/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path .github/tests/snark-cpu-startup/Cargo.toml
+
       - name: Check isolated prover build recipes
         run: python3 -B .github/scripts/test_prover_role_recipes.py
 
@@ -62,7 +68,44 @@ jobs:
         run: bash scripts/cargo-with-patched-airbender.sh ci-build -- cargo build --locked --release --no-default-features
 
       - name: Run tests
-        run: bash scripts/cargo-with-patched-airbender.sh ci-test -- cargo test --locked --no-default-features
+        run: |
+          AIRBENDER_BUILD_ATTESTATION="${RUNNER_TEMP}/ci-test-airbender-inputs.json" \
+            bash scripts/cargo-with-patched-airbender.sh ci-test -- cargo test --locked --no-default-features
+
+      # Dependency unit tests are not run by the application workspace test command.
+      # Reuse its verified, pinned source snapshot and target directory. The
+      # dependency's own workspace is required to resolve its dev-dependencies;
+      # the production build wrapper's package-selection policy stays unchanged.
+      - name: Run pinned wrapper RNG and commitment tests
+        env:
+          RUST_MIN_STACK: "33554432"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          record="${RUNNER_TEMP}/ci-test-airbender-inputs.json"
+          workspace="$(jq -er '.workspace' "${record}")"
+          wrapper="$(dirname -- "${workspace}")/zkos-wrapper"
+          target="$(jq -er '.cargo_target_dir' "${record}")"
+          verify_wrapper() {
+            python3 -B - "${wrapper}" <<'PY'
+          import importlib.util
+          import sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("patched_airbender", "scripts/prepare-patched-airbender.py")
+          helper = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(helper)
+          helper.verify_wrapper(Path(sys.argv[1]), helper.load_wrapper_pins())
+          PY
+          }
+          verify_wrapper
+          test_status=0
+          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${wrapper}/Cargo.toml" \
+            --locked -p zkos-wrapper --lib buffered_os_rng::tests || test_status=$?
+          if [[ "${test_status}" -eq 0 ]]; then
+            CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${wrapper}/Cargo.toml" \
+              --locked -p zkos-wrapper --lib wrapper::tests::precomputed_commitment || test_status=$?
+          fi
+          verify_wrapper
+          exit "${test_status}"
 
 
   ###############################

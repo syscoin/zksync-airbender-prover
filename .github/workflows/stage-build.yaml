@@ -346,8 +346,11 @@ jobs:
                   {uri: ($tooling_uri + "/patches/airbender-cuda-device-diagnostics.json"), digest: {sha256: $airbender.manifest_sha256}},
                   {uri: ($tooling_uri + "/patches/" + $airbender.pins.patch_file), digest: {sha256: $airbender.pins.patch_sha256}},
                   {uri: ($tooling_uri + "/patches/" + $airbender.pins.overlay_lock_file), digest: {sha256: $airbender.pins.overlay_lock_sha256}},
+                  {uri: ("git+" + $airbender.zkos_wrapper.pins.upstream_url), digest: {gitCommit: $airbender.zkos_wrapper.pins.upstream_commit}},
+                  {uri: ($tooling_uri + "/patches/zkos-wrapper-buffered-os-rng.json"), digest: {sha256: $airbender.zkos_wrapper.manifest_sha256}},
+                  {uri: ($tooling_uri + "/patches/" + $airbender.zkos_wrapper.pins.patch_file), digest: {sha256: $airbender.zkos_wrapper.pins.patch_sha256}},
                   {uri: ($source_uri + "/Cargo.lock"), digest: {sha256: $airbender.selected_lock.canonical_lock_sha256}},
-                  {uri: "syscoin:generated-lock:airbender-source-identity-only-v1", digest: {sha256: $airbender.selected_lock.overlay_lock_sha256}}
+                  {uri: "syscoin:generated-lock:airbender-wrapper-source-identity-only-v2", digest: {sha256: $airbender.selected_lock.overlay_lock_sha256}}
                 ]
               | if $gpu_backend != null then
                   .buildDefinition.resolvedDependencies += [
@@ -356,7 +359,7 @@ jobs:
                     {uri: ($tooling_uri + "/patches/" + $gpu_backend.pins.bellman.patch_file), digest: {sha256: $gpu_backend.pins.bellman.patch_sha256}},
                     {uri: ("git+" + $gpu_backend.pins.crypto.upstream_url), digest: {gitCommit: $gpu_backend.pins.crypto.upstream_commit}},
                     {uri: ("git+" + $gpu_backend.pins.bellman.upstream_url), digest: {gitCommit: $gpu_backend.pins.bellman.upstream_commit}},
-                    {uri: "syscoin:generated-lock:airbender-and-crypto-gpu-source-identity-only-v1", digest: {sha256: $gpu_backend.selected_lock.combined_overlay_lock_sha256}}
+                    {uri: "syscoin:generated-lock:airbender-wrapper-and-crypto-gpu-source-identity-only-v2", digest: {sha256: $gpu_backend.selected_lock.combined_overlay_lock_sha256}}
                   ]
                 else . end
               | if $component == "zksync-airbender-prover" or $component == "zksync-os-prover-snark" then
