@@ -786,6 +786,7 @@ class AdapterValidationTests(unittest.TestCase):
 
     def test_native_environment_strips_secrets_and_scopes_snark_settings(self):
         runtime = {
+            "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY": "recompute",
             "ZKSYNC_SNARK_CPU_POLICY": "bounded",
             "ZKSYNC_SNARK_CPU_MAX_LOGICAL": "31",
             "ZKSYNC_SNARK_CPU_DEFAULT_THREADS": "16",

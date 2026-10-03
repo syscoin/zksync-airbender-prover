@@ -27,9 +27,11 @@ use zksync_sequencer_proof_client::{
 
 use crate::metrics::{SnarkProofTimeStats, SnarkStage, SNARK_PROVER_METRICS};
 
+pub mod binary_commitment;
 mod cache_policy;
 pub mod fri_verify;
 pub mod metrics;
+pub use binary_commitment::BinaryCommitmentPolicy;
 use cache_policy::BoundWrapperInputs;
 pub use cache_policy::WrapperCachePolicy;
 
@@ -64,6 +66,9 @@ pub struct WrapperSource {
     /// The cache holds no GPU memory (see [`SnarkWrapperHostCache`]).
     host_cache: Option<Box<SnarkWrapperHostCache>>,
     cache_policy: WrapperCachePolicy,
+    commitment_policy: BinaryCommitmentPolicy,
+    /// Fixed verifier data resolved before any lease; never derive it again for a proof.
+    unified_end_params: [u32; 8],
     bound_inputs: Option<BoundWrapperInputs>,
     validated_vk_hash: String,
 }
@@ -94,6 +99,23 @@ impl WrapperSource {
         supported_versions: &SupportedProtocolVersions,
         cache_policy: WrapperCachePolicy,
     ) -> anyhow::Result<Self> {
+        Self::new_validated_with_policies(
+            trusted_setup_file,
+            app_bin_path,
+            supported_versions,
+            cache_policy,
+            BinaryCommitmentPolicy::default(),
+        )
+    }
+
+    /// Select commitment materialization without weakening the pre-lease app/VK gate.
+    pub fn new_validated_with_policies(
+        trusted_setup_file: String,
+        app_bin_path: PathBuf,
+        supported_versions: &SupportedProtocolVersions,
+        cache_policy: WrapperCachePolicy,
+        commitment_policy: BinaryCommitmentPolicy,
+    ) -> anyhow::Result<Self> {
         cache_policy.validate_supported()?;
         let bound_inputs = if cache_policy == WrapperCachePolicy::CpuCold {
             let config = build_wrapper_config(trusted_setup_file.clone(), &app_bin_path)?;
@@ -105,8 +127,13 @@ impl WrapperSource {
         } else {
             None
         };
-        let mut wrapper = create_snark_wrapper(trusted_setup_file.clone(), &app_bin_path)
-            .context("initialize app-bound SNARK wrapper before queue polling")?;
+        let mut wrapper = create_snark_wrapper_with_cache_and_policy(
+            trusted_setup_file.clone(),
+            &app_bin_path,
+            None,
+            commitment_policy,
+        )
+        .context("initialize app-bound SNARK wrapper before queue polling")?;
         let vk_hash = format!(
             "{:?}",
             calculate_verification_key_hash(
@@ -117,6 +144,7 @@ impl WrapperSource {
             )
         );
         ensure_supported_wrapper_vk(&vk_hash, &app_bin_path, supported_versions)?;
+        let unified_end_params = wrapper.resolved_binary_commitment()?.end_params;
         if let Some(inputs) = &bound_inputs {
             inputs.verify()?;
         }
@@ -126,6 +154,8 @@ impl WrapperSource {
             app_bin_path,
             host_cache: cache_policy.retain(Box::new(wrapper.into_host_cache())),
             cache_policy,
+            commitment_policy,
+            unified_end_params,
             bound_inputs,
             validated_vk_hash: vk_hash,
         })
@@ -198,10 +228,48 @@ pub fn create_snark_wrapper_with_cache(
     app_bin_path: &Path,
     host_cache: Option<SnarkWrapperHostCache>,
 ) -> anyhow::Result<SnarkWrapper> {
+    create_snark_wrapper_with_cache_and_policy(
+        trusted_setup_file,
+        app_bin_path,
+        host_cache,
+        BinaryCommitmentPolicy::default(),
+    )
+}
+
+/// Select bundled (default) or freshly derived commitment for a cache-less wrapper.
+/// A carried host cache already contains its authenticated commitment and configuration.
+pub fn create_snark_wrapper_with_cache_and_policy(
+    trusted_setup_file: String,
+    app_bin_path: &Path,
+    host_cache: Option<SnarkWrapperHostCache>,
+    commitment_policy: BinaryCommitmentPolicy,
+) -> anyhow::Result<SnarkWrapper> {
     #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
     let mut wrapper = match host_cache {
         Some(cache) => SnarkWrapper::from_host_cache(cache)?,
-        None => SnarkWrapper::new(build_wrapper_config(trusted_setup_file, app_bin_path)?)?,
+        None => {
+            let config = build_wrapper_config(trusted_setup_file, app_bin_path)?;
+            match commitment_policy {
+                BinaryCommitmentPolicy::Bundled => {
+                    let started = Instant::now();
+                    let commitment = binary_commitment::load_bundled_commitment(
+                        config.bin.as_deref().expect("explicit bin"),
+                        config.text.as_deref().expect("explicit text"),
+                    )?;
+                    tracing::info!(
+                        "Validated bundled binary commitment in {:.3}s",
+                        started.elapsed().as_secs_f64()
+                    );
+                    SnarkWrapper::new_with_binary_commitment(config, commitment)?
+                }
+                BinaryCommitmentPolicy::Recompute => {
+                    tracing::info!(
+                        "Explicitly recomputing binary commitment from program artifacts"
+                    );
+                    SnarkWrapper::new(config)?
+                }
+            }
+        }
     };
 
     // Mirror the old eager GPU precomputation: derive the full VK/setup chain up front so
@@ -259,14 +327,6 @@ fn carried_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment
     ProgramCommitment(words)
 }
 
-/// SYSCOIN: End params of the active security level's unified-recursion verifier binary, needed
-/// to continue a carried chain the way the next unified pass would. Derived once per
-/// process (one unified-layer setup computation on the host).
-fn unified_verifier_end_params() -> &'static [u32; 8] {
-    static EP: std::sync::OnceLock<[u32; 8]> = std::sync::OnceLock::new();
-    EP.get_or_init(|| zkos_wrapper::circuits::BinaryCommitment::default().end_params)
-}
-
 /// SYSCOIN: The program commitment this proof's verification OUTPUTS: its carried chain continued
 /// with the unified verifier's end params unless it already ends there — the same
 /// carry-or-continue rule `CarriedChainCombiner::combine` applies. A proof that converged
@@ -275,7 +335,10 @@ fn unified_verifier_end_params() -> &'static [u32; 8] {
 /// a second unified pass) carries the full chain. Falls back to the raw carried value when
 /// the proof has no chain pair or it disagrees with the registers (the merge validates and
 /// rejects such proofs properly).
-fn output_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment {
+fn output_program_commitment(
+    proof: &UnrolledProgramProof,
+    unified_end_params: &[u32; 8],
+) -> ProgramCommitment {
     let carried = carried_program_commitment(proof);
     let (Some(hash), Some(preimage)) = (proof.recursion_chain_hash, proof.recursion_chain_preimage)
     else {
@@ -286,7 +349,7 @@ fn output_program_commitment(proof: &UnrolledProgramProof) -> ProgramCommitment 
     }
     let (continued, _) =
         zksync_airbender_execution_utils::unrolled::UnrolledProgramSetup::continue_recursion_chain(
-            unified_verifier_end_params(),
+            unified_end_params,
             &hash,
             &preimage,
         );
@@ -468,8 +531,35 @@ pub async fn run_linking_fri_snark_with_cache_policy(
     app_bin_path: PathBuf,
     iterations: Option<usize>,
     disable_zk: bool,
+    stop_receiver: tokio::sync::watch::Receiver<bool>,
+    cache_policy: WrapperCachePolicy,
+) -> anyhow::Result<()> {
+    run_linking_fri_snark_with_policies(
+        clients,
+        output_dir,
+        trusted_setup_file,
+        app_bin_path,
+        iterations,
+        disable_zk,
+        stop_receiver,
+        cache_policy,
+        BinaryCommitmentPolicy::default(),
+    )
+    .await
+}
+
+/// Explicit runtime policies; compatibility entry points use the bundled commitment.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_linking_fri_snark_with_policies(
+    clients: Vec<Box<dyn ProofClient + Send + Sync>>,
+    output_dir: String,
+    trusted_setup_file: String,
+    app_bin_path: PathBuf,
+    iterations: Option<usize>,
+    disable_zk: bool,
     mut stop_receiver: tokio::sync::watch::Receiver<bool>,
     cache_policy: WrapperCachePolicy,
+    commitment_policy: BinaryCommitmentPolicy,
 ) -> anyhow::Result<()> {
     cache_policy.validate_supported()?;
     let startup_started_at = Instant::now();
@@ -491,13 +581,18 @@ pub async fn run_linking_fri_snark_with_cache_policy(
 
     // SYSCOIN: Authenticate the app-bound wrapper before any SNARK lease. Warm mode retains
     // its setup cache; explicit CPU-cold mode drops it before the combiner is warmed.
-    let mut wrapper_source = WrapperSource::new_validated_with_policy(
+    let mut wrapper_source = WrapperSource::new_validated_with_policies(
         trusted_setup_file,
         app_bin_path,
         &supported_versions,
         cache_policy,
+        commitment_policy,
     )?;
-    tracing::info!(?cache_policy, "Authenticated SNARK wrapper cache policy");
+    tracing::info!(
+        ?cache_policy,
+        ?commitment_policy,
+        "Authenticated SNARK wrapper startup policies"
+    );
 
     // SYSCOIN: Warm the combiner eagerly, mirroring the SNARK precomputation above: setup
     // problems surface at startup and the first multi-proof job doesn't pay for it.
@@ -623,7 +718,8 @@ pub async fn run_inner(
                 supported_protocol_versions.program_commitment_for(&snark_proof_input.vk_hash)
             {
                 for (i, proof) in snark_proof_input.fri_proofs.iter().enumerate() {
-                    let output = output_program_commitment(proof);
+                    let output =
+                        output_program_commitment(proof, &wrapper_source.unified_end_params);
                     if output != expected {
                         // SYSCOIN: Never abandon an exact aggregate lease after validating proofs.
                         anyhow::bail!(
@@ -713,10 +809,11 @@ pub async fn run_inner(
     tracing::info!("Building per-job SNARK wrapper");
     let cache = wrapper_source.host_cache.take().map(|cache| *cache);
     let mut snark_wrapper = stats.measure_step(SnarkStage::WrapperSetup, || {
-        create_snark_wrapper_with_cache(
+        create_snark_wrapper_with_cache_and_policy(
             wrapper_source.trusted_setup_file.clone(),
             &wrapper_source.app_bin_path,
             cache,
+            wrapper_source.commitment_policy,
         )
     })?;
 
@@ -857,6 +954,8 @@ mod tests {
             app_bin_path: Default::default(),
             host_cache: None,
             cache_policy: super::WrapperCachePolicy::CpuCold,
+            commitment_policy: super::BinaryCommitmentPolicy::default(),
+            unified_end_params: [0; 8],
             bound_inputs: None,
             validated_vk_hash: "validated".to_owned(),
         };

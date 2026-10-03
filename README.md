@@ -170,6 +170,43 @@ Specify optional `--iterations` argument to run SNARK prover N times and then ex
 The same timeout, decompression, and multi-sequencer scheduling rules described for the FRI
 prover apply here.
 
+#### Bundled binary commitment (default)
+
+SNARK workers use the checked-in
+[`syscoin-v32-security100-commitment.json`](crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json)
+by default. Its two eight-word arrays are **64 bytes of public circuit constants**, not
+proof-specific randomness or secret setup material. The small JSON metadata file is
+embedded into the executable, so clones, native builds and Docker images need no separate
+commitment download. This avoids rebuilding the three CPU program setups solely to
+recover those constants on each cold start; it does not persist the large wrapper setups
+or eliminate their initialization.
+
+Startup validates the exact app `.bin`/`.text` and embedded Security100 recursion artifact
+sizes/hashes, the security/domain/version metadata, and the registered program commitment.
+It still derives the actual wrapper VK and requires the registered VK before claiming
+work. A mismatched app/artifact fails closed: there is no silent slow fallback, no disabled
+auxiliary-commitment check, and no change to fresh per-proof zero-knowledge randomness.
+
+Both the standalone SNARK worker and combined prover service accept
+`--binary-commitment-policy bundled|recompute` (environment:
+`ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY`). The default is **`bundled`**. `recompute` explicitly
+uses the original derivation path for development or release validation; it still requires
+the resulting app-bound VK to be registered. Warm host caches retain whichever commitment
+was authenticated at startup, and CPU-cold reconstruction preserves the chosen policy.
+
+To independently recompute and compare all 64 bytes without loading a CRS or producing a
+proof (this is intentionally slow, not a setup/startup step):
+
+```sh
+bash scripts/cargo-with-patched-airbender.sh verify-commitment -- \
+  cargo run --locked --release --no-default-features -p zksync_os_snark_prover \
+  --example verify_bundled_commitment
+```
+
+Changing application/verifier binaries or the circuit requires reviewing/regenerating the
+artifact and its pins together. Normal tests check metadata and reject altered inputs;
+the explicit command above checks the expensive derivation against the bundled value.
+
 #### SNARK CPU startup policy
 
 The standalone worker applies CPU settings **before** tracing, Tokio and proving pools start.

@@ -151,6 +151,7 @@ def native_environment(snark=False):
         "NVIDIA_DRIVER_CAPABILITIES") if name in os.environ}
     if snark:
         env.update({name: os.environ[name] for name in (
+            "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY",
             "ZKSYNC_SNARK_CPU_POLICY", "ZKSYNC_SNARK_CPU_MAX_LOGICAL",
             "ZKSYNC_SNARK_CPU_DEFAULT_THREADS", "RAYON_NUM_THREADS",
             "BELLMAN_NUM_THREADS", "OMP_NUM_THREADS") if name in os.environ})

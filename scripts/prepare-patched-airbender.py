@@ -47,8 +47,9 @@ WRAPPER_LOCK_SOURCE = (
 WRAPPER_PACKAGES = {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"}
 WRAPPER_CHANGED_PATHS = {
     "wrapper/src/buffered_os_rng.rs", "wrapper/src/gpu/snark.rs", "wrapper/src/lib.rs",
+    "wrapper/src/wrapper/mod.rs",
 }
-WRAPPER_PATCHED_TREE = "843324ec211797720a97b3421e591645809733b9"
+WRAPPER_PATCHED_TREE = "b2081f4c987e22043f31ca5a9656f2a1655b06c3"
 
 
 def require(condition, message):

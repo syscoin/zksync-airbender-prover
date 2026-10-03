@@ -9,7 +9,7 @@
     "zkos-wrapper": "0.1.0"
   },
   "patch_file": "zkos-wrapper-buffered-os-rng.patch",
-  "patch_sha256": "6da86d6e8c152b6d9dbd69d97f95ab0df4fcf1ae728fe30df446c8f291419247",
+  "patch_sha256": "2b0f8c8e1f61465a784cf994bf59d4335286c1c9be9e003b48e589e80bda938a",
   "changed_files": {
     "wrapper/src/buffered_os_rng.rs": {
       "preimage_sha256": null,
@@ -23,10 +23,15 @@
     },
     "wrapper/src/lib.rs": {
       "preimage_sha256": "d11415f2de511cfdeaef708c8a670f6e7e46212dfbd7ff03dd54f61491557346",
-      "postimage_sha256": "6dcc4a1e30245e280ec525bba25d5fcc0ee1d93dae5e9f8c0e6ec1a0d35a31f9",
-      "postimage_size": 32698
+      "postimage_sha256": "e15c5d7d9aca906b5b70e20a2fe4a0412cd2c039600a8300df63cf43b913a552",
+      "postimage_size": 33111
+    },
+    "wrapper/src/wrapper/mod.rs": {
+      "preimage_sha256": "812b4d5f7d35a9a46ed34846e00707da5953ee21a3d5c41d7fd5dad9220dba85",
+      "postimage_sha256": "d218cd0f83451c56b86e7cca115ab35939e02b6f21494f50b14b053ac625b61d",
+      "postimage_size": 21052
     }
   },
-  "patched_tree": "843324ec211797720a97b3421e591645809733b9",
-  "purpose": "Use one private 64 KiB fail-closed OS-entropy buffer for CPU and GPU final-SNARK zero-knowledge padding. Security level, circuit domain, constraint layout, verification key, proof format, and randomness distribution are unchanged."
+  "patched_tree": "b2081f4c987e22043f31ca5a9656f2a1655b06c3",
+  "purpose": "Use one private 64 KiB fail-closed OS-entropy buffer for CPU and GPU final-SNARK zero-knowledge padding, and expose authenticated precomputed binary commitment construction, cached commitment access, and the active security level. Callers must validate commitment provenance; constructor validation, setup and verification-key checks, security level, circuit domain, constraint layout, proof format, and randomness distribution are unchanged."
 }

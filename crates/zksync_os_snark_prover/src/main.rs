@@ -9,7 +9,8 @@ use protocol_version::SupportedProtocolVersions;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use zksync_os_snark_prover::{
-    init_tracing, metrics, run_linking_fri_snark_with_cache_policy, WrapperCachePolicy,
+    init_tracing, metrics, run_linking_fri_snark_with_policies, BinaryCommitmentPolicy,
+    WrapperCachePolicy,
 };
 use zksync_sequencer_proof_client::{
     parse_configured_sequencer_endpoints, resume_pending_submissions, wait_for_operator_shutdown,
@@ -85,6 +86,9 @@ enum Commands {
         /// cpu-cold is rejected by GPU builds and repeats setup to reduce live host memory.
         #[arg(long, value_enum, default_value_t = WrapperCachePolicy::Warm)]
         wrapper_cache_policy: WrapperCachePolicy,
+        /// Load the checked-in commitment by default; recompute is for artifact validation/upgrades.
+        #[arg(long, env = "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY", value_enum, default_value_t = BinaryCommitmentPolicy::Bundled)]
+        binary_commitment_policy: BinaryCommitmentPolicy,
         /// Number of iterations before exiting. Only successfully generated proofs count. If not specified, runs indefinitely
         #[arg(long)]
         iterations: Option<usize>,
@@ -245,6 +249,7 @@ fn main() -> anyhow::Result<()> {
                 },
             app_bin_path,
             wrapper_cache_policy,
+            binary_commitment_policy,
             iterations,
             prometheus_port,
             prometheus_bind_address,
@@ -338,7 +343,7 @@ fn main() -> anyhow::Result<()> {
                 // rather than polling it on the OS-sized main thread via `block_on`.
                 let runtime_handle = tokio::runtime::Handle::current();
                 let mut prover_task = tokio::task::spawn_blocking(move || {
-                    runtime_handle.block_on(run_linking_fri_snark_with_cache_policy(
+                    runtime_handle.block_on(run_linking_fri_snark_with_policies(
                         clients,
                         output_dir,
                         trusted_setup_file,
@@ -347,6 +352,7 @@ fn main() -> anyhow::Result<()> {
                         disable_zk,
                         stop_receiver,
                         wrapper_cache_policy,
+                        binary_commitment_policy,
                     ))
                 });
 
@@ -386,6 +392,57 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory as _;
+
+    #[test]
+    fn bundled_commitment_is_default_with_explicit_recompute_option() {
+        let command = || {
+            Cli::command().mut_subcommand("run-prover", |cmd| {
+                cmd.mut_arg("binary_commitment_policy", |arg| arg.env(None::<&str>))
+            })
+        };
+        let base = [
+            "snark-prover",
+            "run-prover",
+            "--output-dir",
+            "out",
+            "--trusted-setup-file",
+            "setup.key",
+            "--submission-dir",
+            "/tmp/snark-commitment-test-spool",
+        ];
+        let matches = command().try_get_matches_from(base).unwrap();
+        assert_eq!(
+            matches
+                .subcommand_matches("run-prover")
+                .unwrap()
+                .get_one::<BinaryCommitmentPolicy>("binary_commitment_policy"),
+            Some(&BinaryCommitmentPolicy::Bundled)
+        );
+        for (value, expected) in [
+            ("bundled", BinaryCommitmentPolicy::Bundled),
+            ("recompute", BinaryCommitmentPolicy::Recompute),
+        ] {
+            let matches = command()
+                .try_get_matches_from(
+                    base.into_iter()
+                        .chain(["--binary-commitment-policy", value]),
+                )
+                .unwrap();
+            assert_eq!(
+                matches
+                    .subcommand_matches("run-prover")
+                    .unwrap()
+                    .get_one::<BinaryCommitmentPolicy>("binary_commitment_policy"),
+                Some(&expected)
+            );
+        }
+        assert!(command()
+            .try_get_matches_from(
+                base.into_iter()
+                    .chain(["--binary-commitment-policy", "unknown"])
+            )
+            .is_err());
+    }
 
     #[test]
     fn cpu_startup_policy_defaults_and_limits_are_explicit() {

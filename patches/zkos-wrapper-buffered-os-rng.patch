@@ -224,7 +224,7 @@ index 1a47997..055acb7 100644
              finalization_hint.trailing_zeros() as usize,
              NUM_PADDING_TERMS,
 diff --git a/wrapper/src/lib.rs b/wrapper/src/lib.rs
-index 3fae70b..656cafe 100644
+index 3fae70b..ffa7a33 100644
 --- a/wrapper/src/lib.rs
 +++ b/wrapper/src/lib.rs
 @@ -9,6 +9,7 @@ compile_error!("features `security_80` and `security_100` are mutually exclusive
@@ -243,7 +243,24 @@ index 3fae70b..656cafe 100644
  use boojum::algebraic_props::round_function::AbsorptionModeOverwrite;
  use boojum::algebraic_props::sponge::GoldilocksPoseidon2Sponge;
  use boojum::config::{ProvingCSConfig, SetupCSConfig};
-@@ -447,7 +447,7 @@ pub fn prove_snark_wrapper(
+@@ -76,6 +76,16 @@ pub(crate) mod active_security {
+         crate::risc_verifier::verifier_common::SecurityModel::Security100;
+ }
+ 
++/// Security level selected by this wrapper's enabled feature, for authenticating
++/// precomputed binary commitments without deriving recursion-layer setups.
++pub const fn binary_commitment_security_bits() -> u32 {
++    use risc_verifier::verifier_common::SecurityModel;
++    match active_security::ACTIVE_SECURITY_MODEL {
++        SecurityModel::Security80 => 80,
++        SecurityModel::Security100 => 100,
++    }
++}
++
+ pub type GL = boojum::field::goldilocks::GoldilocksField;
+ pub type GLExt2 = boojum::field::goldilocks::GoldilocksExt2;
+ pub type RiscLeafInclusionVerifier = CircuitBlake2sForEverythingVerifier<GL>;
+@@ -447,7 +457,7 @@ pub fn prove_snark_wrapper(
          tracing::info!("using zk (padding) proving");
          const NUM_PADDING_TERMS: usize = 2 + 2 + 2; // worst case witness polys are opened at 2 points, plus there are
          // indirect openings of grand product for permutation and for lookup
@@ -252,3 +269,115 @@ index 3fae70b..656cafe 100644
          assembly.finalize_to_size_log_2_with_randomization(
              L1_VERIFIER_DOMAIN_SIZE_LOG,
              NUM_PADDING_TERMS,
+diff --git a/wrapper/src/wrapper/mod.rs b/wrapper/src/wrapper/mod.rs
+index aaac22f..c16a774 100644
+--- a/wrapper/src/wrapper/mod.rs
++++ b/wrapper/src/wrapper/mod.rs
+@@ -92,6 +92,27 @@ impl SnarkWrapper {
+         })
+     }
+ 
++    /// Build a wrapper using a precomputed commitment for the configured program.
++    ///
++    /// The caller must authenticate the commitment against the exact base and recursion
++    /// binaries and active security configuration before calling this constructor. This
++    /// does not validate those inputs by recomputing their commitment. All ordinary
++    /// constructor validation, setup derivation, and proof verification remain enabled.
++    pub fn new_with_binary_commitment(
++        config: SnarkWrapperConfig,
++        binary_commitment: BinaryCommitment,
++    ) -> anyhow::Result<Self> {
++        let mut wrapper = Self::new(config)?;
++        wrapper.binary_commitment = Some(binary_commitment);
++        Ok(wrapper)
++    }
++
++    /// Return this session's binary commitment, deriving and caching it on first use
++    /// after [`Self::new`], or reusing the value from [`Self::new_with_binary_commitment`].
++    pub fn resolved_binary_commitment(&mut self) -> anyhow::Result<BinaryCommitment> {
++        self.binary_commitment()
++    }
++
+     /// Build a wrapper that adopts the setup caches (and configuration) of a previous
+     /// session. See [`SnarkWrapperHostCache`].
+     pub fn from_host_cache(cache: SnarkWrapperHostCache) -> anyhow::Result<Self> {
+@@ -425,6 +446,79 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn precomputed_commitment_security_matches_enabled_feature() {
++        #[cfg(feature = "security_80")]
++        assert_eq!(crate::binary_commitment_security_bits(), 80);
++        #[cfg(feature = "security_100")]
++        assert_eq!(crate::binary_commitment_security_bits(), 100);
++    }
++
++    #[test]
++    fn precomputed_commitment_preserves_values_config_and_host_cache() {
++        let commitment = BinaryCommitment {
++            end_params: [17; 8],
++            aux_params: [29; 8],
++        };
++        // These files do not exist: resolving the supplied commitment must not read
++        // them or compute any recursion-layer setups.
++        let config = SnarkWrapperConfig {
++            bin: Some(PathBuf::from("missing-precomputed-test.bin")),
++            text: Some(PathBuf::from("missing-precomputed-test.text")),
++            threads: Some(1),
++            check_aux_params: true,
++            ..SnarkWrapperConfig::default()
++        };
++        let mut wrapper = SnarkWrapper::new_with_binary_commitment(config, commitment)
++            .expect("precomputed wrapper is created");
++        let resolved = wrapper.resolved_binary_commitment().unwrap();
++        assert_eq!(resolved.end_params, commitment.end_params);
++        assert_eq!(resolved.aux_params, commitment.aux_params);
++        assert!(wrapper.config.check_aux_params);
++        assert_eq!(wrapper.config.threads, Some(1));
++        let mut restored = SnarkWrapper::from_host_cache(wrapper.into_host_cache()).unwrap();
++        let resolved = restored.resolved_binary_commitment().unwrap();
++        assert_eq!(resolved.end_params, commitment.end_params);
++        assert_eq!(resolved.aux_params, commitment.aux_params);
++        assert!(restored.config.check_aux_params);
++    }
++
++    #[test]
++    fn precomputed_commitment_preserves_constructor_validation() {
++        let commitment = BinaryCommitment {
++            end_params: [17; 8],
++            aux_params: [29; 8],
++        };
++        let mismatched_paths = SnarkWrapperConfig {
++            bin: Some(PathBuf::from("only-one-path.bin")),
++            ..SnarkWrapperConfig::default()
++        };
++        let error = SnarkWrapper::new_with_binary_commitment(mismatched_paths, commitment)
++            .err()
++            .expect("one binary path must remain invalid");
++        assert!(error.to_string().contains("Both --bin and --text"));
++
++        let directory = tempfile::tempdir().unwrap();
++        let invalid_setup = SnarkWrapperConfig {
++            trusted_setup: Some(directory.path().to_path_buf()),
++            ..SnarkWrapperConfig::default()
++        };
++        let error = SnarkWrapper::new_with_binary_commitment(invalid_setup, commitment)
++            .err()
++            .expect("a directory must remain invalid as a trusted setup");
++        assert!(error.to_string().contains("Trusted setup path must point to a file"));
++    }
++
++    #[test]
++    fn precomputed_commitment_does_not_change_legacy_lazy_constructor() {
++        let config = SnarkWrapperConfig {
++            threads: Some(1),
++            ..config_with_base_program()
++        };
++        let wrapper = SnarkWrapper::new(config).unwrap();
++        assert!(wrapper.binary_commitment.is_none());
++    }
++
+     #[test]
+     fn host_cache_roundtrip_preserves_binary_commitment() {
+         let mut wrapper =

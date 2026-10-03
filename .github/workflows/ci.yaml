@@ -76,7 +76,7 @@ jobs:
       # Reuse its verified, pinned source snapshot and target directory. The
       # dependency's own workspace is required to resolve its dev-dependencies;
       # the production build wrapper's package-selection policy stays unchanged.
-      - name: Run pinned wrapper RNG tests
+      - name: Run pinned wrapper RNG and commitment tests
         env:
           RUST_MIN_STACK: "33554432"
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -100,6 +100,10 @@ jobs:
           test_status=0
           CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${wrapper}/Cargo.toml" \
             --locked -p zkos-wrapper --lib buffered_os_rng::tests || test_status=$?
+          if [[ "${test_status}" -eq 0 ]]; then
+            CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${wrapper}/Cargo.toml" \
+              --locked -p zkos-wrapper --lib wrapper::tests::precomputed_commitment || test_status=$?
+          fi
           verify_wrapper
           exit "${test_status}"
 
