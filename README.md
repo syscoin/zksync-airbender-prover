@@ -91,8 +91,14 @@ the sequencer conservatively filters complete base64/JSON size before leasing, a
 reuses the advertised scalar as its streaming read bound. This is a deployment capacity gate, not
 a canonical V8 input bound. Raising it requires raising the worker, sequencer clamp, and
 trusted-proxy spool together.
-Authority-free FRI peeks remain independently capped at 64 MiB, while queue/failed-proof
-diagnostics and SNARK aggregate responses retain their class-specific defensive bounds.
+SNARK workers advertise a 512 MiB complete decompressed aggregate-pick capacity, still limited
+to 100 FRI proofs. Updated sequencers default to 256 MiB when that advertisement is absent,
+so older workers retain their previous bound; the trusted-proxy spool must support 512 MiB.
+The larger budget accommodates 100 roughly 2.6 MB proofs after base64 expansion, but is not
+a universal worst-case guarantee: response size and the independent durable-journal limits
+may still split a larger aggregate before 100. HTTP compression does not reduce the enforced
+decompressed budget. Authority-free FRI and SNARK peeks remain capped at 64 MiB and 256 MiB,
+respectively, and queue/failed-proof diagnostics retain their class-specific defensive bounds.
 Specify `--sequencer-urls` to provide a comma-separated list. Status is probed concurrently
 with a bounded fan-out and a two-second hint deadline; the oldest unassigned head is tried
 first, and every client remains in the pick fallback if status is empty, slow, unavailable,

@@ -18,9 +18,9 @@ use crate::{
     NextFriProverJobPayload, PeekFriProverJobPayload, PeekSnarkProofInputs, PeekSnarkProofPayload,
     PeekableProofClient, ProofClient, ProverLeaseToken, QueueJobStatus, SnarkProofInputs,
     MAX_FRI_DIAGNOSTIC_RESPONSE_BYTES, MAX_FRI_PEEK_RESPONSE_BYTES, MAX_FRI_PICK_RESPONSE_BYTES,
-    MAX_PROOF_SUBMISSION_BODY_BYTES, MAX_SNARK_JOB_RESPONSE_BYTES, MAX_STATUS_RESPONSE_BYTES,
-    PROVER_DISPOSITION_ACCEPTED, PROVER_DISPOSITION_HEADER, PROVER_DISPOSITION_REJECTED,
-    PROVER_PICK_OUTCOME_HEADER, PROVER_PICK_OUTCOME_UNLEASED,
+    MAX_PROOF_SUBMISSION_BODY_BYTES, MAX_SNARK_JOB_RESPONSE_BYTES, MAX_SNARK_PEEK_RESPONSE_BYTES,
+    MAX_STATUS_RESPONSE_BYTES, PROVER_DISPOSITION_ACCEPTED, PROVER_DISPOSITION_HEADER,
+    PROVER_DISPOSITION_REJECTED, PROVER_PICK_OUTCOME_HEADER, PROVER_PICK_OUTCOME_UNLEASED,
 };
 use crate::{L2BatchNumber, SEQUENCER_CLIENT_METRICS};
 use anyhow::{anyhow, Context};
@@ -84,6 +84,7 @@ pub struct SequencerProofClient {
     supported_vk_hashes: Vec<String>,
     // SYSCOIN: Sent before assignment and reused as the exact decompressed critical-read bound.
     max_fri_pick_response_bytes: usize,
+    max_snark_pick_response_bytes: usize,
     // SYSCOIN: Production clients durably own exact proof/capability envelopes across crashes.
     submission_store: Option<Arc<DurableSubmissionStore>>,
     // SYSCOIN: Submission retries observe the process stop signal without discarding the envelope.
@@ -240,6 +241,7 @@ impl SequencerProofClient {
             prover_name,
             supported_vk_hashes,
             max_fri_pick_response_bytes: MAX_FRI_PICK_RESPONSE_BYTES,
+            max_snark_pick_response_bytes: MAX_SNARK_JOB_RESPONSE_BYTES,
             submission_store,
             shutdown,
         })
@@ -372,22 +374,25 @@ impl SequencerProofClient {
         Ok(url)
     }
 
-    /// SYSCOIN: Query string for pick requests: prover id, FRI response capacity, and any
+    /// SYSCOIN: Query string for pick requests: prover id, FRI/SNARK response capacities, and any
     /// supported hashes.
     /// Sequencers aware of `supported_vk_hashes` only assign jobs of these versions;
     /// older sequencers ignore the parameter.
     fn pick_query(&self) -> String {
         if self.supported_vk_hashes.is_empty() {
             format!(
-                "id={}&max_fri_pick_response_bytes={}",
-                self.prover_name, self.max_fri_pick_response_bytes
+                "id={}&max_fri_pick_response_bytes={}&max_snark_pick_response_bytes={}",
+                self.prover_name,
+                self.max_fri_pick_response_bytes,
+                self.max_snark_pick_response_bytes
             )
         } else {
             format!(
-                "id={}&supported_vk_hashes={}&max_fri_pick_response_bytes={}",
+                "id={}&supported_vk_hashes={}&max_fri_pick_response_bytes={}&max_snark_pick_response_bytes={}",
                 self.prover_name,
                 self.supported_vk_hashes.join(","),
-                self.max_fri_pick_response_bytes
+                self.max_fri_pick_response_bytes,
+                self.max_snark_pick_response_bytes
             )
         }
     }
@@ -774,17 +779,27 @@ async fn read_json_bounded<T: serde::de::DeserializeOwned>(
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("read {response_kind} response body"))?;
-        let next_length = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| anyhow!("{response_kind} response length overflow"))?;
-        anyhow::ensure!(
-            next_length <= maximum_bytes,
-            "{response_kind} decompressed body exceeds {maximum_bytes} bytes"
-        );
+        checked_response_body_length(body.len(), chunk.len(), maximum_bytes, response_kind)?;
         body.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&body).with_context(|| format!("decode {response_kind} JSON"))
+}
+
+// SYSCOIN: Check before allocation, including overflow and exact-cap boundaries.
+fn checked_response_body_length(
+    current_bytes: usize,
+    chunk_bytes: usize,
+    maximum_bytes: usize,
+    response_kind: &str,
+) -> anyhow::Result<usize> {
+    let next_length = current_bytes
+        .checked_add(chunk_bytes)
+        .ok_or_else(|| anyhow!("{response_kind} response length overflow"))?;
+    anyhow::ensure!(
+        next_length <= maximum_bytes,
+        "{response_kind} decompressed body exceeds {maximum_bytes} bytes"
+    );
+    Ok(next_length)
 }
 
 // SYSCOIN: Fixed B256 fields are rejected before decoding potentially large base64 job material.
@@ -1016,7 +1031,7 @@ impl ProofClient for SequencerProofClient {
                 let parsed = async {
                     let payload = read_json_bounded::<GetSnarkProofPayload>(
                         resp,
-                        MAX_SNARK_JOB_RESPONSE_BYTES,
+                        self.max_snark_pick_response_bytes,
                         "SNARK pick",
                     )
                     .await?;
@@ -1135,7 +1150,7 @@ impl PeekableProofClient for SequencerProofClient {
             StatusCode::OK => {
                 let get_snark_proof_payload = read_json_bounded::<PeekSnarkProofPayload>(
                     resp,
-                    MAX_SNARK_JOB_RESPONSE_BYTES,
+                    MAX_SNARK_PEEK_RESPONSE_BYTES,
                     "SNARK peek",
                 )
                 .await?;
@@ -1254,6 +1269,7 @@ mod tests {
         DeclaredBody(&'static str, usize),
         // SYSCOIN: Exercise a complete critical-pick JSON response, not only declared lengths.
         Body(&'static str, Vec<u8>),
+        GzipBody(Vec<u8>),
         // SYSCOIN: Exercise the streaming bound when no trustworthy Content-Length exists.
         ChunkedBody(&'static str, Vec<Vec<u8>>),
         Redirect(String),
@@ -1352,6 +1368,15 @@ mod tests {
                     ScriptedHttpReply::Body(status, body) => {
                         let response = format!(
                             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        stream.write_all(response.as_bytes()).unwrap();
+                        stream.write_all(&body).unwrap();
+                        stream.flush().unwrap();
+                    }
+                    ScriptedHttpReply::GzipBody(body) => {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         stream.write_all(response.as_bytes()).unwrap();
@@ -1644,7 +1669,7 @@ mod tests {
 
         assert_eq!(
             client.pick_query(),
-            format!("id=test_prover&max_fri_pick_response_bytes={MAX_FRI_PICK_RESPONSE_BYTES}")
+            format!("id=test_prover&max_fri_pick_response_bytes={MAX_FRI_PICK_RESPONSE_BYTES}&max_snark_pick_response_bytes={MAX_SNARK_JOB_RESPONSE_BYTES}")
         );
     }
 
@@ -1664,7 +1689,7 @@ mod tests {
         assert_eq!(
             client.pick_query(),
             format!(
-                "id=test_prover&supported_vk_hashes={first},{second}&max_fri_pick_response_bytes={MAX_FRI_PICK_RESPONSE_BYTES}"
+                "id=test_prover&supported_vk_hashes={first},{second}&max_fri_pick_response_bytes={MAX_FRI_PICK_RESPONSE_BYTES}&max_snark_pick_response_bytes={MAX_SNARK_JOB_RESPONSE_BYTES}"
             )
         );
     }
@@ -2255,6 +2280,94 @@ mod tests {
         assert!(crate::error_follows_job_acquisition(&error));
         assert!(format!("{error:#}").contains(&format!("exceeds {TEST_CAPACITY} bytes")));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn snark_response_budget_checks_exact_boundary_and_overflow_without_allocating() {
+        assert_eq!(MAX_SNARK_JOB_RESPONSE_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_SNARK_PEEK_RESPONSE_BYTES, 256 * 1024 * 1024);
+        let limit = MAX_SNARK_JOB_RESPONSE_BYTES;
+        assert_eq!(
+            checked_response_body_length(limit - 1, 1, limit, "SNARK").unwrap(),
+            limit
+        );
+        assert!(checked_response_body_length(limit, 1, limit, "SNARK").is_err());
+        assert!(checked_response_body_length(usize::MAX, 1, usize::MAX, "SNARK").is_err());
+    }
+
+    #[tokio::test]
+    async fn snark_pick_enforces_advertised_decompressed_capacity() {
+        let (endpoint, _, server) = scripted_http_server(vec![ScriptedHttpReply::DeclaredBody(
+            "200 OK",
+            MAX_SNARK_JOB_RESPONSE_BYTES + 1,
+        )]);
+        let client =
+            SequencerProofClient::new(endpoint, "snark-prover".to_owned(), None, vec![]).unwrap();
+        let error = client.pick_snark_job().await.unwrap_err();
+        assert!(crate::error_follows_job_acquisition(&error));
+        assert!(format!("{error:#}").contains("exceeds"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn snark_pick_rejects_chunked_body_above_advertised_capacity() {
+        let (endpoint, _, server) = scripted_http_server(vec![ScriptedHttpReply::ChunkedBody(
+            "200 OK",
+            vec![vec![b'a'; 600], vec![b'b'; 600]],
+        )]);
+        let mut client =
+            SequencerProofClient::new(endpoint, "snark-prover".to_owned(), None, vec![]).unwrap();
+        client.max_snark_pick_response_bytes = 1_024;
+        assert!(client
+            .pick_query()
+            .contains("max_snark_pick_response_bytes=1024"));
+        let error = client.pick_snark_job().await.unwrap_err();
+        assert!(crate::error_follows_job_acquisition(&error));
+        assert!(format!("{error:#}").contains("exceeds 1024 bytes"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn snark_peek_retains_legacy_response_bound_without_acquiring_a_lease() {
+        let (endpoint, _, server) = scripted_http_server(vec![ScriptedHttpReply::DeclaredBody(
+            "200 OK",
+            MAX_SNARK_PEEK_RESPONSE_BYTES + 1,
+        )]);
+        let client =
+            SequencerProofClient::new(endpoint, "snark-prover".to_owned(), None, vec![]).unwrap();
+        let error = client.peek_snark_job(1, 2).await.unwrap_err();
+        assert!(!crate::error_follows_job_acquisition(&error));
+        assert!(format!("{error:#}").contains("exceeds"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_limits_decompressed_bytes_not_gzip_content_length() {
+        // SYSCOIN: 30 gzip bytes expand to a 1,024-byte JSON string, including its quotes.
+        const GZIP_JSON: &[u8] = &[
+            31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 83, 74, 28, 5, 163, 96, 20, 140, 80, 160, 4, 0, 68,
+            18, 72, 11, 0, 4, 0, 0,
+        ];
+        for limit in [1_023, 1_024] {
+            let (endpoint, _, server) =
+                scripted_http_server(vec![ScriptedHttpReply::GzipBody(GZIP_JSON.to_vec())]);
+            let client =
+                SequencerProofClient::new(endpoint, "snark-prover".to_owned(), None, vec![])
+                    .unwrap();
+            let response = client
+                .client
+                .get(client.build_url("SNARK/pick").unwrap())
+                .send()
+                .await
+                .unwrap();
+            let result = read_json_bounded::<String>(response, limit, "SNARK").await;
+            if limit == 1_024 {
+                assert_eq!(result.unwrap(), "a".repeat(1_022));
+            } else {
+                assert!(format!("{:#}", result.unwrap_err()).contains("exceeds 1023 bytes"));
+            }
+            server.join().unwrap();
+        }
     }
 
     // SYSCOIN: The authority-free peek path still rejects before reading an advertised body above
