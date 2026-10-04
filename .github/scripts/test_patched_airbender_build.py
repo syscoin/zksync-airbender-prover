@@ -889,21 +889,18 @@ class WrapperPinTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
         self.assertIn('AIRBENDER_BUILD_ATTESTATION="${RUNNER_TEMP}/ci-test-airbender-inputs.json"', workflow)
         self.assertIn("ci-test -- cargo test --locked --no-default-features", workflow)
-        self.assertIn("workspace=\"$(jq -er '.workspace' \"${record}\")\"", workflow)
-        self.assertIn('wrapper="$(dirname -- "${workspace}")/zkos-wrapper"', workflow)
-        self.assertIn("target=\"$(jq -er '.cargo_target_dir' \"${record}\")\"", workflow)
-        self.assertIn('CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${wrapper}/Cargo.toml"', workflow)
+        self.assertIn('python3 -B .github/scripts/run_pinned_wrapper_tests.py \\\n'
+                      '            "${RUNNER_TEMP}/ci-test-airbender-inputs.json"', workflow)
+        self.assertIn('run: python3 -B .github/scripts/test_run_pinned_wrapper_tests.py', workflow)
+        self.assertNotIn('cargo test --manifest-path "${wrapper}/Cargo.toml"', workflow)
         self.assertNotIn('cargo test --manifest-path "${workspace}/Cargo.toml"', workflow)
-        self.assertIn("--locked -p zkos-wrapper --lib buffered_os_rng::tests", workflow)
-        self.assertIn("--locked -p zkos-wrapper --lib wrapper::tests::precomputed_commitment", workflow)
-        self.assertIn('helper.verify_wrapper(Path(sys.argv[1]), helper.load_wrapper_pins())', workflow)
         self.assertIn('      - name: Run pinned wrapper RNG and commitment tests\n'
                       '        env:\n'
                       '          RUST_MIN_STACK: "33554432"\n'
                       '          CARGO_PROFILE_DEV_DEBUG: "0"\n'
                       '        run: |', workflow)
 
-    def test_ci_wrapper_rng_shell_routes_manifest_and_preserves_failure(self):
+    def test_ci_wrapper_shell_routes_attestation_and_preserves_helper_failure(self):
         lines = (ROOT / ".github/workflows/ci.yaml").read_text().splitlines()
         step = lines.index("      - name: Run pinned wrapper RNG and commitment tests")
         start = lines.index("        run: |", step) + 1
@@ -924,62 +921,36 @@ class WrapperPinTests(unittest.TestCase):
 import json, os, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
-if name == "jq":
-    record = json.loads(Path(sys.argv[-1]).read_text())
-    print(record[sys.argv[-2].removeprefix(".")])
-    raise SystemExit(0)
-if name == "python3":
-    source = sys.stdin.read()
-    assert "helper.verify_wrapper" in source and "helper.load_wrapper_pins" in source
-    event = {"kind": "verify", "wrapper": sys.argv[-1]}
-else:
-    assert name == "cargo"
-    event = {"kind": "cargo", "argv": sys.argv[1:], "target": os.environ["CARGO_TARGET_DIR"],
-             "rust_min_stack": os.environ["RUST_MIN_STACK"],
-             "profile_dev_debug": os.environ["CARGO_PROFILE_DEV_DEBUG"]}
+assert name == "python3"
+event = {"argv": sys.argv[1:], "rust_min_stack": os.environ["RUST_MIN_STACK"],
+         "profile_dev_debug": os.environ["CARGO_PROFILE_DEV_DEBUG"]}
 with Path(os.environ["WORKFLOW_CALL_LOG"]).open("a") as output:
     output.write(json.dumps(event) + "\n")
-if name == "cargo":
-    status_key = ("WRAPPER_COMMITMENT_TEST_EXIT_CODE" if "wrapper::tests::precomputed_commitment"
-                  in sys.argv else "WRAPPER_TEST_EXIT_CODE")
-    raise SystemExit(int(os.environ[status_key]))
+raise SystemExit(int(os.environ["WRAPPER_HELPER_EXIT_CODE"]))
 '''
-        for rng_status, commitment_status in ((0, 0), (7, 0), (0, 9)):
-            with self.subTest(rng_status=rng_status, commitment_status=commitment_status), \
+        for helper_status in (0, 7, 9):
+            with self.subTest(helper_status=helper_status), \
                     tempfile.TemporaryDirectory(prefix="wrapper ci ") as temporary:
                 root = Path(temporary)
                 commands = root / "commands"
                 commands.mkdir()
-                for name in ("jq", "python3", "cargo"):
+                for name in ("python3",):
                     executable = commands / name
                     executable.write_text("#!" + sys.executable + "\n" + stub)
                     executable.chmod(0o700)
-                workspace, target = root / "snapshot build/prover", root / "target cache"
-                (root / "ci-test-airbender-inputs.json").write_text(json.dumps({
-                    "workspace": str(workspace), "cargo_target_dir": str(target)}))
                 log = root / "calls.jsonl"
                 result = subprocess.run(["bash", "-eu", "-c", script], cwd=ROOT, capture_output=True,
                                         text=True, env={**os.environ, **step_env, "RUNNER_TEMP": str(root),
                                         "PATH": str(commands) + os.pathsep + os.environ.get("PATH", ""),
                                         "WORKFLOW_CALL_LOG": str(log),
-                                        "WRAPPER_TEST_EXIT_CODE": str(rng_status),
-                                        "WRAPPER_COMMITMENT_TEST_EXIT_CODE": str(commitment_status)})
-                self.assertEqual(result.returncode, rng_status or commitment_status, result.stderr)
+                                        "WRAPPER_HELPER_EXIT_CODE": str(helper_status)})
+                self.assertEqual(result.returncode, helper_status, result.stderr)
                 events = [json.loads(line) for line in log.read_text().splitlines()]
-                wrapper = workspace.parent / "zkos-wrapper"
                 expected = [
-                    {"kind": "verify", "wrapper": str(wrapper)},
-                    {"kind": "cargo", "target": str(target), "rust_min_stack": "33554432",
-                     "profile_dev_debug": "0", "argv": [
-                        "test", "--manifest-path", str(wrapper / "Cargo.toml"), "--locked",
-                        "-p", "zkos-wrapper", "--lib", "buffered_os_rng::tests"]},
+                    {"rust_min_stack": "33554432", "profile_dev_debug": "0", "argv": [
+                        "-B", ".github/scripts/run_pinned_wrapper_tests.py",
+                        str(root / "ci-test-airbender-inputs.json")]},
                 ]
-                if not rng_status:
-                    expected.append({"kind": "cargo", "target": str(target), "rust_min_stack": "33554432",
-                                     "profile_dev_debug": "0", "argv": [
-                                         "test", "--manifest-path", str(wrapper / "Cargo.toml"), "--locked",
-                                         "-p", "zkos-wrapper", "--lib", "wrapper::tests::precomputed_commitment"]})
-                expected.append({"kind": "verify", "wrapper": str(wrapper)})
                 self.assertEqual(events, expected)
 
     def test_prepare_uses_isolated_clone_exact_pin_and_reverification(self):
