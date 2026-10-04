@@ -399,6 +399,11 @@ the reviewed Syscoin patch, source tree `6935489bdbc7b1ed31e608677d1b2418b10691b
 `9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a`. Its Security100
 program commitment with the corrected recursive guests is
 `0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94`.
+All twelve canonical-recipe recursive guest `.bin`/`.text`/`.elf` outputs
+matched byte-for-byte between the Mac Docker build and an independent Linux
+Docker host; the old-source control also reproduced all eight checked
+`.bin`/`.text` outputs. This is guest-byte reproduction, not independent-host
+key generation or whole-stack qualification.
 Only the paired runtime `multiblock_batch.bin` and `.text` are promoted here; duplicate
 ELF/guest-artifact outputs and task-local provenance are not release inputs. Rebuilding
 this draft must produce a new build attestation; retained candidate binary attestations
