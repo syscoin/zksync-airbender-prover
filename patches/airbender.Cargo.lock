@@ -717,7 +717,6 @@ checksum = "8d696c370c750c948ada61c69a0ee2cbbb9c50b1019ddb86d9317157a99c2cae"
 [[package]]
 name = "boojum"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "arrayvec 0.7.6",
  "bincode 1.3.3",
@@ -1566,7 +1565,6 @@ dependencies = [
 [[package]]
 name = "fflonk"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "bincode 1.3.3",
  "byteorder",
@@ -1684,7 +1682,6 @@ dependencies = [
 [[package]]
 name = "franklin-crypto"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "arr_macro",
  "bit-vec",
@@ -3619,7 +3616,6 @@ dependencies = [
 [[package]]
 name = "rescue_poseidon"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "addchain",
  "arrayvec 0.7.6",
@@ -4217,7 +4213,6 @@ dependencies = [
 [[package]]
 name = "snark_wrapper"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "derivative",
  "rand 0.8.6",
@@ -5649,7 +5644,6 @@ dependencies = [
 [[package]]
 name = "zksync_bellman"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "arrayvec 0.7.6",
  "bit-vec",
@@ -5673,7 +5667,6 @@ dependencies = [
 [[package]]
 name = "zksync_cs_derive"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "proc-macro-error",
  "proc-macro2 1.0.101",
@@ -5684,7 +5677,6 @@ dependencies = [
 [[package]]
 name = "zksync_ff"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "byteorder",
  "hex",
@@ -5697,7 +5689,6 @@ dependencies = [
 [[package]]
 name = "zksync_ff_derive"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "num-bigint 0.4.6",
  "num-integer",
@@ -5789,7 +5780,6 @@ dependencies = [
 [[package]]
 name = "zksync_pairing"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "byteorder",
  "cfg-if",
@@ -5827,7 +5817,6 @@ dependencies = [
 [[package]]
 name = "zksync_solidity_vk_codegen"
 version = "0.32.10"
-source = "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9"
 dependencies = [
  "ethereum-types",
  "franklin-crypto",

@@ -53,6 +53,9 @@ jobs:
       - name: Check isolated Airbender source overlay
         run: python3 -B .github/scripts/test_patched_airbender_build.py
 
+      - name: Check effective circuit identities in bundled caches
+        run: python3 -B .github/scripts/test_cache_provenance.py
+
       - name: Check isolated GPU32 backend source overlay
         run: python3 -B .github/scripts/test_patched_gpu_backends.py
 
@@ -105,6 +108,44 @@ jobs:
               --locked -p zkos-wrapper --lib wrapper::tests::precomputed_commitment || test_status=$?
           fi
           verify_wrapper
+          exit "${test_status}"
+
+      # SYSCOIN: Exercise only the bounded 128-row, single-worker, NoPow fixture.
+      # The application test command does not run dependency unit tests.
+      - name: Run pinned native Boojum FRI query-count regression
+        timeout-minutes: 20
+        env:
+          RUST_MIN_STACK: "33554432"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_BUILD_JOBS: "1"
+        run: |
+          record="${RUNNER_TEMP}/ci-test-airbender-inputs.json"
+          workspace="$(jq -er '.workspace' "${record}")"
+          crypto="$(dirname -- "${workspace}")/zksync-crypto"
+          target="$(jq -er '.cargo_target_dir' "${record}")"
+          verify_crypto() {
+            python3 -B - "${crypto}" "${record}" <<'PY'
+          import importlib.util
+          import json
+          import sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("patched_airbender", "scripts/prepare-patched-airbender.py")
+          helper = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(helper)
+          record = json.loads(Path(sys.argv[2]).read_text())
+          helper.require(record["cargo_exit_code"] == 0 and record["inputs_reverified"] is True
+                         and record["label"] == "ci-test", "CI application inputs were not verified")
+          helper.require(record["zksync_crypto"]["inputs"] == helper.crypto_pins_metadata(),
+                         "CI common crypto attestation differs from current pins")
+          helper.verify_crypto(Path(sys.argv[1]), helper.load_crypto_pins())
+          PY
+          }
+          verify_crypto
+          test_status=0
+          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
+            --locked -p boojum --lib cs::implementations::cs::test::prove_simple \
+            -- --exact --nocapture --test-threads=1 || test_status=$?
+          verify_crypto
           exit "${test_status}"
 
 

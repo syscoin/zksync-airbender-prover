@@ -21,6 +21,7 @@ SPEC = importlib.util.spec_from_file_location(
 HELPER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPER)
 PINS = HELPER.load_airbender_pins()
+CRYPTO_PINS = HELPER.load_crypto_pins()
 
 
 def parent_lock_bytes():
@@ -63,7 +64,7 @@ class LockOverlayTests(unittest.TestCase):
         ):
             HELPER.checked_hash(ROOT / relative, PINS[key])
 
-    def test_only_all_airbender_and_wrapper_source_identities_change(self):
+    def test_only_complete_common_source_identities_change(self):
         packages = HELPER.audit_lock(self.canonical, self.overlay, PINS)
         self.assertEqual(len(packages), 46)
         self.assertIn("gpu_prover", packages)
@@ -73,6 +74,8 @@ class LockOverlayTests(unittest.TestCase):
                              for item in self.overlay["package"]))
         self.assertFalse(any("zkos-wrapper" in item.get("source", "")
                              for item in self.overlay["package"]))
+        self.assertFalse(any(item.get("source") == HELPER.CRYPTO_LOCK_SOURCE
+                             for item in self.overlay["package"]))
 
     def test_current_derivation_is_byte_identical_to_reviewed_overlay(self):
         raw, selected = HELPER.selected_lock_overlay(
@@ -81,10 +84,11 @@ class LockOverlayTests(unittest.TestCase):
         self.assertEqual(selected["canonical_lock_sha256"], PINS["canonical_lock_sha256"])
         self.assertEqual(selected["overlay_lock_sha256"], PINS["overlay_lock_sha256"])
         self.assertEqual(selected["airbender_packages"], HELPER.audit_lock(self.canonical, self.overlay, PINS))
-        self.assertEqual(selected["schema_version"], 2)
-        self.assertEqual(selected["derivation"], "airbender-wrapper-source-identity-only-v2")
+        self.assertEqual(selected["schema_version"], 3)
+        self.assertEqual(selected["derivation"], "common-proving-source-identity-only-v3")
         self.assertEqual(selected["zkos_wrapper_packages"],
                          {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"})
+        self.assertEqual(selected["zksync_crypto_packages"], HELPER.CRYPTO_PACKAGES)
 
     def test_actual_parent_lock_with_separate_current_tooling(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -99,7 +103,7 @@ class LockOverlayTests(unittest.TestCase):
             self.assertNotEqual(selected["canonical_lock_sha256"], PINS["canonical_lock_sha256"])
             self.assertNotEqual(selected["overlay_lock_sha256"], PINS["overlay_lock_sha256"])
             self.assertEqual(lock.read_bytes(), parent_lock_bytes())
-            with self.assertRaisesRegex(ValueError, "more than Airbender"):
+            with self.assertRaisesRegex(ValueError, "more than common proving"):
                 HELPER.audit_lock(old, self.overlay, PINS)
 
     def test_parent_lock_fixture_preserves_exact_historical_bytes(self):
@@ -143,7 +147,7 @@ class LockOverlayTests(unittest.TestCase):
                 registry = next(item for item in modified["package"]
                                 if item.get("source", "").startswith("registry+"))
                 registry[field] = value
-                with self.assertRaisesRegex(ValueError, "more than Airbender"):
+                with self.assertRaisesRegex(ValueError, "more than common proving"):
                     HELPER.audit_lock(self.canonical, modified, PINS)
 
     def test_crypto_pin_or_wrapper_path_identity_drift_rejected(self):
@@ -195,9 +199,186 @@ class LockOverlayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "package count"):
             HELPER.audit_lock(modified, self.overlay, PINS)
 
+
+class CommonCryptoOverlayTests(unittest.TestCase):
+    def fixture(self, temporary, pins=None):
+        directory = Path(temporary)
+        (directory / CRYPTO_PINS["patch_file"]).write_bytes(
+            (ROOT / "patches" / CRYPTO_PINS["patch_file"]).read_bytes())
+        manifest = directory / HELPER.CRYPTO_PIN_PATH.name
+        manifest.write_text(json.dumps(pins or CRYPTO_PINS))
+        return manifest
+
+    def test_exact_manifest_and_native_patch_scope(self):
+        self.assertEqual(HELPER.load_crypto_pins(), CRYPTO_PINS)
+        self.assertEqual(len(CRYPTO_PINS["upstream_packages"]), 11)
+        raw = (ROOT / "patches" / CRYPTO_PINS["patch_file"]).read_text()
+        sections = raw.split("diff --git ")[1:]
+        self.assertEqual(
+            {section.splitlines()[0].split()[1][2:] for section in sections},
+            set(CRYPTO_PINS["changed_files"]),
+        )
+        verifier = next(section for section in sections if section.startswith(
+            "a/crates/boojum/src/cs/implementations/verifier.rs "))
+        added = [line[1:].strip() for line in verifier.splitlines()
+                 if line.startswith("+") and not line.startswith("+++")]
+        self.assertEqual(added, [
+            "use super::prover::ProofConfig;",
+            "/// `expected_proof_config` must come from verifier policy, independently of `proof`.",
+            "expected_proof_config: &ProofConfig,",
+            "if &proof.proof_config != expected_proof_config {",
+            'log!("Proof configuration differs from verifier expectation");',
+            "return false;",
+            "}",
+            "",
+            "return false;",
+        ])
+        for text in ("empty FRI query list must fail", "one missing FRI query must fail",
+                     "an extra FRI query must fail", "original proof must still verify"):
+            self.assertIn(text, raw)
+
+    def test_manifest_unknown_origins_paths_fields_sizes_and_digests_rejected(self):
+        edits = (
+            lambda p: p.update(schema_version=True),
+            lambda p: p.update(upstream_url="https://example.invalid/crypto"),
+            lambda p: p.update(upstream_commit="f" * 40),
+            lambda p: p.update(upstream_tree="f" * 40),
+            lambda p: p.update(upstream_lock_source=HELPER.CRYPTO_LOCK_SOURCE + "-changed"),
+            lambda p: p["upstream_packages"].update(boojum="0.32.9"),
+            lambda p: p.update(patch_file="../escape.patch"),
+            lambda p: p.update(patch_sha256="0" * 64),
+            lambda p: p.update(patched_tree="f" * 40),
+            lambda p: p["changed_files"].update({"../escape": {}}),
+            lambda p: p["changed_files"][next(iter(p["changed_files"]))].update(postimage_size=True),
+            lambda p: p["changed_files"][next(iter(p["changed_files"]))].update(preimage_sha256=None),
+            lambda p: p.update(unknown="unreviewed"),
+        )
+        for edit in edits:
+            with self.subTest(edit=edit), tempfile.TemporaryDirectory() as temporary:
+                pins = copy.deepcopy(CRYPTO_PINS)
+                edit(pins)
+                with self.assertRaises(ValueError):
+                    HELPER.load_crypto_pins(self.fixture(temporary, pins))
+
+    def test_duplicate_keys_symlinks_and_changed_patch_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self.fixture(temporary)
+            manifest.write_text('{"schema_version":1,"schema_version":1}')
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                HELPER.load_crypto_pins(manifest)
+            manifest.unlink()
+            manifest.symlink_to(HELPER.CRYPTO_PIN_PATH)
+            with self.assertRaises(ValueError):
+                HELPER.load_crypto_pins(manifest)
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self.fixture(temporary)
+            (manifest.parent / CRYPTO_PINS["patch_file"]).write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                HELPER.load_crypto_pins(manifest)
+
+    def test_lock_mixed_missing_duplicate_unknown_version_and_partial_graph_rejected(self):
+        canonical = HELPER.read_toml(ROOT / "Cargo.lock")
+        overlay = HELPER.read_toml(ROOT / "patches/airbender.Cargo.lock")
+        for field, value in (("source", HELPER.CRYPTO_LOCK_SOURCE + "-changed"),
+                             ("name", "unknown-crypto"), ("version", "0.32.9")):
+            modified = copy.deepcopy(canonical)
+            next(p for p in modified["package"] if p["name"] == "boojum")[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                HELPER.audit_lock(modified, overlay, PINS)
+        for name in HELPER.CRYPTO_PACKAGES:
+            modified = copy.deepcopy(canonical)
+            modified["package"] = [p for p in modified["package"] if p["name"] != name]
+            with self.subTest(missing=name), self.assertRaisesRegex(ValueError, "incomplete common crypto"):
+                HELPER.audit_lock(modified, overlay, PINS)
+            partial = copy.deepcopy(overlay)
+            next(p for p in partial["package"] if p["name"] == name)["source"] = HELPER.CRYPTO_LOCK_SOURCE
+            with self.subTest(partial=name), self.assertRaises(ValueError):
+                HELPER.audit_lock(canonical, partial, PINS)
+        modified = copy.deepcopy(canonical)
+        modified["package"].append(copy.deepcopy(next(p for p in modified["package"] if p["name"] == "boojum")))
+        with self.assertRaisesRegex(ValueError, "unknown common crypto"):
+            HELPER.audit_lock(modified, overlay, PINS)
+
+    def test_prepare_clones_exact_origin_and_all_packages_without_touching_original(self):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            build = Path(temporary)
+            local = build / "original"
+            local.mkdir()
+            git = stack.enter_context(patch.object(HELPER, "run_git", side_effect=lambda repo, *args:
+                "" if args == ("status", "--porcelain") else CRYPTO_PINS["upstream_tree"]))
+            hashes = stack.enter_context(patch.object(HELPER, "checked_hash"))
+            verify = stack.enter_context(patch.object(HELPER, "verify_crypto"))
+            paths = {name: "crates/" + name for name in HELPER.CRYPTO_PACKAGES}
+            stack.enter_context(patch.object(HELPER, "package_paths", return_value=paths))
+            run = stack.enter_context(patch.object(HELPER.subprocess, "run"))
+            stack.enter_context(patch.dict(HELPER.os.environ, {"ZKSYNC_CRYPTO_SOURCE_DIR": str(local)}, clear=True))
+            root, clone, actual = HELPER.prepare_crypto(build, CRYPTO_PINS)
+            self.assertEqual(root, build / "zksync-crypto")
+            self.assertEqual(clone, str(local.resolve()))
+            self.assertEqual(actual, paths)
+            self.assertIn("--no-hardlinks", run.call_args.args[0])
+            self.assertEqual(list(local.iterdir()), [])
+            verify.assert_called_once_with(root, CRYPTO_PINS)
+            git.assert_any_call(root, "checkout", "--quiet", "--detach", CRYPTO_PINS["upstream_commit"])
+            for relative, row in CRYPTO_PINS["changed_files"].items():
+                hashes.assert_any_call(root / relative, row["preimage_sha256"])
+
+    def test_crypto_reverification_rejects_head_tree_paths_untracked_and_late_edits(self):
+        pins = copy.deepcopy(CRYPTO_PINS)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative, row in pins["changed_files"].items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode())
+                row["postimage_sha256"] = HELPER.sha256(path)
+                row["postimage_size"] = path.stat().st_size
+            values = {
+                ("rev-parse", "HEAD"): pins["upstream_commit"],
+                ("rev-parse", "HEAD^{tree}"): pins["upstream_tree"],
+                ("diff", "--name-only", "HEAD"): "\n".join(sorted(pins["changed_files"])),
+                ("ls-files", "--others", "--exclude-standard"): "",
+                ("diff", "--name-only"): "",
+                ("write-tree",): pins["patched_tree"],
+            }
+            with patch.object(HELPER, "run_git", side_effect=lambda repo, *args: values[args]):
+                HELPER.verify_crypto(root, pins)
+                for args in values:
+                    original = values[args]
+                    values[args] = "unexpected"
+                    with self.subTest(args=args), self.assertRaises(ValueError):
+                        HELPER.verify_crypto(root, pins)
+                    values[args] = original
+                row = pins["changed_files"][next(iter(pins["changed_files"]))]
+                row["postimage_size"] += 1
+                with self.assertRaisesRegex(ValueError, "postimage size mismatch"):
+                    HELPER.verify_crypto(root, pins)
+                row["postimage_size"] -= 1
+                relative = next(iter(pins["changed_files"]))
+                source = root / relative
+                source.unlink()
+                source.symlink_to(HELPER.CRYPTO_PIN_PATH)
+                with self.assertRaisesRegex(ValueError, "not a regular input"):
+                    HELPER.verify_crypto(root, pins)
+                source.unlink()
+                source.write_bytes(relative.encode())
+                (root / next(iter(pins["changed_files"]))).write_bytes(b"late edit")
+                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                    HELPER.verify_crypto(root, pins)
+
+    def test_pure_metadata_never_invokes_external_commands(self):
+        with patch.object(HELPER.subprocess, "run") as run, patch.object(HELPER.subprocess, "check_output") as output:
+            metadata = HELPER.crypto_pins_metadata()
+            self.assertEqual(metadata["pins"], CRYPTO_PINS)
+            self.assertEqual(metadata["manifest_sha256"], HELPER.sha256(HELPER.CRYPTO_PIN_PATH))
+            run.assert_not_called()
+            output.assert_not_called()
+
+
+class DiagnosticsPreservationTests(unittest.TestCase):
     def test_logger_patch_has_no_proving_changes(self):
         source = (ROOT / "patches/airbender-cuda-device-diagnostics.patch").read_text()
-        self.assertEqual(source.count("diff --git "), 8)
+        self.assertEqual(source.count("diff --git "), 31)
         source = next("diff --git " + section for section in source.split("diff --git ")
                       if section.startswith("a/gpu_prover/src/execution/gpu_worker.rs "))
         # Diff index IDs and hunk context changed when the cumulative patch was
@@ -244,18 +425,20 @@ class StreamedInitTeardownPatchTests(unittest.TestCase):
             "gpu_prover/src/execution/simulation_runner.rs": "1d792692fd0f585753b8865dfba68043ba66690066fad2ac6f23620e9105ebc0",
             "tools/cli/src/prover_utils.rs": "8aa93a6fb387d298076012989b1b73069c5883b5b2d1dd2e0014fe563a42e2d8",
         }
-        self.assertEqual(set(self.sections), set(expected))
-        self.assertEqual(set(PINS["changed_files"]), set(expected))
+        self.assertEqual(set(self.sections), HELPER.AIRBENDER_CHANGED_PATHS)
+        self.assertEqual(set(PINS["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
+        self.assertEqual(len(self.sections), 31)
+        self.assertTrue(set(expected) < set(self.sections))
         for path, digest in expected.items():
             self.assertEqual(PINS["changed_files"][path]["postimage_sha256"], digest)
-        self.assertEqual(PINS["patched_tree"], "ce019f951b7cce9418c4e3fdea4d9fc16b7d943c")
+        self.assertEqual(PINS["patched_tree"], "e30d9332b55cbc6a5ea4cae71824e6a5a0858394")
         self.assertIsNone(PINS["changed_files"][self.module_path]["preimage_sha256"])
         self.assertEqual(hashlib.sha256(self.module.encode()).hexdigest(), expected[self.module_path])
         self.assertEqual(len(self.module.encode()), PINS["changed_files"][self.module_path]["postimage_size"])
-        # No circuit, verifier, security-parameter, or allocator-pool source is
-        # among the eight changed paths. The new module is carried by the patch.
+        # The original streaming/diagnostic subset remains byte-identical. The
+        # cumulative overlay now separately carries security and guest updates.
         self.assertFalse(any(path.startswith(("circuit_defs/", "verifier/", "full_statement_verifier/"))
-                             for path in self.sections))
+                             for path in expected))
 
     def test_per_word_geometry_conservative_monotone_release_and_fail_closed_finish(self):
         self.assertIn("max_it_instances: ram_words.div_ceil(cycles_per_circuit)", self.production)
@@ -372,8 +555,10 @@ class AirbenderPinTests(unittest.TestCase):
         self.assertIn("target: ProofTarget::RecursionUnified", integration)
         self.assertIn("ProgramProver::new_with_setup_summaries_and_program_bytes(", integration)
         self.assertEqual(set(PINS["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
-        self.assertFalse(any(relative.startswith(("circuit_defs/", "verifier/", "full_statement_verifier/"))
-                             for relative in PINS["changed_files"]))
+        self.assertIn("circuit_defs/unrolled_circuits/unified_reduced_machine/generated/quotient.rs",
+                      PINS["changed_files"])
+        # Upstream revision matching alone does not qualify these old release
+        # artifacts against the new cumulative security overlay and guest bytes.
         for section, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
             self.assertEqual(metadata["app"][section]["sha256"], HELPER.sha256(ROOT / relative))
             self.assertEqual(metadata["app"][section]["size_bytes"], (ROOT / relative).stat().st_size)
@@ -461,7 +646,7 @@ class AirbenderPinTests(unittest.TestCase):
             root = Path(temporary)
             with patch.object(HELPER, "checked_hash") as hashes:
                 HELPER.check_airbender_preimages(root, PINS)
-                self.assertEqual(hashes.call_count, 6)
+                self.assertEqual(hashes.call_count, 29)
                 for relative, row in PINS["changed_files"].items():
                     if row["preimage_sha256"] is not None:
                         hashes.assert_any_call(root / relative, row["preimage_sha256"])
@@ -638,6 +823,20 @@ class WrapperPinTests(unittest.TestCase):
             "    }",
             "}",
             "",
+            "    let expected_proof_config = RiscWrapper::get_proof_config();",
+            "    verifier.verify::<RiscWrapperTreeHasher, RiscWrapperTranscript, NoPow>(",
+            "        (),",
+            "        vk,",
+            "        proof,",
+            "        &expected_proof_config,",
+            "    )",
+            "    let expected_proof_config = CompressionCircuit::get_proof_config();",
+            "    verifier.verify::<CompressionTreeHasher, CompressionTranscript, NoPow>(",
+            "        (),",
+            "        vk,",
+            "        proof,",
+            "        &expected_proof_config,",
+            "    )",
         ])
         rng = next(chunk for chunk in chunks if "a/wrapper/src/buffered_os_rng.rs " in chunk.splitlines()[0])
         self.assertIn("pub(crate) struct BufferedOsRng", rng)
@@ -807,7 +1006,7 @@ if name == "cargo":
             git.assert_any_call(upstream, "apply", "--check", str(ROOT / "patches" / pins["patch_file"]))
             git.assert_any_call(upstream, "apply", str(ROOT / "patches" / pins["patch_file"]))
             git.assert_any_call(upstream, "add", "--", *sorted(pins["changed_files"]))
-            self.assertEqual(hashes.call_count, 3)
+            self.assertEqual(hashes.call_count, 6)
             verify.assert_called_once_with(upstream, pins)
             paths.assert_called_once_with(upstream, pins["upstream_packages"])
             self.assertEqual(marker.read_bytes(), b"source must remain unchanged")
@@ -879,7 +1078,8 @@ class CommandTests(unittest.TestCase):
 
 
 class WrapperCpuIntegrationTests(unittest.TestCase):
-    def exercise(self, temporary, *, reject_reverification=False, reject_tooling=False, cargo_exit_code=0):
+    def exercise(self, temporary, *, reject_reverification=False, reject_tooling=False,
+                 reject_crypto_reverification=False, reject_crypto_tooling=False, cargo_exit_code=0):
         """Test CPU orchestration with real snapshots/records and mocked external tools."""
         source = Path(temporary).resolve()
         (source / "crates/example/src").mkdir(parents=True)
@@ -892,6 +1092,8 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
         events = []
         pins = HELPER.load_wrapper_pins()
         paths = {"circuit_mersenne_field": "circuit_mersenne_field", "zkos-wrapper": "wrapper"}
+        crypto_pins = HELPER.load_crypto_pins()
+        crypto_paths = {name: "crates/" + name for name in HELPER.CRYPTO_PACKAGES}
         checked_hash = HELPER.checked_hash
 
         def check_local_or_external(path, digest):
@@ -899,6 +1101,8 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
                 return
             if reject_tooling and path == HELPER.WRAPPER_PIN_PATH:
                 raise ValueError("tooling changed after Cargo")
+            if reject_crypto_tooling and path == HELPER.CRYPTO_PIN_PATH:
+                raise ValueError("common crypto tooling changed after Cargo")
             checked_hash(path, digest)
 
         def prepare_wrapper(build, selected_pins):
@@ -913,11 +1117,24 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
             if reject_reverification:
                 raise ValueError("wrapper changed after Cargo")
 
+        def prepare_crypto(build, selected_pins):
+            self.assertEqual(selected_pins, crypto_pins)
+            events.append("prepare-crypto")
+            return build / "zksync-crypto", crypto_pins["upstream_url"], crypto_paths
+
+        def verify_crypto(root, selected_pins):
+            self.assertEqual(root.name, "zksync-crypto")
+            self.assertEqual(selected_pins, crypto_pins)
+            events.append("reverify-crypto")
+            if reject_crypto_reverification:
+                raise ValueError("common crypto changed after Cargo")
+
         def run(command, **kwargs):
             if command[0] == "cargo":
                 events.append("cargo")
                 manifest = HELPER.read_toml(Path(command[command.index("--manifest-path") + 1]))
                 self.assertEqual(set(manifest["patch"][pins["upstream_url"]]), set(paths))
+                self.assertEqual(set(manifest["patch"][crypto_pins["upstream_url"]]), set(crypto_paths))
                 self.assertIn("--no-default-features", command)
                 return unittest.mock.Mock(returncode=cargo_exit_code)
             self.assertEqual(command[:2], ["git", "clone"])
@@ -934,12 +1151,14 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
                 ("package_paths", {"side_effect": lambda root, packages: {p: p for p in packages}}),
                 ("prepare_wrapper", {"side_effect": prepare_wrapper}),
                 ("verify_wrapper", {"side_effect": verify_wrapper}),
+                ("prepare_crypto", {"side_effect": prepare_crypto}),
+                ("verify_crypto", {"side_effect": verify_crypto}),
             ):
                 stack.enter_context(patch.object(HELPER, name, **kwargs))
             stack.enter_context(patch.object(HELPER.subprocess, "run", side_effect=run))
             stack.enter_context(patch.object(HELPER.subprocess, "check_output", return_value="offline-test-version"))
             command = ["--cpu", "test-wrapper", "--", "cargo", "build", "--locked", "--no-default-features"]
-            if reject_reverification or reject_tooling:
+            if reject_reverification or reject_tooling or reject_crypto_reverification or reject_crypto_tooling:
                 with self.assertRaisesRegex(ValueError, "changed after Cargo"):
                     HELPER.main(command)
             else:
@@ -951,14 +1170,19 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
     def test_cpu_success_records_wrapper_closure_after_reverification(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary)
-            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
             record = json.loads(attestation.read_text())
             self.assertIs(record["inputs_reverified"], True)
             self.assertEqual(record["zkos_wrapper"]["inputs"], HELPER.wrapper_pins_metadata())
             self.assertEqual(record["zkos_wrapper"]["source"]["patched_tree"], HELPER.WRAPPER_PATCHED_TREE)
             self.assertEqual(set(record["zkos_wrapper"]["package_paths"]), set(HELPER.WRAPPER_PACKAGES))
+            self.assertEqual(record["zksync_crypto"]["inputs"], HELPER.crypto_pins_metadata())
+            self.assertEqual(record["zksync_crypto"]["source"]["patched_tree"], HELPER.CRYPTO_PATCHED_TREE)
+            self.assertEqual(set(record["zksync_crypto"]["package_paths"]), set(HELPER.CRYPTO_PACKAGES))
             for suffix in ("json", "patch"):
                 relative = "patches/zkos-wrapper-buffered-os-rng." + suffix
+                self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+                relative = "patches/zksync-crypto-native-fri-query-count." + suffix
                 self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             self.assertEqual(record, json.loads((build / "build-result.json").read_text()))
             self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(), (ROOT / "Cargo.lock").read_bytes())
@@ -968,14 +1192,14 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
     def test_cpu_reverification_failure_never_emits_success_attestation(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary, reject_reverification=True)
-            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper"])
             self.assertFalse(attestation.exists())
             self.assertFalse((build / "build-result.json").exists())
 
     def test_cpu_cargo_failure_remains_unverified(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary, cargo_exit_code=9)
-            self.assertEqual(events, ["prepare-wrapper", "cargo"])
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo"])
             self.assertFalse(attestation.exists())
             record = json.loads((build / "build-result.json").read_text())
             self.assertIs(record["inputs_reverified"], False)
@@ -984,7 +1208,21 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
     def test_cpu_tooling_drift_never_emits_success_attestation(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary, reject_tooling=True)
-            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
+            self.assertFalse(attestation.exists())
+            self.assertFalse((build / "build-result.json").exists())
+
+    def test_cpu_crypto_reverification_failure_never_emits_success_attestation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary, reject_crypto_reverification=True)
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
+            self.assertFalse(attestation.exists())
+            self.assertFalse((build / "build-result.json").exists())
+
+    def test_cpu_crypto_tooling_drift_never_emits_success_attestation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary, reject_crypto_tooling=True)
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
             self.assertFalse(attestation.exists())
             self.assertFalse((build / "build-result.json").exists())
 

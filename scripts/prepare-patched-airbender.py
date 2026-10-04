@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Build with reviewed Airbender and zkos-wrapper patches without altering source checkouts.
+"""Build with reviewed proving-source patches without altering source checkouts.
 
 Usage: cargo-with-patched-airbender.sh LABEL -- cargo build|test|run|check|clippy|metadata|tree --locked ...
 PROVER_SOURCE_DIR separates reviewed tooling from application source in release CI.
 AIRBENDER_SOURCE_DIR optionally supplies a local Git clone (never modified).
 ZKOS_WRAPPER_SOURCE_DIR optionally supplies the exact pinned wrapper Git clone.
+ZKSYNC_CRYPTO_SOURCE_DIR optionally supplies the exact pinned common crypto Git clone.
 AIRBENDER_BUILD_ATTESTATION names a fresh absolute success-only JSON output.
 The caller's working directory and absolute CARGO_TARGET_DIR are preserved. By
 default artifacts stay in the application source's target directory. Fresh source
@@ -32,6 +33,7 @@ except ImportError:  # Ubuntu 22.04: installed by apt, never fetched with pip.
 TOOLING_ROOT = Path(__file__).resolve().parents[1]
 PIN_PATH = TOOLING_ROOT / "patches/airbender-cuda-device-diagnostics.json"
 WRAPPER_PIN_PATH = TOOLING_ROOT / "patches/zkos-wrapper-buffered-os-rng.json"
+CRYPTO_PIN_PATH = TOOLING_ROOT / "patches/zksync-crypto-native-fri-query-count.json"
 SOURCE_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
                 "multiblock_batch.bin", "multiblock_batch.text")
 ALLOWED_COMMANDS = {"build", "test", "run", "check", "clippy", "metadata", "tree"}
@@ -48,22 +50,69 @@ WRAPPER_PACKAGES = {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"}
 WRAPPER_CHANGED_PATHS = {
     "wrapper/src/buffered_os_rng.rs", "wrapper/src/gpu/snark.rs", "wrapper/src/lib.rs",
     "wrapper/src/wrapper/mod.rs",
+    "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json",
+    "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.rs",
+    "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_quotient.rs",
 }
-WRAPPER_PATCHED_TREE = "b2081f4c987e22043f31ca5a9656f2a1655b06c3"
+WRAPPER_PATCHED_TREE = "b2697abcd4038e2c107917f4fd03f9832fa8c435"
 AIRBENDER_UPSTREAM = (
     "https://github.com/matter-labs/zksync-airbender",
     "03454c7a41053a4b88bb421e97fb9efe893a92f5",
     "3af54eb50c31d8e78575434c3f0ab4386891c131",
 )
 AIRBENDER_CHANGED_PATHS = {
+    "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/circuit_layout.rs",
+    "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/layout",
+    "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/quotient.rs",
+    "circuit_defs/unrolled_circuits/unified_reduced_machine/verifier/src/generated/circuit_layout.rs",
+    "circuit_defs/unrolled_circuits/unified_reduced_machine/verifier/src/generated/quotient.rs",
+    "cs/src/machine/machine_configurations/full_isa_no_exceptions/basic_state_transition.rs",
+    "cs/src/machine/machine_configurations/full_isa_no_exceptions/optimized_state_transition.rs",
+    "cs/src/machine/machine_configurations/minimal_no_exceptions/basic_state_transition.rs",
+    "cs/src/machine/machine_configurations/minimal_no_exceptions/optimized_state_transition.rs",
+    "cs/src/machine/ops/common_impls/csr_with_delegation.rs",
+    "cs/src/machine/ops/unrolled/reduced_machine_ops.rs",
     "execution_utils/src/lib.rs", "execution_utils/src/setup_summaries.rs",
     "execution_utils/src/unrolled_gpu.rs", "gpu_prover/src/execution/gpu_worker.rs",
     "gpu_prover/src/execution/cpu_worker.rs",
     "gpu_prover/src/execution/simulation_runner.rs",
     "gpu_prover/src/execution/empty_inits_and_teardowns.rs",
     "tools/cli/src/prover_utils.rs",
+    "tools/generator/src/unrolled_layouts.rs",
+    "tools/pow_config_generator/src/main.rs",
+    "tools/verifier/recursion_in_unified_layer.bin",
+    "tools/verifier/recursion_in_unified_layer.text",
+    "tools/verifier/recursion_in_unified_layer_security_100_bits.bin",
+    "tools/verifier/recursion_in_unified_layer_security_100_bits.text",
+    "tools/verifier/recursion_in_unrolled_layer.bin",
+    "tools/verifier/recursion_in_unrolled_layer.text",
+    "tools/verifier/recursion_in_unrolled_layer_security_100_bits.bin",
+    "tools/verifier/recursion_in_unrolled_layer_security_100_bits.text",
+    "verifier_common/src/lib.rs",
+    "verifier_common/src/pow_config_worst_constants.rs",
 }
-AIRBENDER_PATCHED_TREE = "ce019f951b7cce9418c4e3fdea4d9fc16b7d943c"
+AIRBENDER_PATCHED_TREE = "e30d9332b55cbc6a5ea4cae71824e6a5a0858394"
+CRYPTO_UPSTREAM = (
+    "https://github.com/matter-labs/zksync-crypto.git",
+    "bf2797e4ca13475bf797aa43e085389cdd6732f9",
+    "2708ca8cbe657e1480e18eece5664c6d27509cb8",
+)
+CRYPTO_LOCK_SOURCE = (
+    "git+" + CRYPTO_UPSTREAM[0] + "?branch=oh_for_wrapper#" + CRYPTO_UPSTREAM[1]
+)
+CRYPTO_PACKAGES = dict.fromkeys((
+    "boojum", "fflonk", "franklin-crypto", "rescue_poseidon", "snark_wrapper",
+    "zksync_bellman", "zksync_cs_derive", "zksync_ff", "zksync_ff_derive",
+    "zksync_pairing", "zksync_solidity_vk_codegen",
+), "0.32.10")
+CRYPTO_CHANGED_PATHS = {
+    "crates/boojum/src/cs/implementations/convenience.rs",
+    "crates/boojum/src/cs/implementations/cs.rs",
+    "crates/boojum/src/cs/implementations/verifier.rs",
+    "crates/boojum/src/gadgets/recursion/recursive_verifier.rs",
+    "crates/boojum/src/gadgets/sha256/mod.rs",
+}
+CRYPTO_PATCHED_TREE = "9b66bc2fe9179470c74897188f741f6b133c32a1"
 
 
 def require(condition, message):
@@ -188,16 +237,60 @@ def wrapper_pins_metadata(path=WRAPPER_PIN_PATH):
     return {"manifest_sha256": sha256(path), "pins": load_wrapper_pins(path)}
 
 
+def load_crypto_pins(path=CRYPTO_PIN_PATH):
+    pins = json_document(path)
+    require(isinstance(pins, dict) and set(pins) == {
+        "schema_version", "upstream_url", "upstream_commit", "upstream_tree",
+        "upstream_lock_source", "upstream_packages", "patch_file", "patch_sha256",
+        "changed_files", "patched_tree", "purpose",
+    }, "unknown common crypto pin fields")
+    require(type(pins["schema_version"]) is int and pins["schema_version"] == 1,
+            "unsupported common crypto pin schema")
+    require(tuple(pins[k] for k in ("upstream_url", "upstream_commit", "upstream_tree"))
+            == CRYPTO_UPSTREAM, "unknown common crypto upstream origin")
+    require(pins["upstream_lock_source"] == CRYPTO_LOCK_SOURCE,
+            "unknown common crypto lock source")
+    require(pins["upstream_packages"] == CRYPTO_PACKAGES,
+            "unknown common crypto package graph")
+    require(pins["patch_file"] == "zksync-crypto-native-fri-query-count.patch"
+            and isinstance(pins["patch_sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", pins["patch_sha256"])
+            and pins["patch_sha256"] != "0" * 64, "invalid common crypto patch identity")
+    checked_hash(path.parent / pins["patch_file"], pins["patch_sha256"])
+    require(pins["patched_tree"] == CRYPTO_PATCHED_TREE,
+            "unknown common crypto patched tree")
+    require(isinstance(pins["changed_files"], dict)
+            and set(pins["changed_files"]) == CRYPTO_CHANGED_PATHS,
+            "unknown common crypto source closure")
+    for relative, row in pins["changed_files"].items():
+        require(isinstance(row, dict) and set(row) == {
+            "preimage_sha256", "postimage_sha256", "postimage_size",
+        }, "unknown common crypto source fields")
+        require(all(isinstance(row[key], str) and re.fullmatch(r"[0-9a-f]{64}", row[key])
+                    and row[key] != "0" * 64 for key in ("preimage_sha256", "postimage_sha256")),
+                "invalid common crypto source digest")
+        require(type(row["postimage_size"]) is int and row["postimage_size"] > 0,
+                "invalid common crypto postimage size")
+    require(isinstance(pins["purpose"], str) and pins["purpose"], "missing common crypto purpose")
+    return pins
+
+
+def crypto_pins_metadata(path=CRYPTO_PIN_PATH):
+    return {"manifest_sha256": sha256(path), "pins": load_crypto_pins(path)}
+
+
 def run_git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
 
 
-def audit_lock(canonical, overlay, pins, wrapper_pins=None):
-    """Allow only reviewed Git-to-path identity changes for Airbender and wrapper crates."""
+def audit_lock(canonical, overlay, pins, wrapper_pins=None, crypto_pins=None):
+    """Allow only reviewed Git-to-path identities for all three common source graphs."""
     wrapper_pins = wrapper_pins or load_wrapper_pins()
+    crypto_pins = crypto_pins or load_crypto_pins()
     expected = copy.deepcopy(canonical)
     packages = []
     wrapper_packages = {}
+    crypto_packages = {}
     for package in expected["package"]:
         source = package.get("source", "")
         if "github.com/matter-labs/zksync-airbender" in source:
@@ -212,22 +305,32 @@ def audit_lock(canonical, overlay, pins, wrapper_pins=None):
                     "unknown wrapper package/version")
             wrapper_packages[name] = version
             del package["source"]
+        elif "github.com/matter-labs/zksync-crypto" in source and "zksync-crypto-gpu" not in source:
+            require(source == crypto_pins["upstream_lock_source"], "mixed common crypto sources in lock")
+            name, version = package["name"], package["version"]
+            require(name not in crypto_packages and crypto_pins["upstream_packages"].get(name) == version,
+                    "unknown common crypto package/version")
+            crypto_packages[name] = version
+            del package["source"]
     require(len(packages) == pins["upstream_package_count"], "unexpected Airbender package count")
     require(len({name for name, _ in packages}) == len(packages), "duplicate Airbender package name")
     require(wrapper_packages == wrapper_pins["upstream_packages"],
             "incomplete wrapper package graph")
+    require(crypto_packages == crypto_pins["upstream_packages"],
+            "incomplete common crypto package graph")
     require(expected == overlay,
-            "lock overlay changes more than Airbender/wrapper source identities")
+            "lock overlay changes more than common proving source identities")
     return dict(packages)
 
 
-def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=None):
+def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=None, crypto_pins=None):
     """Derive only the reviewed source-identity substitution from the selected lock.
 
     The checked-in overlay remains an immutable tooling reference, not a replacement
     for another compatible application's dependency graph. No Cargo resolution occurs.
     """
     wrapper_pins = wrapper_pins or load_wrapper_pins()
+    crypto_pins = crypto_pins or load_crypto_pins()
     require(source_lock.is_file() and not source_lock.is_symlink(), "invalid selected Cargo.lock")
     checked_hash(reference_overlay, pins["overlay_lock_sha256"])
     raw = source_lock.read_bytes()
@@ -239,14 +342,19 @@ def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=Non
         source = package.get("source", "")
         airbender = "github.com/matter-labs/zksync-airbender" in source
         wrapper = "github.com/matter-labs/zkos-wrapper" in source
-        if not airbender and not wrapper:
+        crypto = "github.com/matter-labs/zksync-crypto" in source and "zksync-crypto-gpu" not in source
+        if not airbender and not wrapper and not crypto:
             continue
         if airbender:
             require(source == pins["upstream_lock_source"], "mixed Airbender sources in lock")
-        else:
+        elif wrapper:
             require(source == wrapper_pins["upstream_lock_source"], "mixed wrapper sources in lock")
             require(wrapper_pins["upstream_packages"].get(package["name"]) == package["version"],
                     "unknown wrapper package/version")
+        else:
+            require(source == crypto_pins["upstream_lock_source"], "mixed common crypto sources in lock")
+            require(crypto_pins["upstream_packages"].get(package["name"]) == package["version"],
+                    "unknown common crypto package/version")
         lines = blocks[index].splitlines(keepends=True)
         # Cargo emits this simple quoted source assignment. Refuse alternate layouts
         # instead of guessing which bytes to remove from an application lock.
@@ -256,7 +364,8 @@ def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=Non
         del lines[matches[0]]
         blocks[index] = b"".join(lines)
     overlay_raw = b"".join(blocks)
-    packages = audit_lock(canonical, tomllib.loads(overlay_raw.decode("utf-8")), pins, wrapper_pins)
+    packages = audit_lock(canonical, tomllib.loads(overlay_raw.decode("utf-8")), pins,
+                          wrapper_pins, crypto_pins)
     for name, version in packages.items():
         matches = [item for item in reference["package"]
                    if item["name"] == name and item["version"] == version and "source" not in item]
@@ -265,12 +374,17 @@ def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=Non
         matches = [item for item in reference["package"]
                    if item["name"] == name and item["version"] == version and "source" not in item]
         require(len(matches) == 1, "selected wrapper package differs from tooling reference")
+    for name, version in crypto_pins["upstream_packages"].items():
+        matches = [item for item in reference["package"]
+                   if item["name"] == name and item["version"] == version and "source" not in item]
+        require(len(matches) == 1, "selected common crypto package differs from tooling reference")
     selection = {
-        "schema_version": 2, "derivation": "airbender-wrapper-source-identity-only-v2",
+        "schema_version": 3, "derivation": "common-proving-source-identity-only-v3",
         "canonical_lock_sha256": hashlib.sha256(raw).hexdigest(),
         "overlay_lock_sha256": hashlib.sha256(overlay_raw).hexdigest(),
         "airbender_packages": packages,
         "zkos_wrapper_packages": wrapper_pins["upstream_packages"],
+        "zksync_crypto_packages": crypto_pins["upstream_packages"],
     }
     return overlay_raw, selection
 
@@ -600,6 +714,50 @@ def prepare_wrapper(build, pins):
     return upstream, clone_source, paths
 
 
+def verify_crypto(upstream, pins):
+    require(run_git(upstream, "rev-parse", "HEAD") == pins["upstream_commit"],
+            "common crypto HEAD changed")
+    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"],
+            "common crypto upstream tree changed")
+    require(run_git(upstream, "diff", "--name-only", "HEAD").splitlines()
+            == sorted(pins["changed_files"]), "unexpected common crypto changed paths")
+    require(not run_git(upstream, "ls-files", "--others", "--exclude-standard"),
+            "unexpected common crypto untracked files")
+    require(not run_git(upstream, "diff", "--name-only"),
+            "common crypto changed after patch staging")
+    require(run_git(upstream, "write-tree") == pins["patched_tree"],
+            "common crypto patched tree mismatch")
+    for relative, row in pins["changed_files"].items():
+        path = upstream / relative
+        checked_hash(path, row["postimage_sha256"])
+        require(path.stat().st_size == row["postimage_size"],
+                "common crypto postimage size mismatch")
+
+
+def prepare_crypto(build, pins):
+    upstream = build / "zksync-crypto"
+    clone_source = os.environ.get("ZKSYNC_CRYPTO_SOURCE_DIR", pins["upstream_url"])
+    if "ZKSYNC_CRYPTO_SOURCE_DIR" in os.environ:
+        clone_source = str(Path(clone_source).resolve(strict=True))
+        require(Path(clone_source).is_dir(), "ZKSYNC_CRYPTO_SOURCE_DIR must be a Git directory")
+    subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
+                    clone_source, str(upstream)], check=True)
+    run_git(upstream, "checkout", "--quiet", "--detach", pins["upstream_commit"])
+    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"]
+            and not run_git(upstream, "status", "--porcelain"),
+            "dirty/wrong common crypto source baseline")
+    for relative, row in pins["changed_files"].items():
+        checked_hash(upstream / relative, row["preimage_sha256"])
+    patch = CRYPTO_PIN_PATH.parent / pins["patch_file"]
+    checked_hash(patch, pins["patch_sha256"])
+    run_git(upstream, "apply", "--check", str(patch))
+    run_git(upstream, "apply", str(patch))
+    run_git(upstream, "add", "--", *sorted(pins["changed_files"]))
+    verify_crypto(upstream, pins)
+    paths = package_paths(upstream, pins["upstream_packages"])
+    return upstream, clone_source, paths
+
+
 def write_json_exclusive(path, value):
     with path.open("x", encoding="utf-8") as destination:
         json.dump(value, destination, sort_keys=True, indent=2)
@@ -620,12 +778,14 @@ def main(argv):
     pins = load_airbender_pins()
     wrapper_pins = load_wrapper_pins()
     wrapper_inputs = wrapper_pins_metadata()
+    crypto_pins = load_crypto_pins()
+    crypto_inputs = crypto_pins_metadata()
     patch = PIN_PATH.parent / pins["patch_file"]
     overlay = PIN_PATH.parent / pins["overlay_lock_file"]
     checked_hash(patch, pins["patch_sha256"])
     checked_hash(overlay, pins["overlay_lock_sha256"])
     overlay_raw, selected_lock = selected_lock_overlay(
-        source / "Cargo.lock", overlay, pins, wrapper_pins)
+        source / "Cargo.lock", overlay, pins, wrapper_pins, crypto_pins)
     expected = selected_lock["airbender_packages"]
     attestation = os.environ.get("AIRBENDER_BUILD_ATTESTATION")
     if attestation:
@@ -658,6 +818,7 @@ def main(argv):
     verify_upstream(upstream, pins)
     paths = package_paths(upstream, expected)
     wrapper, wrapper_clone_source, wrapper_paths = prepare_wrapper(build, wrapper_pins)
+    crypto, crypto_clone_source, crypto_paths = prepare_crypto(build, crypto_pins)
     manifest = workspace / "Cargo.toml"
     application_manifest = read_toml(manifest)
     require("patch" not in application_manifest and "replace" not in application_manifest,
@@ -673,6 +834,10 @@ def main(argv):
         for name, relative in wrapper_paths.items():
             destination.write(json.dumps(name) + " = { path = "
                               + json.dumps(str(wrapper / relative)) + " }\n")
+        destination.write('\n[patch.' + json.dumps(crypto_pins["upstream_url"]) + ']\n')
+        for name, relative in crypto_paths.items():
+            destination.write(json.dumps(name) + " = { path = "
+                              + json.dumps(str(crypto / relative)) + " }\n")
     (workspace / "Cargo.lock").write_bytes(overlay_raw)
     record = {
         "schema_version": 1, "label": label, "pins": pins, "selected_lock": selected_lock,
@@ -684,9 +849,18 @@ def main(argv):
                        "patched_tree": wrapper_pins["patched_tree"]},
             "package_paths": wrapper_paths,
         },
+        "zksync_crypto": {
+            "inputs": crypto_inputs,
+            "source": {"clone_source": crypto_clone_source,
+                       "upstream_commit": crypto_pins["upstream_commit"],
+                       "upstream_tree": crypto_pins["upstream_tree"],
+                       "patched_tree": crypto_pins["patched_tree"]},
+            "package_paths": crypto_paths,
+        },
         "tooling_sha256": {str(path.relative_to(TOOLING_ROOT)): sha256(path) for path in
                            (PIN_PATH, patch, overlay, WRAPPER_PIN_PATH,
-                            WRAPPER_PIN_PATH.parent / wrapper_pins["patch_file"], Path(__file__).resolve(),
+                            WRAPPER_PIN_PATH.parent / wrapper_pins["patch_file"], CRYPTO_PIN_PATH,
+                            CRYPTO_PIN_PATH.parent / crypto_pins["patch_file"], Path(__file__).resolve(),
                             TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")},
         "application_source": str(source), "application_inputs_sha256": source_hashes,
         "workspace": str(workspace), "upstream_clone_source": clone_source,
@@ -715,6 +889,7 @@ def main(argv):
         return result.returncode
     verify_upstream(upstream, pins)
     verify_wrapper(wrapper, wrapper_pins)
+    verify_crypto(crypto, crypto_pins)
     checked_hash(workspace / "Cargo.lock", selected_lock["overlay_lock_sha256"])
     checked_hash(manifest, record["workspace_manifest_sha256"])
     for relative, expected_hash in source_hashes.items():

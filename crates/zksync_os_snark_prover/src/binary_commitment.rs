@@ -23,12 +23,16 @@ use zksync_airbender_execution_utils::verifier_binaries::recursion_artifact;
 use zksync_airbender_execution_utils::{RecursionArtifact, RecursionLayer};
 
 const BUNDLED_ARTIFACT: &str = include_str!("../artifacts/syscoin-v32-security100-commitment.json");
+// Upstream revisions are origins, not effective patched circuit identities.
+// These trees are reviewed in the repository's cumulative source manifests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
 const WRAPPER_CIRCUIT_REVISION: &str = "585595f145cb53a09a130706ca36f80ddcac3961";
+const AIRBENDER_PATCHED_TREE: &str = "e30d9332b55cbc6a5ea4cae71824e6a5a0858394";
+const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "b2697abcd4038e2c107917f4fd03f9832fa8c435";
 // The unified-verifier half is pinned independently, just as the app-chain half is
 // pinned by protocol_version. Regenerate and review both when the circuit changes.
 const UNIFIED_END_PARAMS: [u32; 8] = [
-    3441797293, 1347312019, 3816093676, 2915098529, 3451555131, 3884046816, 1487615163, 4112950744,
+    2585332216, 4028819937, 637847264, 175307493, 775066544, 3052378236, 2233121786, 181571852,
 ];
 
 /// How a cold wrapper obtains its app-bound circuit constants.
@@ -63,6 +67,8 @@ struct Artifact {
     commitment_algorithm: String,
     airbender_revision: String,
     wrapper_circuit_revision: String,
+    airbender_patched_tree: String,
+    wrapper_circuit_patched_tree: String,
     vk_hash: String,
     program_commitment: String,
     app: BinaryIdentity,
@@ -124,7 +130,7 @@ impl FileIdentity {
 impl Artifact {
     fn validate_metadata(&self, active_security_bits: u32) -> anyhow::Result<()> {
         ensure!(
-            self.schema_version == 1,
+            self.schema_version == 2,
             "unsupported commitment artifact schema"
         );
         ensure!(
@@ -153,6 +159,11 @@ impl Artifact {
             self.airbender_revision == AIRBENDER_REVISION
                 && self.wrapper_circuit_revision == WRAPPER_CIRCUIT_REVISION,
             "bundled commitment circuit revision mismatch"
+        );
+        ensure!(
+            self.airbender_patched_tree == AIRBENDER_PATCHED_TREE
+                && self.wrapper_circuit_patched_tree == WRAPPER_CIRCUIT_PATCHED_TREE,
+            "bundled commitment effective circuit source tree mismatch"
         );
         ensure!(
             self.end_params == UNIFIED_END_PARAMS,
@@ -284,7 +295,7 @@ mod tests {
     #[test]
     fn every_metadata_field_is_checked() {
         for (field, wrong) in [
-            ("schema_version", json!(2)),
+            ("schema_version", json!(1)),
             ("protocol_version", json!(31)),
             ("execution_version", json!(6)),
             ("proving_version", json!(7)),
@@ -294,6 +305,8 @@ mod tests {
             ("commitment_algorithm", json!("base-unrolled-v1")),
             ("airbender_revision", json!("changed")),
             ("wrapper_circuit_revision", json!("changed")),
+            ("airbender_patched_tree", json!("0".repeat(40))),
+            ("wrapper_circuit_patched_tree", json!("0".repeat(40))),
             ("vk_hash", json!(format!("0x{}", "0".repeat(64)))),
             ("program_commitment", json!(format!("0x{}", "0".repeat(64)))),
         ] {
@@ -306,6 +319,40 @@ mod tests {
             );
         }
         assert!(artifact().validate_metadata(80).is_err());
+    }
+
+    #[test]
+    fn old_schema_and_wrong_effective_source_trees_fail_closed() {
+        // Metadata-only fixtures do not qualify cached commitment words or guest
+        // bytes. The full bundle tests require regenerated release artifacts.
+        let mut canonical: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
+        canonical["schema_version"] = json!(2);
+        canonical["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
+        canonical["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
+        serde_json::from_value::<Artifact>(canonical.clone())
+            .unwrap()
+            .validate_metadata(100)
+            .unwrap();
+
+        let mut old_schema = canonical.clone();
+        old_schema["schema_version"] = json!(1);
+        assert!(serde_json::from_value::<Artifact>(old_schema)
+            .unwrap()
+            .validate_metadata(100)
+            .is_err());
+
+        for field in ["airbender_patched_tree", "wrapper_circuit_patched_tree"] {
+            let mut wrong_tree = canonical.clone();
+            wrong_tree[field] = json!("0".repeat(40));
+            assert!(serde_json::from_value::<Artifact>(wrong_tree)
+                .unwrap()
+                .validate_metadata(100)
+                .is_err());
+
+            let mut missing_tree = canonical.clone();
+            missing_tree.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Artifact>(missing_tree).is_err());
+        }
     }
 
     #[test]

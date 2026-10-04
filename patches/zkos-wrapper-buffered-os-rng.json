@@ -9,7 +9,7 @@
     "zkos-wrapper": "0.1.0"
   },
   "patch_file": "zkos-wrapper-buffered-os-rng.patch",
-  "patch_sha256": "2b0f8c8e1f61465a784cf994bf59d4335286c1c9be9e003b48e589e80bda938a",
+  "patch_sha256": "b7506adfe197dd51f582f16d7c907476eefa64d2dff48d1fb5486ede96adb9a9",
   "changed_files": {
     "wrapper/src/buffered_os_rng.rs": {
       "preimage_sha256": null,
@@ -21,10 +21,25 @@
       "postimage_sha256": "94d1278e314bf63b50a9bc0d6df0a016d3636b2fb271214bc5caeed4351a6fa5",
       "postimage_size": 9569
     },
+    "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json": {
+      "preimage_sha256": "90eb5cd87411cf0e2a3ede44c94c5b92ef8836dabe67bc72f672c67878df6a02",
+      "postimage_sha256": "0b4f4f602554f4736c218c46b66266409d9e7417b2fe5a1902115dae9bff07b1",
+      "postimage_size": 94481
+    },
+    "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.rs": {
+      "preimage_sha256": "e609d3119094027d03eb352b50769dad4ca441422ea4f2bdb0d30e0c843d750d",
+      "postimage_sha256": "2f43ac2abf49888c9573228ed42f51a433da0f8184a7e3951a679b0dd08cdbeb",
+      "postimage_size": 127896
+    },
+    "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_quotient.rs": {
+      "preimage_sha256": "34ffa22aa89ecd3720f7a5eee4f54f228c7a277319702f2d695be4a9023113d0",
+      "postimage_sha256": "73547566bc041cc13bd16ffdce5346d5d3d158c6059f24cebcf9e11e6d8b0e63",
+      "postimage_size": 413013
+    },
     "wrapper/src/lib.rs": {
       "preimage_sha256": "d11415f2de511cfdeaef708c8a670f6e7e46212dfbd7ff03dd54f61491557346",
-      "postimage_sha256": "e15c5d7d9aca906b5b70e20a2fe4a0412cd2c039600a8300df63cf43b913a552",
-      "postimage_size": 33111
+      "postimage_sha256": "24c395764feab76d30c04517780834e66e46574816886a4ceeed0a8996c81e76",
+      "postimage_size": 33374
     },
     "wrapper/src/wrapper/mod.rs": {
       "preimage_sha256": "812b4d5f7d35a9a46ed34846e00707da5953ee21a3d5c41d7fd5dad9220dba85",
@@ -32,6 +47,6 @@
       "postimage_size": 21052
     }
   },
-  "patched_tree": "b2081f4c987e22043f31ca5a9656f2a1655b06c3",
-  "purpose": "Use one private 64 KiB fail-closed OS-entropy buffer for CPU and GPU final-SNARK zero-knowledge padding, and expose authenticated precomputed binary commitment construction, cached commitment access, and the active security level. Callers must validate commitment provenance; constructor validation, setup and verification-key checks, security level, circuit domain, constraint layout, proof format, and randomness distribution are unchanged."
+  "patched_tree": "b2697abcd4038e2c107917f4fd03f9832fa8c435",
+  "purpose": "Cumulative pinned wrapper overlay: preserve the private fail-closed buffered OS entropy and authenticated precomputed commitment APIs byte-for-byte; import the regenerated unified constraint layout and quotient for the outer-execution CSR delegation guard; bind native wrapper and compression verification to their circuit-owned proof configuration. The circuit change requires fresh setup, verification-key, binary commitment, and release qualification; this source manifest does not attest generated setup artifacts, a deployed verifier, or a proof."
 }

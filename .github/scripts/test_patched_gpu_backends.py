@@ -89,11 +89,14 @@ class GpuLockTests(unittest.TestCase):
     def test_pure_metadata_api_does_not_execute_subprocess(self):
         with patch.object(HELPER.subprocess, "run") as run, patch.object(HELPER.subprocess, "check_output") as output:
             metadata = HELPER.gpu_backend_pins(HELPER.PIN_PATH, ROOT / "Cargo.lock")
+            self.assertEqual(metadata["selected_lock"]["schema_version"], 3)
             self.assertEqual(metadata["selected_lock"]["airbender_overlay_lock_sha256"], AIR["overlay_lock_sha256"])
             self.assertEqual(len(metadata["selected_lock"]["airbender_packages"]), 46)
             self.assertEqual(len(metadata["selected_lock"]["crypto_packages"]), 8)
             self.assertEqual(metadata["selected_lock"]["derivation"],
-                             "airbender-wrapper-and-crypto-gpu-source-identity-only-v2")
+                             "common-proving-and-crypto-gpu-source-identity-only-v3")
+            self.assertEqual(metadata["zksync_crypto"], BASE.crypto_pins_metadata())
+            self.assertEqual(metadata["selected_lock"]["zksync_crypto_packages"], BASE.CRYPTO_PACKAGES)
             self.assertEqual(metadata["selected_lock"]["zkos_wrapper_packages"],
                              {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"})
             run.assert_not_called()
@@ -102,14 +105,15 @@ class GpuLockTests(unittest.TestCase):
     def test_combined_lock_keeps_exact_wrapper_source_substitution(self):
         canonical = BASE.read_toml(ROOT / "Cargo.lock")
         combined = HELPER.tomllib.loads(HELPER.crypto_lock_overlay(self.raw(), PINS).decode())
-        expected_names = {"circuit_mersenne_field", "zkos-wrapper"}
+        expected_names = set(BASE.WRAPPER_PACKAGES) | set(BASE.CRYPTO_PACKAGES)
         originals = {p["name"]: p for p in canonical["package"] if p["name"] in expected_names}
         actual = {p["name"]: p for p in combined["package"] if p["name"] in expected_names}
         self.assertEqual(set(originals), expected_names)
         self.assertEqual(set(actual), expected_names)
         for name, original in originals.items():
             expected = copy.deepcopy(original)
-            self.assertEqual(expected.pop("source"), BASE.WRAPPER_LOCK_SOURCE)
+            self.assertEqual(expected.pop("source"), BASE.WRAPPER_LOCK_SOURCE if name in BASE.WRAPPER_PACKAGES
+                             else BASE.CRYPTO_LOCK_SOURCE)
             self.assertEqual(actual[name], expected)
 
     def test_gpu_metadata_rejects_incompatible_wrapper_source_or_version(self):
@@ -129,7 +133,8 @@ class GpuLockTests(unittest.TestCase):
 
 
 class WrapperBuildIntegrationTests(unittest.TestCase):
-    def exercise(self, temporary, *, reject_reverification=False, reject_tooling=False, cargo_exit_code=0):
+    def exercise(self, temporary, *, reject_reverification=False, reject_tooling=False,
+                 reject_crypto_reverification=False, reject_crypto_tooling=False, cargo_exit_code=0):
         """Exercise orchestration and real lock/manifest writes; fake external builds only."""
         source = Path(temporary).resolve()
         (source / "crates").mkdir()
@@ -139,6 +144,8 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
         events = []
         wrapper_paths = {"circuit_mersenne_field": "circuit_mersenne_field", "zkos-wrapper": "wrapper"}
         wrapper_pins = BASE.load_wrapper_pins()
+        crypto_pins = BASE.load_crypto_pins()
+        crypto_paths = {name: "crates/" + name for name in BASE.CRYPTO_PACKAGES}
         checked_hash = BASE.checked_hash
 
         def check_local_or_external(path, digest):
@@ -146,6 +153,8 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
                 return  # The independently tested source preparer owns this preimage check.
             if reject_tooling and path == BASE.WRAPPER_PIN_PATH:
                 raise ValueError("tooling changed after Cargo")
+            if reject_crypto_tooling and path == BASE.CRYPTO_PIN_PATH:
+                raise ValueError("common crypto tooling changed after Cargo")
             checked_hash(path, digest)
 
         def prepare_wrapper(build, pins):
@@ -160,11 +169,24 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
             if reject_reverification:
                 raise ValueError("wrapper changed after Cargo")
 
+        def prepare_crypto(build, pins):
+            self.assertEqual(pins, crypto_pins)
+            events.append("prepare-crypto")
+            return build / "zksync-crypto", pins["upstream_url"], crypto_paths
+
+        def verify_crypto(root, pins):
+            self.assertEqual(root.name, "zksync-crypto")
+            self.assertEqual(pins, crypto_pins)
+            events.append("reverify-crypto")
+            if reject_crypto_reverification:
+                raise ValueError("common crypto changed after Cargo")
+
         def run(command, **kwargs):
             if command[0] == "cargo":
                 events.append("cargo")
                 manifest = BASE.read_toml(Path(command[command.index("--manifest-path") + 1]))
                 self.assertEqual(set(manifest["patch"][wrapper_pins["upstream_url"]]), set(wrapper_paths))
+                self.assertEqual(set(manifest["patch"][crypto_pins["upstream_url"]]), set(crypto_paths))
                 return unittest.mock.Mock(returncode=cargo_exit_code)
             self.assertEqual(command[:2], ["git", "clone"])
             return unittest.mock.Mock(returncode=0)
@@ -183,6 +205,8 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
                 (BASE, "package_paths", {"side_effect": lambda root, packages: {p: p for p in packages}}),
                 (BASE, "prepare_wrapper", {"side_effect": prepare_wrapper}),
                 (BASE, "verify_wrapper", {"side_effect": verify_wrapper}),
+                (BASE, "prepare_crypto", {"side_effect": prepare_crypto}),
+                (BASE, "verify_crypto", {"side_effect": verify_crypto}),
                 (HELPER, "prepare_backend", {"return_value": {"tracked_inventory": {}}}),
                 (HELPER, "verify_backend", {}),
                 (HELPER, "bellman_library", {"return_value": {"library_sha256": "a" * 64}}),
@@ -191,7 +215,7 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
             ):
                 stack.enter_context(patch.object(target, name, **kwargs))
             command = ["test-wrapper", "--", "cargo", "build", "--locked"]
-            if reject_reverification or reject_tooling:
+            if reject_reverification or reject_tooling or reject_crypto_reverification or reject_crypto_tooling:
                 with self.assertRaisesRegex(ValueError, "changed after Cargo"):
                     HELPER.main(command)
             else:
@@ -203,14 +227,19 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
     def test_success_records_wrapper_closure_and_reverifies_after_cargo(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary)
-            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
             record = json.loads(attestation.read_text())
             self.assertIs(record["inputs_reverified"], True)
             self.assertEqual(record["zkos_wrapper"]["inputs"], BASE.wrapper_pins_metadata())
             self.assertEqual(record["zkos_wrapper"]["source"]["patched_tree"], BASE.WRAPPER_PATCHED_TREE)
             self.assertEqual(set(record["zkos_wrapper"]["package_paths"]), set(BASE.WRAPPER_PACKAGES))
+            self.assertEqual(record["zksync_crypto"]["inputs"], BASE.crypto_pins_metadata())
+            self.assertEqual(record["zksync_crypto"]["source"]["patched_tree"], BASE.CRYPTO_PATCHED_TREE)
+            self.assertEqual(set(record["zksync_crypto"]["package_paths"]), set(BASE.CRYPTO_PACKAGES))
             for suffix in ("json", "patch"):
                 relative = "patches/zkos-wrapper-buffered-os-rng." + suffix
+                self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+                relative = "patches/zksync-crypto-native-fri-query-count." + suffix
                 self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             self.assertEqual(record, json.loads((build / "build-result.json").read_text()))
             self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(), (ROOT / "Cargo.lock").read_bytes())
@@ -218,14 +247,14 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
     def test_post_cargo_wrapper_drift_never_emits_success_attestation(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary, reject_reverification=True)
-            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper"])
             self.assertFalse(attestation.exists())
             self.assertFalse((build / "build-result.json").exists())
 
     def test_cargo_failure_remains_unverified_and_has_no_success_attestation(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary, cargo_exit_code=9)
-            self.assertEqual(events, ["prepare-wrapper", "cargo"])
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo"])
             self.assertFalse(attestation.exists())
             record = json.loads((build / "build-result.json").read_text())
             self.assertIs(record["inputs_reverified"], False)
@@ -234,7 +263,21 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
     def test_tooling_drift_never_emits_success_attestation(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary, reject_tooling=True)
-            self.assertEqual(events, ["prepare-wrapper", "cargo", "reverify-wrapper"])
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
+            self.assertFalse(attestation.exists())
+            self.assertFalse((build / "build-result.json").exists())
+
+    def test_crypto_drift_never_emits_success_attestation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary, reject_crypto_reverification=True)
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
+            self.assertFalse(attestation.exists())
+            self.assertFalse((build / "build-result.json").exists())
+
+    def test_crypto_tooling_drift_never_emits_success_attestation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary, reject_crypto_tooling=True)
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
             self.assertFalse(attestation.exists())
             self.assertFalse((build / "build-result.json").exists())
 

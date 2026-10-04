@@ -347,10 +347,11 @@ builds the CPU image. Release archives distinguish `zksync_os_snark_prover-...-g
 Build and resource admission must be requalified for the selected backend before running it.
 
 <!-- SYSCOIN: This section documents the downstream deployment and batching policy. -->
-The workspace retains the upstream Matter Labs Airbender `v0.6.0-rc.2` versions and proving code.
-The build wrapper preserves the pinned startup-diagnostic compatibility patch; `--gpu32` adds
-the exact tested memory placement/setup changes without weakening proof checks or changing guest
-artifacts. The sole supported lane is protocol V32 / Execution
+The workspace retains the upstream Matter Labs Airbender `v0.6.0-rc.2` versions and applies
+the reviewed CSR execution guard and Security100 sizing/PoW corrections, including regenerated
+recursive guests. The build wrapper preserves the pinned startup-diagnostic compatibility patch;
+`--gpu32` adds the exact tested memory placement/setup changes without weakening proof checks.
+The sole supported lane is protocol V32 / Execution
 V7 / Proving V8. Every real SNARK
 job must therefore contain at least two compatible FRI proofs; the
 prover fails before merge or wrapper setup if the server violates that contract. Fake FRI and
@@ -370,17 +371,20 @@ aggregation hashes every input and would change the settlement public output.
 The release names belong to different repositories: `v0.6.0-rc.2` is the pinned Airbender proving
 stack, while the checked-in Syscoin guest below is based on final `zksync-os v0.4.0`.
 
-This V32 source integration binds the generated Syscoin app MD5, Security100 program
-commitment and app-bound VK `0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe`.
+This V32 source integration binds the unchanged Syscoin app MD5, newly measured Security100
+program commitment and app-bound VK
+`0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139`.
 The zero-VK rejection and all other production identity checks remain intact. Genuine
-FRI and CPU SNARK service proofs, native verification and canonical DA/commit/prove/execute
-receipts have been observed for an 11-batch mock frontier. Those retained results validate
-the tested source snapshot, not a newly built release commit or production deployment.
+FRI and CPU SNARK service proofs, native verification and DA/commit/prove/execute receipts
+were observed for an earlier 11-batch mock frontier using the previous
+`0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe` key and old recursion chain.
+Those retained results validate only that historical source snapshot, not the corrected
+circuits, new key, newly built release commit or production deployment.
 Sustained throughput/drain, migration, asset-bridge and recovery gates remain pending,
 and server/Era/prover identities must be rolled out together before a public cutover.
 
-The GPU32 memory optimization passed an offline final-wrapper experiment with the same
-Security100 VK: 303.82 seconds end to end, 29.91 GiB sampled GPU memory and 43.61 GiB sampled
+The GPU32 memory optimization passed an offline final-wrapper experiment with the previous
+Security100 `c1ab3d65…b7388fe` VK: 303.82 seconds end to end, 29.91 GiB sampled GPU memory and 43.61 GiB sampled
 host RSS on an RTX5090. This source now integrates its pinned Bellman CUDA and crypto-GPU
 overlays into the default SNARK/combined build recipes. A new ordinary service build,
 full-range service acceptance, native/DA/settlement verification and sustained performance
@@ -393,8 +397,8 @@ the reviewed Syscoin patch, source tree `6935489bdbc7b1ed31e608677d1b2418b10691b
 `0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6` and MD5
 `1bc285f1bbde995134d483c4e75ee204`; its paired `.text` is 1,200,064 bytes with SHA-256
 `9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a`. Its Security100
-program commitment is
-`0x1be0999eb16ad9235efc3c320a750afa496f7ee4cb9474926decbd539eeea674`.
+program commitment with the corrected recursive guests is
+`0x05c969ad8fcf8870cbb064c2947101ae27a5152c64467dcd7641f880485131de`.
 Only the paired runtime `multiblock_batch.bin` and `.text` are promoted here; duplicate
 ELF/guest-artifact outputs and task-local provenance are not release inputs. Rebuilding
 this draft must produce a new build attestation; retained candidate binary attestations

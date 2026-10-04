@@ -38,8 +38,8 @@ use zksync_sequencer_proof_client::{
 
 const BIN_SHA: &str = "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6";
 const TEXT_SHA: &str = "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a";
-const PROGRAM: &str = "0x1be0999eb16ad9235efc3c320a750afa496f7ee4cb9474926decbd539eeea674";
-const VK: &str = "0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe";
+const PROGRAM: &str = "0x05c969ad8fcf8870cbb064c2947101ae27a5152c64467dcd7641f880485131de";
+const VK: &str = "0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139";
 // Exact canonical GPU CRS in docker/prover-build-pins.json; never use CPU CRS here.
 const CRS_BYTES: u64 = 4_831_838_468;
 const CRS_SHA: &str = "90d1dea94da665d5741dcc6e9ffc1af23a29669f950a6d599a6ccfee4cfb81bd";
@@ -58,7 +58,8 @@ struct Args {
     fri_receipts: PathBuf,
     #[arg(long)]
     fri_receipts_sha256: String,
-    /// Trusted successful output of the independent old-source CPU verifier.
+    /// Trusted independent CPU verification for this circuit/program identity;
+    /// historical old-source verification receipts are not interchangeable.
     #[arg(long)]
     fri_verification: PathBuf,
     #[arg(long)]

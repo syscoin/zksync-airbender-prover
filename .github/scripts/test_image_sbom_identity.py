@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -198,6 +199,12 @@ class ImageIdentityTests(unittest.TestCase):
                          hashlib.sha256(wrapper_manifest.read_bytes()).hexdigest())
         self.assertEqual(result["zkos_wrapper"]["pins"]["upstream_packages"],
                          {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"})
+        crypto_manifest = ROOT / "patches/zksync-crypto-native-fri-query-count.json"
+        self.assertEqual(result["zksync_crypto"]["manifest_sha256"],
+                         hashlib.sha256(crypto_manifest.read_bytes()).hexdigest())
+        self.assertEqual(result["zksync_crypto"]["pins"]["upstream_commit"],
+                         "bf2797e4ca13475bf797aa43e085389cdd6732f9")
+        self.assertEqual(len(result["zksync_crypto"]["pins"]["upstream_packages"]), 11)
         cli_result = json.loads(self.cli("airbender-pins", str(manifest)))
         self.assertEqual(cli_result, result)
         record = identity.image_record(self.context, identity.COMPONENTS[0],
@@ -227,7 +234,12 @@ class ImageIdentityTests(unittest.TestCase):
         self.assertEqual(result["pins"]["crypto"]["upstream_commit"],
                          "845905b2aae49215e3d4ad0b71998b4a6b5abebf")
         selected = result["selected_lock"]
-        self.assertEqual(selected["derivation"], "airbender-wrapper-and-crypto-gpu-source-identity-only-v2")
+        self.assertEqual(selected["derivation"], "common-proving-and-crypto-gpu-source-identity-only-v3")
+        common = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json")
+        self.assertEqual(result["zksync_crypto"], common["zksync_crypto"])
+        self.assertEqual(selected["zksync_crypto_packages"], common["zksync_crypto"]["pins"]["upstream_packages"])
+        self.assertNotEqual(result["pins"]["crypto"]["upstream_commit"],
+                            result["zksync_crypto"]["pins"]["upstream_commit"])
         self.assertEqual(selected["canonical_lock_sha256"], hashlib.sha256((ROOT / "Cargo.lock").read_bytes()).hexdigest())
         self.assertNotEqual(selected["combined_overlay_lock_sha256"], selected["airbender_overlay_lock_sha256"])
         self.assertEqual(json.loads(self.cli("gpu-backend-pins", str(manifest), "--source-lock", str(ROOT / "Cargo.lock"))), result)
@@ -272,6 +284,36 @@ class ImageIdentityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     identity.gpu_backend_build_pins(directory / "gpu32-memory.json", ROOT / "Cargo.lock")
 
+    def test_common_crypto_input_tampering_fails_before_sbom_evidence(self):
+        for filename in ("zksync-crypto-native-fri-query-count.patch",
+                         "zksync-crypto-native-fri-query-count.json"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                for original in (ROOT / "patches").iterdir():
+                    if original.is_file():
+                        shutil.copyfile(original, directory / original.name)
+                if filename.endswith(".patch"):
+                    (directory / filename).write_bytes(b"changed common crypto source input")
+                else:
+                    pins = json.loads((directory / filename).read_text())
+                    # The common bf2797 graph must never be attributed to the GPU 845 graph.
+                    pins["upstream_commit"] = "845905b2aae49215e3d4ad0b71998b4a6b5abebf"
+                    (directory / filename).write_text(json.dumps(pins))
+                with self.assertRaises(ValueError):
+                    identity.airbender_build_pins(directory / "airbender-cuda-device-diagnostics.json")
+
+    def test_gpu_and_common_sbom_inputs_must_agree_on_common_crypto(self):
+        common = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json")
+        gpu = identity.gpu_backend_build_pins(ROOT / "patches/gpu32-memory.json")
+        record = identity.image_record(self.context, "zksync-os-prover-snark",
+                                       self.digests["zksync-os-prover-snark"])
+        for changed in ({}, {"manifest_sha256": "0" * 64}):
+            with self.subTest(changed=changed):
+                gpu["zksync_crypto"] = changed
+                with self.assertRaisesRegex(ValueError, "disagree on the common crypto"):
+                    identity.bind_sbom({"bomFormat": "CycloneDX", "specVersion": "1.6"},
+                                       record, common, gpu)
+
     def test_gpu_backend_cli_roundtrip_retains_only_gpu_role_origin(self):
         manifest = ROOT / "patches/gpu32-memory.json"
         gpu = identity.gpu_backend_build_pins(manifest, ROOT / "Cargo.lock")
@@ -292,6 +334,10 @@ class ImageIdentityTests(unittest.TestCase):
         reference = identity.airbender_build_pins(manifest)
         self.assertEqual(selected["pins"], reference["pins"])
         self.assertEqual(selected["manifest_sha256"], reference["manifest_sha256"])
+        self.assertEqual(selected["selected_lock"]["schema_version"], 3)
+        self.assertEqual(selected["selected_lock"]["derivation"], "common-proving-source-identity-only-v3")
+        self.assertEqual(selected["selected_lock"]["zksync_crypto_packages"],
+                         reference["zksync_crypto"]["pins"]["upstream_packages"])
         self.assertEqual(selected["selected_lock"]["canonical_lock_sha256"],
                          hashlib.sha256(lock.read_bytes()).hexdigest())
         self.assertNotEqual(selected["selected_lock"]["overlay_lock_sha256"],
@@ -316,13 +362,19 @@ class ImageIdentityTests(unittest.TestCase):
             self.assertIn("$airbender.zkos_wrapper.pins.upstream_commit", workflow)
             self.assertIn("$airbender.zkos_wrapper.pins.patch_sha256", workflow)
             self.assertIn("$airbender.zkos_wrapper.manifest_sha256", workflow)
+            self.assertIn("$airbender.zksync_crypto.pins.upstream_commit", workflow)
+            self.assertIn("$airbender.zksync_crypto.pins.patch_sha256", workflow)
+            self.assertIn("$airbender.zksync_crypto.manifest_sha256", workflow)
         self.assertIn(".zkos_wrapper.inputs == $expected.zkos_wrapper",
+                      (ROOT / ".github/workflows/release-bins.yml").read_text())
+        self.assertIn(".zksync_crypto.inputs == $expected.zksync_crypto",
                       (ROOT / ".github/workflows/release-bins.yml").read_text())
         self.assertIn("airbenderBuild: $airbender", stage)
         for workflow in (stage, (ROOT / ".github/workflows/release-bins.yml").read_text()):
             self.assertIn("$airbender.selected_lock.canonical_lock_sha256", workflow)
             self.assertIn("$airbender.selected_lock.overlay_lock_sha256", workflow)
-            self.assertIn('uri: "syscoin:generated-lock:airbender-wrapper-source-identity-only-v2"', workflow)
+            self.assertIn('uri: "syscoin:generated-lock:common-proving-source-identity-only-v3"', workflow)
+            self.assertIn('uri: "syscoin:generated-lock:common-proving-and-crypto-gpu-source-identity-only-v3"', workflow)
         self.assertIn("--airbender-pins .sbom-tooling/patches/airbender-cuda-device-diagnostics.json", reusable)
         self.assertIn("--source-lock .sbom-image-source/Cargo.lock", reusable)
         self.assertIn('"$(git -C .sbom-image-source rev-parse HEAD)" == "${SOURCE_SHA}"', reusable)
@@ -372,10 +424,13 @@ class ImageIdentityTests(unittest.TestCase):
         self.assertIn({"gitCommit": pins["zkos_wrapper"]["pins"]["upstream_commit"]}, digests)
         for value in (pins["zkos_wrapper"]["manifest_sha256"], pins["zkos_wrapper"]["pins"]["patch_sha256"]):
             self.assertIn({"sha256": value}, digests)
+        self.assertIn({"gitCommit": pins["zksync_crypto"]["pins"]["upstream_commit"]}, digests)
+        for value in (pins["zksync_crypto"]["manifest_sha256"], pins["zksync_crypto"]["pins"]["patch_sha256"]):
+            self.assertIn({"sha256": value}, digests)
         for key in ("canonical_lock_sha256", "overlay_lock_sha256"):
             self.assertIn({"sha256": pins["selected_lock"][key]}, digests)
         generated = next(item for item in definition["resolvedDependencies"]
-                         if item["uri"] == "syscoin:generated-lock:airbender-wrapper-source-identity-only-v2")
+                         if item["uri"] == "syscoin:generated-lock:common-proving-source-identity-only-v3")
         self.assertEqual(generated["digest"], {"sha256": pins["selected_lock"]["overlay_lock_sha256"]})
         for value in (gpu["manifest_sha256"], gpu["pins"]["crypto"]["patch_sha256"],
                       gpu["pins"]["bellman"]["patch_sha256"], gpu["selected_lock"]["combined_overlay_lock_sha256"]):
@@ -384,6 +439,105 @@ class ImageIdentityTests(unittest.TestCase):
             {"uri": source_uri, "digest": {"gitCommit": "c" * 40}}]
         self.assertNotEqual(subprocess.run(args, input=json.dumps(base), capture_output=True,
                                           text=True).returncode, 0)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is required")
+    def test_release_role_validation_rejects_missing_or_different_common_crypto(self):
+        workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
+        validation = workflow.split("          for role in combined fri snark snark-cpu; do\n", 1)[1]
+        expression = re.search(r"\n              '(.*?)' \\\n", validation, re.S).group(1)
+        pins = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json",
+                                             ROOT / "Cargo.lock")
+        record = {"cargo_exit_code": 0, "inputs_reverified": True, "label": "release-fri",
+                  "pins": pins["pins"], "selected_lock": pins["selected_lock"],
+                  "zkos_wrapper": {"inputs": pins["zkos_wrapper"]},
+                  "zksync_crypto": {"inputs": pins["zksync_crypto"]},
+                  "application_inputs_sha256": {"Cargo.lock": pins["selected_lock"]["canonical_lock_sha256"]}}
+        args = ["jq", "-e", "--argjson", "expected", json.dumps(pins),
+                "--arg", "role", "release-fri", expression]
+        self.assertEqual(subprocess.run(args, input=json.dumps(record), capture_output=True,
+                                        text=True).returncode, 0)
+        for crypto in (None, {}, {"inputs": {"manifest_sha256": "0" * 64}}):
+            with self.subTest(crypto=crypto):
+                record["zksync_crypto"] = crypto
+                self.assertNotEqual(subprocess.run(args, input=json.dumps(record), capture_output=True,
+                                                   text=True).returncode, 0)
+
+    def test_native_boojum_ci_uses_attested_workspace_and_preserves_failures(self):
+        lines = (ROOT / ".github/workflows/ci.yaml").read_text().splitlines()
+        step = lines.index("      - name: Run pinned native Boojum FRI query-count regression")
+        self.assertEqual(lines[step + 1], "        timeout-minutes: 20")
+        self.assertEqual(lines[step + 2], "        env:")
+        start = lines.index("        run: |", step) + 1
+        step_env = dict(line.strip().split(": ", 1) for line in lines[step + 3:start - 1])
+        step_env = {key: value.strip('"') for key, value in step_env.items()}
+        self.assertEqual(step_env, {"RUST_MIN_STACK": "33554432", "CARGO_PROFILE_DEV_DEBUG": "0",
+                                    "CARGO_BUILD_JOBS": "1"})
+        body = []
+        for line in lines[start:]:
+            if line.startswith("          "):
+                body.append(line[10:])
+            elif not line.strip():
+                body.append("")
+            else:
+                break
+        script = "\n".join(body)
+        self.assertIn('record["zksync_crypto"]["inputs"] == helper.crypto_pins_metadata()', script)
+        self.assertIn('record["cargo_exit_code"] == 0 and record["inputs_reverified"] is True', script)
+        self.assertIn('record["label"] == "ci-test"', script)
+        stub = r'''
+import json, os, sys
+from pathlib import Path
+name = Path(sys.argv[0]).name
+if name == "jq":
+    record = json.loads(Path(sys.argv[-1]).read_text())
+    print(record[sys.argv[-2].removeprefix(".")])
+    raise SystemExit(0)
+log = Path(os.environ["WORKFLOW_CALL_LOG"])
+if name == "python3":
+    source = sys.stdin.read()
+    assert "helper.verify_crypto" in source and "helper.load_crypto_pins" in source
+    event = {"kind": "verify", "crypto": sys.argv[-2], "record": sys.argv[-1]}
+    previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    status_key = "VERIFY_AFTER_EXIT_CODE" if previous else "VERIFY_BEFORE_EXIT_CODE"
+else:
+    assert name == "cargo"
+    event = {"kind": "cargo", "argv": sys.argv[1:], "target": os.environ["CARGO_TARGET_DIR"],
+             "jobs": os.environ["CARGO_BUILD_JOBS"]}
+    status_key = "BOOJUM_TEST_EXIT_CODE"
+with log.open("a") as output:
+    output.write(json.dumps(event) + "\n")
+raise SystemExit(int(os.environ[status_key]))
+'''
+        for cargo_status, before_status, after_status in ((0, 0, 0), (7, 0, 0), (0, 9, 0), (0, 0, 11)):
+            with self.subTest(cargo=cargo_status, before=before_status, after=after_status), \
+                    tempfile.TemporaryDirectory(prefix="native boojum ci ") as temporary:
+                root = Path(temporary)
+                commands = root / "commands"
+                commands.mkdir()
+                for name in ("jq", "python3", "cargo"):
+                    executable = commands / name
+                    executable.write_text("#!" + sys.executable + "\n" + stub)
+                    executable.chmod(0o700)
+                workspace, target = root / "snapshot build/prover", root / "target cache"
+                record = root / "ci-test-airbender-inputs.json"
+                record.write_text(json.dumps({"workspace": str(workspace), "cargo_target_dir": str(target)}))
+                log = root / "calls.jsonl"
+                result = subprocess.run(["bash", "-eu", "-c", script], cwd=ROOT, capture_output=True,
+                                        text=True, env={**os.environ, **step_env, "RUNNER_TEMP": str(root),
+                                        "PATH": str(commands) + os.pathsep + os.environ.get("PATH", ""),
+                                        "WORKFLOW_CALL_LOG": str(log), "BOOJUM_TEST_EXIT_CODE": str(cargo_status),
+                                        "VERIFY_BEFORE_EXIT_CODE": str(before_status),
+                                        "VERIFY_AFTER_EXIT_CODE": str(after_status)})
+                self.assertEqual(result.returncode, before_status or after_status or cargo_status, result.stderr)
+                crypto = workspace.parent / "zksync-crypto"
+                verify = {"kind": "verify", "crypto": str(crypto), "record": str(record)}
+                expected = [verify]
+                if not before_status:
+                    expected += [{"kind": "cargo", "target": str(target), "jobs": "1", "argv": [
+                        "test", "--manifest-path", str(crypto / "Cargo.toml"), "--locked", "-p", "boojum", "--lib",
+                        "cs::implementations::cs::test::prove_simple", "--", "--exact", "--nocapture", "--test-threads=1"]},
+                        verify]
+                self.assertEqual([json.loads(line) for line in log.read_text().splitlines()], expected)
 
 
 if __name__ == "__main__":

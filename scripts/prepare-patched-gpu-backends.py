@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Apply the common proving-source and exact GPU32 overlays in fresh checkouts.
 
-LABEL -- cargo COMMAND --locked ... composes the selected-lock-aware Airbender
-and zkos-wrapper overlays with the reviewed GPU graph. --prepare-bellman ABS_FRESH_DIR
+LABEL -- cargo COMMAND --locked ... composes the selected-lock-aware common
+proving-source overlays with the reviewed GPU graph. --prepare-bellman ABS_FRESH_DIR
 only creates an attested source tree; the caller builds its production library.
 No CUDA tests, proof, service, or automatic CPU fallback is run by this helper.
 """
@@ -204,20 +204,23 @@ def crypto_lock_overlay(raw, pins):
 def gpu_backend_pins(manifest, source_lock=None):
     """Pure SBOM metadata API; does not invoke Git, Cargo, CMake or a native module."""
     pins = load_pins(manifest)
-    result = {"manifest_sha256": sha256(manifest), "pins": pins}
+    base = base_helper()
+    result = {"manifest_sha256": sha256(manifest), "pins": pins,
+              "zksync_crypto": base.crypto_pins_metadata()}
     if source_lock is not None:
-        base = base_helper()
         air = base.load_airbender_pins()
         raw, selected = base.selected_lock_overlay(
             source_lock, base.PIN_PATH.parent / air["overlay_lock_file"], air)
         combined = crypto_lock_overlay(raw, pins)
         result["selected_lock"] = {
-            "derivation": "airbender-wrapper-and-crypto-gpu-source-identity-only-v2",
+            "schema_version": 3,
+            "derivation": "common-proving-and-crypto-gpu-source-identity-only-v3",
             "canonical_lock_sha256": selected["canonical_lock_sha256"],
             "airbender_overlay_lock_sha256": selected["overlay_lock_sha256"],
             "combined_overlay_lock_sha256": hashlib.sha256(combined).hexdigest(),
             "airbender_packages": selected["airbender_packages"],
             "zkos_wrapper_packages": selected["zkos_wrapper_packages"],
+            "zksync_crypto_packages": selected["zksync_crypto_packages"],
             "crypto_packages": CRYPTO_PACKAGES,
         }
     return result
@@ -354,10 +357,13 @@ def main(argv):
     air = base.load_airbender_pins()
     wrapper_pins = base.load_wrapper_pins()
     wrapper_inputs = base.wrapper_pins_metadata()
+    common_crypto_pins = base.load_crypto_pins()
+    common_crypto_inputs = base.crypto_pins_metadata()
     patch = base.PIN_PATH.parent / air["patch_file"]
     base.checked_hash(patch, air["patch_sha256"])
     overlay_raw, selected_lock = base.selected_lock_overlay(
-        source / "Cargo.lock", base.PIN_PATH.parent / air["overlay_lock_file"], air)
+        source / "Cargo.lock", base.PIN_PATH.parent / air["overlay_lock_file"], air,
+        wrapper_pins, common_crypto_pins)
     combined = crypto_lock_overlay(overlay_raw, pins)
     metadata = gpu_backend_pins(PIN_PATH, source / "Cargo.lock")
     require(metadata["selected_lock"]["canonical_lock_sha256"] == selected_lock["canonical_lock_sha256"]
@@ -395,6 +401,7 @@ def main(argv):
     base.verify_upstream(upstream, air)
     air_paths = base.package_paths(upstream, selected_lock["airbender_packages"])
     wrapper, wrapper_clone, wrapper_paths = base.prepare_wrapper(build, wrapper_pins)
+    common_crypto, common_crypto_clone, common_crypto_paths = base.prepare_crypto(build, common_crypto_pins)
     crypto = build / "crypto-gpu"
     crypto_record = prepare_backend(crypto, "crypto", pins, base)
     crypto_paths = base.package_paths(crypto, CRYPTO_PACKAGES)
@@ -405,6 +412,7 @@ def main(argv):
     with manifest.open("a", encoding="utf-8") as destination:
         for url, root, paths in ((air["upstream_url"], upstream, air_paths),
                                  (wrapper_pins["upstream_url"], wrapper, wrapper_paths),
+                                 (common_crypto_pins["upstream_url"], common_crypto, common_crypto_paths),
                                  (pins["crypto"]["upstream_url"], crypto, crypto_paths)):
             destination.write('\n[patch.' + json.dumps(url) + ']\n')
             for name, relative in paths.items():
@@ -414,6 +422,7 @@ def main(argv):
                base.PIN_PATH, patch, base.PIN_PATH.parent / air["overlay_lock_file"],
                base.WRAPPER_PIN_PATH,
                base.WRAPPER_PIN_PATH.parent / wrapper_pins["patch_file"],
+               base.CRYPTO_PIN_PATH, base.CRYPTO_PIN_PATH.parent / common_crypto_pins["patch_file"],
                Path(__file__).resolve(), TOOLING_ROOT / "scripts/prepare-patched-airbender.py",
                TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")
     record = {
@@ -425,6 +434,14 @@ def main(argv):
                        "upstream_tree": wrapper_pins["upstream_tree"],
                        "patched_tree": wrapper_pins["patched_tree"]},
             "package_paths": wrapper_paths,
+        },
+        "zksync_crypto": {
+            "inputs": common_crypto_inputs,
+            "source": {"clone_source": common_crypto_clone,
+                       "upstream_commit": common_crypto_pins["upstream_commit"],
+                       "upstream_tree": common_crypto_pins["upstream_tree"],
+                       "patched_tree": common_crypto_pins["patched_tree"]},
+            "package_paths": common_crypto_paths,
         },
         "gpu_backend_overlay": {"inputs": metadata, "crypto_source": crypto_record, "bellman_native": native},
         "tooling_sha256": {str(p.relative_to(TOOLING_ROOT)): sha256(p) for p in tooling},
@@ -454,6 +471,7 @@ def main(argv):
         return result.returncode
     base.verify_upstream(upstream, air)
     base.verify_wrapper(wrapper, wrapper_pins)
+    base.verify_crypto(common_crypto, common_crypto_pins)
     verify_backend(crypto, "crypto", pins, base, crypto_record["tracked_inventory"], record_allowed=True)
     require(bellman_library(native_root, pins, base) == native, "Bellman native/source closure changed")
     base.checked_hash(workspace / "Cargo.lock", metadata["selected_lock"]["combined_overlay_lock_sha256"])

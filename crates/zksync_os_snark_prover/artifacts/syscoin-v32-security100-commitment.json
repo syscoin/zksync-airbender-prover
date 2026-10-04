@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "protocol_version": 32,
   "execution_version": 7,
   "proving_version": 8,
@@ -9,8 +9,10 @@
   "commitment_algorithm": "base-unrolled-unified-v1",
   "airbender_revision": "03454c7a41053a4b88bb421e97fb9efe893a92f5",
   "wrapper_circuit_revision": "585595f145cb53a09a130706ca36f80ddcac3961",
-  "vk_hash": "0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe",
-  "program_commitment": "0x1be0999eb16ad9235efc3c320a750afa496f7ee4cb9474926decbd539eeea674",
+  "airbender_patched_tree": "e30d9332b55cbc6a5ea4cae71824e6a5a0858394",
+  "wrapper_circuit_patched_tree": "b2697abcd4038e2c107917f4fd03f9832fa8c435",
+  "vk_hash": "0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139",
+  "program_commitment": "0x05c969ad8fcf8870cbb064c2947101ae27a5152c64467dcd7641f880485131de",
   "app": {
     "bin": {
       "size_bytes": 1329732,
@@ -24,23 +26,23 @@
   "recursion_unrolled": {
     "bin": {
       "size_bytes": 2314544,
-      "sha256": "bd9fc269381964d9ef5aa9ce88ee9e078445cd4483093a759508025e5a5b9bd2"
+      "sha256": "5d431fa8d14d15087d92c8fd17e8fb2f365ddc9b9a8948a7c459951d1ce6281e"
     },
     "text": {
       "size_bytes": 2274080,
-      "sha256": "63fddaddb77f57f802548e46ffe15a0a90d7fa6537c14ca3cda023e0959b1a03"
+      "sha256": "98d612e4b873c954e02bc1c7238d7661b047622557cb58f4665d7e90bd835c94"
     }
   },
   "recursion_unified": {
     "bin": {
-      "size_bytes": 1273464,
-      "sha256": "20d40ba936d428019be8e9ecfee1a237e7bf68f942bce8be0d0183ece4e6ff80"
+      "size_bytes": 1273824,
+      "sha256": "5615f2fe288acb291800b8fe833aa238068d5cf308e6cab9f2f71c1f72bcba2c"
     },
     "text": {
-      "size_bytes": 1241576,
-      "sha256": "3ef1dc44c5361f4a5f2811d56487c6e6434e153baa5a246aaf39f7541fee3060"
+      "size_bytes": 1241932,
+      "sha256": "d84b96f9354e02d1ecbaa6d7d47644295f019320c435de0b08c0718507a42ddc"
     }
   },
-  "end_params": [3441797293, 1347312019, 3816093676, 2915098529, 3451555131, 3884046816, 1487615163, 4112950744],
-  "aux_params": [467704222, 2976569635, 1593588786, 175442682, 1232043748, 3415504018, 1844231507, 2666440308]
+  "end_params": [2585332216, 4028819937, 637847264, 175307493, 775066544, 3052378236, 2233121786, 181571852],
+  "aux_params": [97085869, 2412742768, 3417334978, 2490433966, 665130284, 1682341325, 1984034944, 1213280734]
 }
