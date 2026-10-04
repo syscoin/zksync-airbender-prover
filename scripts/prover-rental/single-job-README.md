@@ -127,7 +127,7 @@ and GPU compact CRS for SNARK. FRI uses `crs_sha256: null`. These are immutable
 image inputs, not runtime fields a rental may choose. Both build-time and startup
 checks hash those files. The native workers additionally enforce their compiled
 app/program/VK constants. The compiled V8 candidate app-bound VK is
-`0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139`,
+`0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90`,
 bound to the reviewed guest tree
 `6935489bdbc7b1ed31e608677d1b2418b10691b5`; see the
 [registered proving identity](../../crates/protocol_version/src/lib.rs)

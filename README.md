@@ -373,7 +373,7 @@ stack, while the checked-in Syscoin guest below is based on final `zksync-os v0.
 
 This V32 source integration binds the unchanged Syscoin app MD5, newly measured Security100
 program commitment and app-bound VK
-`0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139`.
+`0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90`.
 The zero-VK rejection and all other production identity checks remain intact. Genuine
 FRI and CPU SNARK service proofs, native verification and DA/commit/prove/execute receipts
 were observed for an earlier 11-batch mock frontier using the previous
@@ -398,7 +398,7 @@ the reviewed Syscoin patch, source tree `6935489bdbc7b1ed31e608677d1b2418b10691b
 `1bc285f1bbde995134d483c4e75ee204`; its paired `.text` is 1,200,064 bytes with SHA-256
 `9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a`. Its Security100
 program commitment with the corrected recursive guests is
-`0x05c969ad8fcf8870cbb064c2947101ae27a5152c64467dcd7641f880485131de`.
+`0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94`.
 Only the paired runtime `multiblock_batch.bin` and `.text` are promoted here; duplicate
 ELF/guest-artifact outputs and task-local provenance are not release inputs. Rebuilding
 this draft must produce a new build attestation; retained candidate binary attestations
