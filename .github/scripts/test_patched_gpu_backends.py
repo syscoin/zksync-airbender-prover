@@ -301,6 +301,52 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(PINS["domain_log"], 25)
         self.assertEqual(PINS["polynomial_slots"], 29)
 
+    def test_shivini_verifier_uses_circuit_selected_proof_policy(self):
+        # The patched Boojum verifier requires an independently selected fourth
+        # argument. CircuitWrapper already selects all four circuit-family
+        # policies; the GPU adapter must not trust proof.proof_config instead.
+        relative = "crates/shivini/src/synthesis_utils.rs"
+        overlay = (ROOT / "patches/crypto-gpu32-memory.patch").read_text()
+        marker = "--- a/" + relative + "\n"
+        self.assertEqual(overlay.count(marker), 1)
+        self.assertEqual(overlay.split(marker)[1].split("--- a/")[0],
+            "+++ b/" + relative + "\n"
+            "@@ -151,3 +151,3 @@\n"
+            "         let verifier = self.get_verifier();\n"
+            "-        verifier.verify::<H, T, NoPow>(transcript_params, vk, proof)\n"
+            "+        verifier.verify::<H, T, NoPow>(transcript_params, vk, proof, &self.proof_config())\n"
+            "     }\n")
+        self.assertEqual(PINS["crypto"]["changed_files"][relative], {
+            "preimage_sha256": "ba2dd148846115572ef1d4fe2b0457fae1240a6207de580deef42926544ba692",
+            "postimage_sha256": "4823f5adab7569203b921d561fbee60cb00310ff1d8ab983b11e8db81a23782a",
+            "postimage_size": 26395,
+        })
+        self.assertIn(relative, HELPER.CHANGED_PATHS["crypto"])
+        self.assertEqual(PINS["crypto"]["patched_tree"], "1040bbdf8b4afe6d5bd505511196f1705c0e83c7")
+        self.assertEqual(HELPER.PATCHED_TREES["crypto"], PINS["crypto"]["patched_tree"])
+
+    def test_compression_verifier_uses_compression_selected_proof_policy(self):
+        # Verification uses the same source-selected compression-step policy
+        # as proving and setup generation, never policy copied from the proof.
+        relative = "crates/proof-compression/src/proof_system/boojum.rs"
+        overlay = (ROOT / "patches/crypto-gpu32-memory.patch").read_text()
+        marker = "--- a/" + relative + "\n"
+        self.assertEqual(overlay.count(marker), 1)
+        self.assertEqual(overlay.split(marker)[1],
+            "+++ b/" + relative + "\n"
+            "@@ -57,3 +57,4 @@\n"
+            "             vk,\n"
+            "             proof,\n"
+            "+            &CF::proof_config_for_compression_step(),\n"
+            "         )\n")
+        self.assertEqual(PINS["crypto"]["changed_files"][relative], {
+            "preimage_sha256": "8b626b89d46f52f0796db700bd83f797f05a833683924607f7997628f7f663ce",
+            "postimage_sha256": "c9279876b498f9566fb70dc27ba69a33c56727a18293d5a01fc14fe4cecc3ec9",
+            "postimage_size": 9477,
+        })
+        self.assertEqual(set(PINS["crypto"]["changed_files"]), HELPER.CHANGED_PATHS["crypto"])
+        self.assertEqual(len(HELPER.CHANGED_PATHS["crypto"]), 5)
+
     def test_patch_drift_zero_unknown_origins_and_domains_fail_closed(self):
         edits = [lambda p: p["crypto"].update(upstream_commit="f" * 40),
                  lambda p: p["bellman"].update(patch_sha256="0" * 64),

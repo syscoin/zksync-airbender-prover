@@ -75,11 +75,21 @@
         "postimage_sha256": "e56e825907979f891721108644fbab981d3ed7475685cedcf53a87ef47fc5f9f",
         "postimage_size": 23332,
         "preimage_sha256": "240a9ed8aa49a911446038e405f512b4772d7ed50f3e2092b90cbb7d2a095e0a"
+      },
+      "crates/proof-compression/src/proof_system/boojum.rs": {
+        "postimage_sha256": "c9279876b498f9566fb70dc27ba69a33c56727a18293d5a01fc14fe4cecc3ec9",
+        "postimage_size": 9477,
+        "preimage_sha256": "8b626b89d46f52f0796db700bd83f797f05a833683924607f7997628f7f663ce"
+      },
+      "crates/shivini/src/synthesis_utils.rs": {
+        "postimage_sha256": "4823f5adab7569203b921d561fbee60cb00310ff1d8ab983b11e8db81a23782a",
+        "postimage_size": 26395,
+        "preimage_sha256": "ba2dd148846115572ef1d4fe2b0457fae1240a6207de580deef42926544ba692"
       }
     },
-    "patched_tree": "8c754adf137ab81dd531100dc470f6c7d019920b",
+    "patched_tree": "1040bbdf8b4afe6d5bd505511196f1705c0e83c7",
     "patch_file": "crypto-gpu32-memory.patch",
-    "patch_sha256": "1c9811acb3ac699b4a0a16fcc60822ff1a395fe2acc3405e7132a1dda79e879c",
+    "patch_sha256": "67fc6c35207bb5144ac039f16c1fac2d131f6b8b0a62d85c40a54ea87972ebb5",
     "upstream_commit": "845905b2aae49215e3d4ad0b71998b4a6b5abebf",
     "upstream_edge_source": "git+https://github.com/matter-labs/zksync-crypto-gpu.git?branch=oh_for_wrapper",
     "upstream_lock_source": "git+https://github.com/matter-labs/zksync-crypto-gpu.git?branch=oh_for_wrapper#845905b2aae49215e3d4ad0b71998b4a6b5abebf",
