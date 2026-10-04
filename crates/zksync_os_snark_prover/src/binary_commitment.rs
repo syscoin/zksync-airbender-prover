@@ -27,12 +27,12 @@ const BUNDLED_ARTIFACT: &str = include_str!("../artifacts/syscoin-v32-security10
 // These trees are reviewed in the repository's cumulative source manifests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
 const WRAPPER_CIRCUIT_REVISION: &str = "585595f145cb53a09a130706ca36f80ddcac3961";
-const AIRBENDER_PATCHED_TREE: &str = "e30d9332b55cbc6a5ea4cae71824e6a5a0858394";
+const AIRBENDER_PATCHED_TREE: &str = "98a3e82a726bca322340ec675263a4533857250a";
 const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "b2697abcd4038e2c107917f4fd03f9832fa8c435";
 // The unified-verifier half is pinned independently, just as the app-chain half is
 // pinned by protocol_version. Regenerate and review both when the circuit changes.
 const UNIFIED_END_PARAMS: [u32; 8] = [
-    2585332216, 4028819937, 637847264, 175307493, 775066544, 3052378236, 2233121786, 181571852,
+    3172695763, 3196237043, 2833869376, 2972964775, 4030234005, 1813126596, 2687332117, 3052592912,
 ];
 
 /// How a cold wrapper obtains its app-bound circuit constants.

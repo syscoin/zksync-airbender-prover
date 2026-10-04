@@ -84,14 +84,12 @@ AIRBENDER_CHANGED_PATHS = {
     "tools/verifier/recursion_in_unified_layer.text",
     "tools/verifier/recursion_in_unified_layer_security_100_bits.bin",
     "tools/verifier/recursion_in_unified_layer_security_100_bits.text",
-    "tools/verifier/recursion_in_unrolled_layer.bin",
-    "tools/verifier/recursion_in_unrolled_layer.text",
     "tools/verifier/recursion_in_unrolled_layer_security_100_bits.bin",
     "tools/verifier/recursion_in_unrolled_layer_security_100_bits.text",
     "verifier_common/src/lib.rs",
     "verifier_common/src/pow_config_worst_constants.rs",
 }
-AIRBENDER_PATCHED_TREE = "e30d9332b55cbc6a5ea4cae71824e6a5a0858394"
+AIRBENDER_PATCHED_TREE = "98a3e82a726bca322340ec675263a4533857250a"
 CRYPTO_UPSTREAM = (
     "https://github.com/matter-labs/zksync-crypto.git",
     "bf2797e4ca13475bf797aa43e085389cdd6732f9",

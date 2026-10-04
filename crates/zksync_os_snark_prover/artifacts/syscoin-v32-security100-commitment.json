@@ -9,10 +9,10 @@
   "commitment_algorithm": "base-unrolled-unified-v1",
   "airbender_revision": "03454c7a41053a4b88bb421e97fb9efe893a92f5",
   "wrapper_circuit_revision": "585595f145cb53a09a130706ca36f80ddcac3961",
-  "airbender_patched_tree": "e30d9332b55cbc6a5ea4cae71824e6a5a0858394",
+  "airbender_patched_tree": "98a3e82a726bca322340ec675263a4533857250a",
   "wrapper_circuit_patched_tree": "b2697abcd4038e2c107917f4fd03f9832fa8c435",
-  "vk_hash": "0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139",
-  "program_commitment": "0x05c969ad8fcf8870cbb064c2947101ae27a5152c64467dcd7641f880485131de",
+  "vk_hash": "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90",
+  "program_commitment": "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94",
   "app": {
     "bin": {
       "size_bytes": 1329732,
@@ -26,23 +26,41 @@
   "recursion_unrolled": {
     "bin": {
       "size_bytes": 2314544,
-      "sha256": "5d431fa8d14d15087d92c8fd17e8fb2f365ddc9b9a8948a7c459951d1ce6281e"
+      "sha256": "1ee4c49901ffb1fdce540e778c7224b8c78718bc1a26788cd9876477a1b86a12"
     },
     "text": {
       "size_bytes": 2274080,
-      "sha256": "98d612e4b873c954e02bc1c7238d7661b047622557cb58f4665d7e90bd835c94"
+      "sha256": "9fbd823842541150daa1837ad4cad1a06e43793acfe02567b3594c50e090a17a"
     }
   },
   "recursion_unified": {
     "bin": {
       "size_bytes": 1273824,
-      "sha256": "5615f2fe288acb291800b8fe833aa238068d5cf308e6cab9f2f71c1f72bcba2c"
+      "sha256": "8fd324daf3e4bb1ebe0452ecb3897b0d222e28b44969db362a2a16c7ea23fdd1"
     },
     "text": {
       "size_bytes": 1241932,
-      "sha256": "d84b96f9354e02d1ecbaa6d7d47644295f019320c435de0b08c0718507a42ddc"
+      "sha256": "ff4477bbf731084207f46b847c76366628f3fc912f11f6b3374ae3e0e5884ef1"
     }
   },
-  "end_params": [2585332216, 4028819937, 637847264, 175307493, 775066544, 3052378236, 2233121786, 181571852],
-  "aux_params": [97085869, 2412742768, 3417334978, 2490433966, 665130284, 1682341325, 1984034944, 1213280734]
+  "end_params": [
+    3172695763,
+    3196237043,
+    2833869376,
+    2972964775,
+    4030234005,
+    1813126596,
+    2687332117,
+    3052592912
+  ],
+  "aux_params": [
+    149192261,
+    835771444,
+    163950109,
+    3003860415,
+    3964363145,
+    1015301364,
+    1602282946,
+    1423293844
+  ]
 }

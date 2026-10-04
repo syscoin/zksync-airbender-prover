@@ -378,7 +378,7 @@ class CommonCryptoOverlayTests(unittest.TestCase):
 class DiagnosticsPreservationTests(unittest.TestCase):
     def test_logger_patch_has_no_proving_changes(self):
         source = (ROOT / "patches/airbender-cuda-device-diagnostics.patch").read_text()
-        self.assertEqual(source.count("diff --git "), 31)
+        self.assertEqual(source.count("diff --git "), 29)
         source = next("diff --git " + section for section in source.split("diff --git ")
                       if section.startswith("a/gpu_prover/src/execution/gpu_worker.rs "))
         # Diff index IDs and hunk context changed when the cumulative patch was
@@ -427,11 +427,11 @@ class StreamedInitTeardownPatchTests(unittest.TestCase):
         }
         self.assertEqual(set(self.sections), HELPER.AIRBENDER_CHANGED_PATHS)
         self.assertEqual(set(PINS["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
-        self.assertEqual(len(self.sections), 31)
+        self.assertEqual(len(self.sections), 29)
         self.assertTrue(set(expected) < set(self.sections))
         for path, digest in expected.items():
             self.assertEqual(PINS["changed_files"][path]["postimage_sha256"], digest)
-        self.assertEqual(PINS["patched_tree"], "e30d9332b55cbc6a5ea4cae71824e6a5a0858394")
+        self.assertEqual(PINS["patched_tree"], "98a3e82a726bca322340ec675263a4533857250a")
         self.assertIsNone(PINS["changed_files"][self.module_path]["preimage_sha256"])
         self.assertEqual(hashlib.sha256(self.module.encode()).hexdigest(), expected[self.module_path])
         self.assertEqual(len(self.module.encode()), PINS["changed_files"][self.module_path]["postimage_size"])
@@ -646,7 +646,7 @@ class AirbenderPinTests(unittest.TestCase):
             root = Path(temporary)
             with patch.object(HELPER, "checked_hash") as hashes:
                 HELPER.check_airbender_preimages(root, PINS)
-                self.assertEqual(hashes.call_count, 29)
+                self.assertEqual(hashes.call_count, 27)
                 for relative, row in PINS["changed_files"].items():
                     if row["preimage_sha256"] is not None:
                         hashes.assert_any_call(root / relative, row["preimage_sha256"])

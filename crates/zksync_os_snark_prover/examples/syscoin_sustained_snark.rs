@@ -38,8 +38,8 @@ use zksync_sequencer_proof_client::{
 
 const BIN_SHA: &str = "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6";
 const TEXT_SHA: &str = "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a";
-const PROGRAM: &str = "0x05c969ad8fcf8870cbb064c2947101ae27a5152c64467dcd7641f880485131de";
-const VK: &str = "0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139";
+const PROGRAM: &str = "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94";
+const VK: &str = "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90";
 // Exact canonical GPU CRS in docker/prover-build-pins.json; never use CPU CRS here.
 const CRS_BYTES: u64 = 4_831_838_468;
 const CRS_SHA: &str = "90d1dea94da665d5741dcc6e9ffc1af23a29669f950a6d599a6ccfee4cfb81bd";
