@@ -37,6 +37,8 @@ readonly tooling_files=(
     patches/airbender.Cargo.lock
     patches/zkos-wrapper-buffered-os-rng.json
     patches/zkos-wrapper-buffered-os-rng.patch
+    patches/zksync-crypto-native-fri-query-count.json
+    patches/zksync-crypto-native-fri-query-count.patch
     patches/gpu32-memory.json
     patches/crypto-gpu32-memory.patch
     patches/bellman-gpu32-memory.patch
@@ -67,6 +69,8 @@ readonly tooling_data_files=(
     patches/airbender.Cargo.lock
     patches/zkos-wrapper-buffered-os-rng.json
     patches/zkos-wrapper-buffered-os-rng.patch
+    patches/zksync-crypto-native-fri-query-count.json
+    patches/zksync-crypto-native-fri-query-count.patch
     patches/gpu32-memory.json
     patches/crypto-gpu32-memory.patch
     patches/bellman-gpu32-memory.patch

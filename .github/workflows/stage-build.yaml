@@ -339,6 +339,8 @@ jobs:
                  else error("unknown prover image component") end) as $role_crs
               | if ($role_crs == null) != ($gpu_backend == null) then
                   error("GPU backend provenance does not match the built role") else . end
+              | if $gpu_backend != null and $gpu_backend.zksync_crypto != $airbender.zksync_crypto then
+                  error("GPU and common proving provenance disagree on common crypto") else . end
               | .buildDefinition.resolvedDependencies += [
                   {uri: $source_uri, digest: {gitCommit: $source_sha}},
                   {uri: $tooling_uri, digest: {gitCommit: $tooling_sha}},
@@ -349,8 +351,11 @@ jobs:
                   {uri: ("git+" + $airbender.zkos_wrapper.pins.upstream_url), digest: {gitCommit: $airbender.zkos_wrapper.pins.upstream_commit}},
                   {uri: ($tooling_uri + "/patches/zkos-wrapper-buffered-os-rng.json"), digest: {sha256: $airbender.zkos_wrapper.manifest_sha256}},
                   {uri: ($tooling_uri + "/patches/" + $airbender.zkos_wrapper.pins.patch_file), digest: {sha256: $airbender.zkos_wrapper.pins.patch_sha256}},
+                  {uri: ("git+" + $airbender.zksync_crypto.pins.upstream_url), digest: {gitCommit: $airbender.zksync_crypto.pins.upstream_commit}},
+                  {uri: ($tooling_uri + "/patches/zksync-crypto-native-fri-query-count.json"), digest: {sha256: $airbender.zksync_crypto.manifest_sha256}},
+                  {uri: ($tooling_uri + "/patches/" + $airbender.zksync_crypto.pins.patch_file), digest: {sha256: $airbender.zksync_crypto.pins.patch_sha256}},
                   {uri: ($source_uri + "/Cargo.lock"), digest: {sha256: $airbender.selected_lock.canonical_lock_sha256}},
-                  {uri: "syscoin:generated-lock:airbender-wrapper-source-identity-only-v2", digest: {sha256: $airbender.selected_lock.overlay_lock_sha256}}
+                  {uri: "syscoin:generated-lock:common-proving-source-identity-only-v3", digest: {sha256: $airbender.selected_lock.overlay_lock_sha256}}
                 ]
               | if $gpu_backend != null then
                   .buildDefinition.resolvedDependencies += [
@@ -359,7 +364,7 @@ jobs:
                     {uri: ($tooling_uri + "/patches/" + $gpu_backend.pins.bellman.patch_file), digest: {sha256: $gpu_backend.pins.bellman.patch_sha256}},
                     {uri: ("git+" + $gpu_backend.pins.crypto.upstream_url), digest: {gitCommit: $gpu_backend.pins.crypto.upstream_commit}},
                     {uri: ("git+" + $gpu_backend.pins.bellman.upstream_url), digest: {gitCommit: $gpu_backend.pins.bellman.upstream_commit}},
-                    {uri: "syscoin:generated-lock:airbender-wrapper-and-crypto-gpu-source-identity-only-v2", digest: {sha256: $gpu_backend.selected_lock.combined_overlay_lock_sha256}}
+                    {uri: "syscoin:generated-lock:common-proving-and-crypto-gpu-source-identity-only-v3", digest: {sha256: $gpu_backend.selected_lock.combined_overlay_lock_sha256}}
                   ]
                 else . end
               | if $component == "zksync-airbender-prover" or $component == "zksync-os-prover-snark" then

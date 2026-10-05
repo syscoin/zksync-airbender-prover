@@ -53,6 +53,12 @@ jobs:
       - name: Check isolated Airbender source overlay
         run: python3 -B .github/scripts/test_patched_airbender_build.py
 
+      - name: Check pinned wrapper test graph
+        run: python3 -B .github/scripts/test_run_pinned_wrapper_tests.py
+
+      - name: Check effective circuit identities in bundled caches
+        run: python3 -B .github/scripts/test_cache_provenance.py
+
       - name: Check isolated GPU32 backend source overlay
         run: python3 -B .github/scripts/test_patched_gpu_backends.py
 
@@ -73,38 +79,53 @@ jobs:
             bash scripts/cargo-with-patched-airbender.sh ci-test -- cargo test --locked --no-default-features
 
       # Dependency unit tests are not run by the application workspace test command.
-      # Reuse its verified, pinned source snapshot and target directory. The
-      # dependency's own workspace is required to resolve its dev-dependencies;
-      # the production build wrapper's package-selection policy stays unchanged.
+      # Reuse its verified, pinned sources and target directory in a disposable
+      # wrapper-owned workspace so dev-dependencies and all reviewed patches
+      # resolve together. Production manifests, locks and policy stay unchanged.
       - name: Run pinned wrapper RNG and commitment tests
         env:
           RUST_MIN_STACK: "33554432"
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
+          python3 -B .github/scripts/run_pinned_wrapper_tests.py \
+            "${RUNNER_TEMP}/ci-test-airbender-inputs.json"
+
+      # SYSCOIN: Exercise only the bounded 128-row, single-worker, NoPow fixture.
+      # The application test command does not run dependency unit tests.
+      - name: Run pinned native Boojum FRI query-count regression
+        timeout-minutes: 20
+        env:
+          RUST_MIN_STACK: "33554432"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_BUILD_JOBS: "1"
+        run: |
           record="${RUNNER_TEMP}/ci-test-airbender-inputs.json"
           workspace="$(jq -er '.workspace' "${record}")"
-          wrapper="$(dirname -- "${workspace}")/zkos-wrapper"
+          crypto="$(dirname -- "${workspace}")/zksync-crypto"
           target="$(jq -er '.cargo_target_dir' "${record}")"
-          verify_wrapper() {
-            python3 -B - "${wrapper}" <<'PY'
+          verify_crypto() {
+            python3 -B - "${crypto}" "${record}" <<'PY'
           import importlib.util
+          import json
           import sys
           from pathlib import Path
           spec = importlib.util.spec_from_file_location("patched_airbender", "scripts/prepare-patched-airbender.py")
           helper = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(helper)
-          helper.verify_wrapper(Path(sys.argv[1]), helper.load_wrapper_pins())
+          record = json.loads(Path(sys.argv[2]).read_text())
+          helper.require(record["cargo_exit_code"] == 0 and record["inputs_reverified"] is True
+                         and record["label"] == "ci-test", "CI application inputs were not verified")
+          helper.require(record["zksync_crypto"]["inputs"] == helper.crypto_pins_metadata(),
+                         "CI common crypto attestation differs from current pins")
+          helper.verify_crypto(Path(sys.argv[1]), helper.load_crypto_pins())
           PY
           }
-          verify_wrapper
+          verify_crypto
           test_status=0
-          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${wrapper}/Cargo.toml" \
-            --locked -p zkos-wrapper --lib buffered_os_rng::tests || test_status=$?
-          if [[ "${test_status}" -eq 0 ]]; then
-            CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${wrapper}/Cargo.toml" \
-              --locked -p zkos-wrapper --lib wrapper::tests::precomputed_commitment || test_status=$?
-          fi
-          verify_wrapper
+          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
+            --locked -p boojum --lib cs::implementations::cs::test::prove_simple \
+            -- --exact --nocapture --test-threads=1 || test_status=$?
+          verify_crypto
           exit "${test_status}"
 
 

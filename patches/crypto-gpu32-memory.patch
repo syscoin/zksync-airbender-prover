@@ -304,3 +304,17 @@
      }
  
      // GATE SETUP
+--- a/crates/shivini/src/synthesis_utils.rs
++++ b/crates/shivini/src/synthesis_utils.rs
+@@ -151,3 +151,3 @@
+         let verifier = self.get_verifier();
+-        verifier.verify::<H, T, NoPow>(transcript_params, vk, proof)
++        verifier.verify::<H, T, NoPow>(transcript_params, vk, proof, &self.proof_config())
+     }
+--- a/crates/proof-compression/src/proof_system/boojum.rs
++++ b/crates/proof-compression/src/proof_system/boojum.rs
+@@ -57,3 +57,4 @@
+             vk,
+             proof,
++            &CF::proof_config_for_compression_step(),
+         )

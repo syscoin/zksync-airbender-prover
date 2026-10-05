@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "upstream_url": "https://github.com/matter-labs/zksync-crypto.git",
+  "upstream_commit": "bf2797e4ca13475bf797aa43e085389cdd6732f9",
+  "upstream_tree": "2708ca8cbe657e1480e18eece5664c6d27509cb8",
+  "upstream_lock_source": "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9",
+  "upstream_packages": {
+    "boojum": "0.32.10",
+    "fflonk": "0.32.10",
+    "franklin-crypto": "0.32.10",
+    "rescue_poseidon": "0.32.10",
+    "snark_wrapper": "0.32.10",
+    "zksync_bellman": "0.32.10",
+    "zksync_cs_derive": "0.32.10",
+    "zksync_ff": "0.32.10",
+    "zksync_ff_derive": "0.32.10",
+    "zksync_pairing": "0.32.10",
+    "zksync_solidity_vk_codegen": "0.32.10"
+  },
+  "patch_file": "zksync-crypto-native-fri-query-count.patch",
+  "patch_sha256": "a2b6b1f7da72e30920d6502fe19bcba6c2c1bc07b46fce7897e05870ab1d53b2",
+  "changed_files": {
+    "crates/boojum/src/cs/implementations/convenience.rs": {
+      "preimage_sha256": "0492295bec1d8bf0bc969d00fc5faacd22e1971bc662d63efab2f72530b1c8aa",
+      "postimage_sha256": "b7d1a88610494e459becfa6efc65486f5036b3a1dc3eb4bf30a5be0676d635ea",
+      "postimage_size": 6839
+    },
+    "crates/boojum/src/cs/implementations/cs.rs": {
+      "preimage_sha256": "687d4c530bf58d5f596f2c97b042170a77cfc848aaf14842dfdf03120e0519e7",
+      "postimage_sha256": "973534858f3045a368e1ce6abc0a056003512352c9f47f412e4054099dc9b40d",
+      "postimage_size": 65146
+    },
+    "crates/boojum/src/cs/implementations/verifier.rs": {
+      "preimage_sha256": "3a80fd53c5498f38286cdfc7789394e6c8292b299f3dd626da2b3b2f56ac2b8a",
+      "postimage_sha256": "01de0920940f149d92940279b8eb5d57650d44d95163140179e4372a45ee871e",
+      "postimage_size": 105410
+    },
+    "crates/boojum/src/gadgets/recursion/recursive_verifier.rs": {
+      "preimage_sha256": "28cb08b0c1bbf43542b0da06a539559e03ddfd3ee11162a5ce9cd3e3e12bf2e4",
+      "postimage_sha256": "e2a7913d093a0c92fac29ed7b0fdf94ed34915ce77674910b3204ed2f2176648",
+      "postimage_size": 103702
+    },
+    "crates/boojum/src/gadgets/sha256/mod.rs": {
+      "preimage_sha256": "886af32ba3f07b47aab5ff1d83cf1b5f09a943eef33194cf1aaf14446a9b0e82",
+      "postimage_sha256": "93aaac6e73b746415b4e43d1bc0bd66da1eda8aec2ff5d850067141316e2bd1d",
+      "postimage_size": 19347
+    }
+  },
+  "patched_tree": "9b66bc2fe9179470c74897188f741f6b133c32a1",
+  "purpose": "Reject incorrect native FRI query counts and require a verifier-owned proof configuration, including security level and PoW bits; preserve the complete pinned common crypto graph in CPU and GPU builds."
+}

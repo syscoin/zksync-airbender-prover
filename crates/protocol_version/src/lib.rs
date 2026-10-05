@@ -83,10 +83,10 @@ struct BinMd5Sum(&'static str);
 // SYSCOIN: Keep the zero sentinel rejection even after binding this isolated candidate
 // to the reproducible guest and its successfully generated Security100 verification key.
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const SYSCOIN_VK_HASH: &str = "0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe";
+const SYSCOIN_VK_HASH: &str = "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90";
 const SYSCOIN_APP_MD5: &str = "1bc285f1bbde995134d483c4e75ee204";
 const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
-    0x1be0999e, 0xb16ad923, 0x5efc3c32, 0x0a750afa, 0x496f7ee4, 0xcb947492, 0x6decbd53, 0x9eeea674,
+    0x08e47e45, 0x31d0dc34, 0x09c5ae1d, 0xb30b45bf, 0xec4b6189, 0x3c8444f4, 0x5f80e5c2, 0x54d5bd94,
 ]);
 
 /// SYSCOIN: The sole canonical lane is protocol V32, Execution V7, Proving V8.
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(versions.vk_hashes(), vec![SYSCOIN_VK_HASH.to_owned()]);
         assert_eq!(
             SYSCOIN_VK_HASH,
-            "0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe"
+            "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90"
         );
         assert_eq!(
             versions.program_commitment_for(SYSCOIN_VK_HASH),
@@ -229,7 +229,21 @@ mod tests {
         );
         assert!(!versions.contains(ZERO_VK_HASH));
         assert!(!versions
+            .contains("0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139"));
+        assert!(!versions.supports_program(&ProgramCommitment([
+            0x05c969ad, 0x8fcf8870, 0xcbb064c2, 0x947101ae, 0x27a5152c, 0x64467dcd, 0x7641f880,
+            0x485131de,
+        ])));
+        assert!(!versions
             .contains("0x9f7576b911e7d3f528d49f894208682c81800814db9e3beac7fc3b1c4d626e7a"));
+        // The previously qualified key/chain remain historical, not a second
+        // supported lane after the circuit and shared PoW parameters changed.
+        assert!(!versions
+            .contains("0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe"));
+        assert!(!versions.supports_program(&ProgramCommitment([
+            0x1be0999e, 0xb16ad923, 0x5efc3c32, 0x0a750afa, 0x496f7ee4, 0xcb947492, 0x6decbd53,
+            0x9eeea674,
+        ])));
         assert!(!versions.supports_program(&ProgramCommitment([0; 8])));
     }
 
@@ -255,8 +269,8 @@ mod tests {
         assert_eq!(
             version.program_commitment.0,
             [
-                467704222, 2976569635, 1593588786, 175442682, 1232043748, 3415504018, 1844231507,
-                2666440308,
+                149192261, 835771444, 163950109, 3003860415, 3964363145, 1015301364, 1602282946,
+                1423293844,
             ]
         );
     }

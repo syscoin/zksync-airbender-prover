@@ -38,10 +38,10 @@ def parse_json(text):
 
 
 def airbender_build_pins(path, source_lock=None):
-    """Read the tooling-bound manifest and verify both adjacent immutable inputs."""
+    """Read the tooling-bound manifests and verify their adjacent immutable inputs."""
     require(path.is_file() and not path.is_symlink(), "invalid Airbender pin manifest")
     raw = path.read_bytes()
-    # SYSCOIN: Both CPU and GPU lanes use the same exact wrapper-source overlay.
+    # SYSCOIN: Both CPU and GPU lanes use the same wrapper and common-crypto overlays.
     # These are prepared build inputs, not a claim that the FRI-only binary links it.
     wrapper = Path(__file__).resolve().parents[2] / "scripts/prepare-patched-airbender.py"
     spec = importlib.util.spec_from_file_location("selected_airbender_lock", wrapper)
@@ -49,14 +49,17 @@ def airbender_build_pins(path, source_lock=None):
     exec(compile(wrapper.read_bytes(), str(wrapper), "exec"), helper.__dict__)
     pins = helper.load_airbender_pins(path)
     wrapper_manifest = path.parent / "zkos-wrapper-buffered-os-rng.json"
+    crypto_manifest = path.parent / "zksync-crypto-native-fri-query-count.json"
     result = {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "pins": pins,
-              "zkos_wrapper": helper.wrapper_pins_metadata(wrapper_manifest)}
+              "zkos_wrapper": helper.wrapper_pins_metadata(wrapper_manifest),
+              "zksync_crypto": helper.crypto_pins_metadata(crypto_manifest)}
     if source_lock is not None:
         # Use the same byte derivation and full semantic audit as the Cargo wrapper.
         # Tooling pins continue to identify immutable reference files; selected_lock
         # identifies the actual source and generated lock used by this build.
         _, result["selected_lock"] = helper.selected_lock_overlay(
-            source_lock, path.parent / pins["overlay_lock_file"], pins)
+            source_lock, path.parent / pins["overlay_lock_file"], pins,
+            result["zkos_wrapper"]["pins"], result["zksync_crypto"]["pins"])
     return result
 
 
@@ -165,6 +168,9 @@ def bind_sbom(bom, record, airbender=None, gpu_backend=None):
     if gpu_backend is not None:
         require(record["component"] in {"zksync-airbender-prover", "zksync-os-prover-snark"},
                 "GPU32 backend evidence cannot be attributed to the FRI-only image")
+        if airbender is not None:
+            require(gpu_backend.get("zksync_crypto") == airbender["zksync_crypto"],
+                    "GPU and common proving inputs disagree on the common crypto overlay")
         name = "io.syscoin.prover.gpu-backend-build.inputs"
         require(not any(isinstance(prop, dict) and prop.get("name") == name for prop in properties),
                 "SBOM already contains GPU backend build inputs")

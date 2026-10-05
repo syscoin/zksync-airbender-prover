@@ -1,0 +1,240 @@
+diff --git a/crates/boojum/src/cs/implementations/convenience.rs b/crates/boojum/src/cs/implementations/convenience.rs
+index 278fcc7..b2524cd 100644
+--- a/crates/boojum/src/cs/implementations/convenience.rs
++++ b/crates/boojum/src/cs/implementations/convenience.rs
+@@ -195,6 +195,7 @@ impl<
+     }
+ }
+ 
++/// `expected_proof_config` must come from verifier policy, independently of `proof`.
+ pub fn verify_circuit<
+     F: SmallField,
+     C: Circuit<F>,
+@@ -206,6 +207,7 @@ pub fn verify_circuit<
+     circuit: &C,
+     proof: &Proof<F, H, EXT>,
+     vk: &VerificationKey<F, H>,
++    expected_proof_config: &ProofConfig,
+     transcript_params: TR::TransciptParameters,
+ ) -> bool {
+     let builder_impl =
+@@ -216,5 +218,5 @@ pub fn verify_circuit<
+     let builder = circuit.configure_builder(builder);
+ 
+     let verifier = builder.build(());
+-    verifier.verify::<H, TR, POW>(transcript_params, vk, proof)
++    verifier.verify::<H, TR, POW>(transcript_params, vk, proof, expected_proof_config)
+ }
+diff --git a/crates/boojum/src/cs/implementations/cs.rs b/crates/boojum/src/cs/implementations/cs.rs
+index 6023624..9636b9f 100644
+--- a/crates/boojum/src/cs/implementations/cs.rs
++++ b/crates/boojum/src/cs/implementations/cs.rs
+@@ -1182,7 +1182,7 @@ mod test {
+             GoldilocksPoisedonTranscript,
+             GoldilocksPoseidonSponge<AbsorptionModeOverwrite>,
+             NoPow,
+-        >(&worker, proof_config, ());
++        >(&worker, proof_config.clone(), ());
+ 
+         let builder_impl = CsVerifierBuilder::<F, GoldilocksExt2>::new_from_parameters(geometry);
+         let builder = new_builder::<_, F>(builder_impl);
+@@ -1190,17 +1190,48 @@ mod test {
+         let builder = configure(builder);
+         let verifier = builder.build(());
+ 
+-        let is_valid = verifier.verify::<
+-            GoldilocksPoseidonSponge<AbsorptionModeOverwrite>,
+-            GoldilocksPoisedonTranscript,
+-            NoPow
+-        >(
+-            (),
+-            &vk,
+-            &proof,
++        let verify = |candidate| {
++            verifier.verify::<
++                GoldilocksPoseidonSponge<AbsorptionModeOverwrite>,
++                GoldilocksPoisedonTranscript,
++                NoPow,
++            >((), &vk, candidate, &proof_config)
++        };
++
++        assert!(verify(&proof), "the original proof must verify");
++        assert!(proof.queries_per_fri_repetition.len() > 1);
++
++        let mut empty_queries = proof.clone();
++        empty_queries.queries_per_fri_repetition.clear();
++        assert!(!verify(&empty_queries), "an empty FRI query list must fail");
++
++        let mut short_queries = proof.clone();
++        short_queries.queries_per_fri_repetition.pop();
++        assert!(!verify(&short_queries), "one missing FRI query must fail");
++
++        let mut excess_queries = proof.clone();
++        excess_queries
++            .queries_per_fri_repetition
++            .push(proof.queries_per_fri_repetition[0].clone());
++        assert!(!verify(&excess_queries), "an extra FRI query must fail");
++
++        let mut low_security = proof.clone();
++        low_security.proof_config.security_level = 1;
++        low_security.queries_per_fri_repetition.truncate(2);
++        assert!(
++            !verify(&low_security),
++            "the proof must not reduce its own FRI query requirement"
+         );
+ 
+-        assert!(is_valid);
++        let mut forged_pow = proof.clone();
++        forged_pow.proof_config.pow_bits = 99;
++        forged_pow.queries_per_fri_repetition.truncate(2);
++        assert!(
++            !verify(&forged_pow),
++            "the proof must not claim extra PoW to reduce FRI queries"
++        );
++
++        assert!(verify(&proof), "the original proof must still verify");
+     }
+ 
+     #[test]
+@@ -1342,7 +1373,7 @@ mod test {
+             GoldilocksPoisedonTranscript,
+             GoldilocksPoseidonSponge<AbsorptionModeOverwrite>,
+             NoPow,
+-        >(&worker, proof_config, ());
++        >(&worker, proof_config.clone(), ());
+ 
+         let builder_impl = CsVerifierBuilder::<F, GoldilocksExt2>::new_from_parameters(geometry);
+         let builder = new_builder::<_, F>(builder_impl);
+@@ -1358,6 +1389,7 @@ mod test {
+             (),
+             &vk,
+             &proof,
++            &proof_config,
+         );
+ 
+         assert!(is_valid);
+@@ -1443,7 +1475,7 @@ mod test {
+             GoldilocksPoisedonTranscript,
+             GoldilocksPoseidonSponge<AbsorptionModeOverwrite>,
+             NoPow,
+-        >(&worker, proof_config, ());
++        >(&worker, proof_config.clone(), ());
+ 
+         let builder_impl = CsVerifierBuilder::<F, GoldilocksExt2>::new_from_parameters(geometry);
+         let builder = new_builder::<_, F>(builder_impl);
+@@ -1459,6 +1491,7 @@ mod test {
+             (),
+             &vk,
+             &proof,
++            &proof_config,
+         );
+ 
+         assert!(is_valid);
+@@ -1661,6 +1694,7 @@ mod test {
+         let proof_config = ProofConfig {
+             fri_lde_factor: lde_factor_to_use,
+             pow_bits: 0,
++            security_level: 80,
+             ..Default::default()
+         };
+ 
+@@ -1673,7 +1707,7 @@ mod test {
+             GoldilocksPoisedonTranscript,
+             GoldilocksPoseidonSponge<AbsorptionModeOverwrite>,
+             NoPow,
+-        >(&worker, proof_config, ());
++        >(&worker, proof_config.clone(), ());
+ 
+         let builder_impl = CsVerifierBuilder::<F, GoldilocksExt2>::new_from_parameters(geometry);
+         let builder = new_builder::<_, F>(builder_impl);
+@@ -1688,6 +1722,7 @@ mod test {
+             (),
+             &vk,
+             &proof,
++            &proof_config,
+         );
+ 
+         assert!(is_valid);
+diff --git a/crates/boojum/src/cs/implementations/verifier.rs b/crates/boojum/src/cs/implementations/verifier.rs
+index 3539c1c..0c27187 100644
+--- a/crates/boojum/src/cs/implementations/verifier.rs
++++ b/crates/boojum/src/cs/implementations/verifier.rs
+@@ -1,4 +1,5 @@
+ use super::proof::Proof;
++use super::prover::ProofConfig;
+ use super::transcript::Transcript;
+ use super::*;
+ 
+@@ -885,6 +886,7 @@ impl<F: SmallField, EXT: FieldExtension<2, BaseField = F>> Verifier<F, EXT> {
+         )
+     }
+ 
++    /// `expected_proof_config` must come from verifier policy, independently of `proof`.
+     pub fn verify<
+         H: TreeHasher<F>,
+         TR: Transcript<F, CompatibleCap = H::Output>,
+@@ -894,7 +896,13 @@ impl<F: SmallField, EXT: FieldExtension<2, BaseField = F>> Verifier<F, EXT> {
+         transcript_params: TR::TransciptParameters,
+         vk: &VerificationKey<F, H>,
+         proof: &Proof<F, H, EXT>,
++        expected_proof_config: &ProofConfig,
+     ) -> bool {
++        if &proof.proof_config != expected_proof_config {
++            log!("Proof configuration differs from verifier expectation");
++            return false;
++        }
++
+         let mut transcript = TR::new(transcript_params);
+ 
+         if self.parameters != vk.fixed_parameters.parameters {
+@@ -2034,6 +2042,7 @@ impl<F: SmallField, EXT: FieldExtension<2, BaseField = F>> Verifier<F, EXT> {
+                 num_queries,
+                 proof.queries_per_fri_repetition.len(),
+             );
++            return false;
+         }
+ 
+         let base_oracle_depth = vk.fixed_parameters.base_oracles_depth();
+diff --git a/crates/boojum/src/gadgets/recursion/recursive_verifier.rs b/crates/boojum/src/gadgets/recursion/recursive_verifier.rs
+index aefc987..e708ecb 100644
+--- a/crates/boojum/src/gadgets/recursion/recursive_verifier.rs
++++ b/crates/boojum/src/gadgets/recursion/recursive_verifier.rs
+@@ -2369,7 +2369,15 @@ mod test {
+ 
+         let verifier = builder.build(());
+ 
+-        let is_valid_proof = verifier.verify::<H, TR, NoPow>((), &vk, &proof);
++        let expected_proof_config = ProofConfig {
++            fri_lde_factor: vk.fixed_parameters.fri_lde_factor,
++            merkle_tree_cap_size: vk.fixed_parameters.cap_size,
++            fri_folding_schedule: None,
++            security_level: 100,
++            pow_bits: 0,
++        };
++        let is_valid_proof =
++            verifier.verify::<H, TR, NoPow>((), &vk, &proof, &expected_proof_config);
+         assert!(is_valid_proof);
+ 
+         let builder_impl = CsRecursiveVerifierBuilder::<'_, F, Ext, _>::new_from_parameters(
+diff --git a/crates/boojum/src/gadgets/sha256/mod.rs b/crates/boojum/src/gadgets/sha256/mod.rs
+index 6156855..87142aa 100644
+--- a/crates/boojum/src/gadgets/sha256/mod.rs
++++ b/crates/boojum/src/gadgets/sha256/mod.rs
+@@ -527,7 +527,7 @@ mod test {
+             &setup,
+             &setup_tree,
+             &vk,
+-            prover_config,
++            prover_config.clone(),
+             (),
+         );
+ 
+@@ -539,7 +539,7 @@ mod test {
+         let builder = configure(builder);
+         let verifier = builder.build(());
+ 
+-        let is_valid = verifier.verify::<T, TR, NoPow>((), &vk, &proof);
++        let is_valid = verifier.verify::<T, TR, NoPow>((), &vk, &proof, &prover_config);
+ 
+         assert!(is_valid);
+     }

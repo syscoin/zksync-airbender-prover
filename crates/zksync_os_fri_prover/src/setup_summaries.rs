@@ -24,14 +24,17 @@ const BUNDLED_ARTIFACT: &[u8] =
     include_bytes!("../artifacts/syscoin-v32-security100-fri-setups.json");
 // Updated only after independent CPU derivation and a complete equality check.
 const BUNDLED_ARTIFACT_SHA256: &str =
-    "b48932a3f93d761bdc1df9c20e4d32de4462925adbe02843db4f012575b6c3a6";
+    "4193ac0cdd7e9a8bed3d42c4fec3a3f16f08f1677f454a4901fe97c0cdef82ae";
 const MAX_ARTIFACT_BYTES: usize = 1024 * 1024;
+// The revision records the upstream origin; the reviewed patched tree binds the
+// effective circuit source, including generated relations and recursive guests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
-const VK_HASH: &str = "0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe";
+const AIRBENDER_PATCHED_TREE: &str = "98a3e82a726bca322340ec675263a4533857250a";
+const VK_HASH: &str = "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90";
 const PROGRAM_COMMITMENT: &str =
-    "0x1be0999eb16ad9235efc3c320a750afa496f7ee4cb9474926decbd539eeea674";
+    "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94";
 const UNIFIED_END_PARAMS: [u32; 8] = [
-    3441797293, 1347312019, 3816093676, 2915098529, 3451555131, 3884046816, 1487615163, 4112950744,
+    3172695763, 3196237043, 2833869376, 2972964775, 4030234005, 1813126596, 2687332117, 3052592912,
 ];
 
 /// How a FRI worker obtains the three compact setup summaries.
@@ -114,6 +117,7 @@ struct Metadata {
     proof_target: String,
     setup_algorithm: String,
     airbender_revision: String,
+    airbender_patched_tree: String,
     circuit_identity: String,
     cap_size: usize,
     num_cosets: usize,
@@ -126,7 +130,7 @@ struct Metadata {
 
 fn canonical_metadata() -> Metadata {
     Metadata {
-        schema_version: 1,
+        schema_version: 2,
         protocol_version: 32,
         execution_version: 7,
         proving_version: 8,
@@ -134,6 +138,7 @@ fn canonical_metadata() -> Metadata {
         proof_target: "recursion-unified".to_owned(),
         setup_algorithm: "base-unrolled-unified-v1".to_owned(),
         airbender_revision: AIRBENDER_REVISION.to_owned(),
+        airbender_patched_tree: AIRBENDER_PATCHED_TREE.to_owned(),
         circuit_identity: "rv32im-unsigned-base/reduced-unrolled/reduced-unified-v1".to_owned(),
         cap_size: 64,
         num_cosets: 2,
@@ -152,21 +157,21 @@ fn canonical_metadata() -> Metadata {
         recursion_unrolled: BinaryIdentity {
             bin: FileIdentity::pinned(
                 2314544,
-                "bd9fc269381964d9ef5aa9ce88ee9e078445cd4483093a759508025e5a5b9bd2",
+                "1ee4c49901ffb1fdce540e778c7224b8c78718bc1a26788cd9876477a1b86a12",
             ),
             text: FileIdentity::pinned(
                 2274080,
-                "63fddaddb77f57f802548e46ffe15a0a90d7fa6537c14ca3cda023e0959b1a03",
+                "9fbd823842541150daa1837ad4cad1a06e43793acfe02567b3594c50e090a17a",
             ),
         },
         recursion_unified: BinaryIdentity {
             bin: FileIdentity::pinned(
-                1273464,
-                "20d40ba936d428019be8e9ecfee1a237e7bf68f942bce8be0d0183ece4e6ff80",
+                1273824,
+                "8fd324daf3e4bb1ebe0452ecb3897b0d222e28b44969db362a2a16c7ea23fdd1",
             ),
             text: FileIdentity::pinned(
-                1241576,
-                "3ef1dc44c5361f4a5f2811d56487c6e6434e153baa5a246aaf39f7541fee3060",
+                1241932,
+                "ff4477bbf731084207f46b847c76366628f3fc912f11f6b3374ae3e0e5884ef1",
             ),
         },
     }
@@ -174,6 +179,14 @@ fn canonical_metadata() -> Metadata {
 
 impl Metadata {
     fn validate(&self) -> anyhow::Result<()> {
+        ensure!(
+            self.schema_version == 2,
+            "unsupported FRI setup artifact schema"
+        );
+        ensure!(
+            self.airbender_patched_tree == AIRBENDER_PATCHED_TREE,
+            "bundled FRI setup effective Airbender source tree mismatch"
+        );
         ensure!(
             self == &canonical_metadata(),
             "bundled FRI setup metadata does not match the canonical release identities"
@@ -475,6 +488,27 @@ mod tests {
                 "accepted changed metadata {key}"
             );
         }
+    }
+
+    #[test]
+    fn old_schema_and_wrong_effective_source_tree_fail_closed() {
+        let canonical = canonical_metadata();
+        canonical.validate().unwrap();
+
+        let mut old_schema = canonical.clone();
+        old_schema.schema_version = 1;
+        assert!(old_schema.validate().is_err());
+
+        let mut wrong_tree = canonical.clone();
+        wrong_tree.airbender_patched_tree = "0".repeat(40);
+        assert!(wrong_tree.validate().is_err());
+
+        let mut missing_tree = serde_json::to_value(canonical).unwrap();
+        missing_tree
+            .as_object_mut()
+            .unwrap()
+            .remove("airbender_patched_tree");
+        assert!(serde_json::from_value::<Metadata>(missing_tree).is_err());
     }
 
     #[test]

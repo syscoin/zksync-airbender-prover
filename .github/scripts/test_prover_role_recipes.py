@@ -35,6 +35,8 @@ OVERLAY_FILES = (
     "patches/airbender.Cargo.lock",
     "patches/zkos-wrapper-buffered-os-rng.json",
     "patches/zkos-wrapper-buffered-os-rng.patch",
+    "patches/zksync-crypto-native-fri-query-count.json",
+    "patches/zksync-crypto-native-fri-query-count.patch",
 )
 GPU_OVERLAY_FILES = (
     "scripts/prepare-patched-gpu-backends.py",
@@ -246,13 +248,15 @@ class ProverRoleRecipeTests(unittest.TestCase):
 
     def test_fri_recipe_only_adds_required_common_overlay_inputs(self):
         path = "docker/zksync-os-prover-fri/Dockerfile"
-        # Apart from copying the two new common build inputs, preserve merged
+        # Apart from copying the two reviewed common-overlay input pairs, preserve merged
         # PR8/main 1b152e8 bytes. No FRI flags, runtime, or CUDA recipe may change.
         # This does not require an ancestor Git object in a shallow CI checkout.
         copy = b"COPY patches/zkos-wrapper-buffered-os-rng.json patches/zkos-wrapper-buffered-os-rng.patch ./patches/\n"
+        crypto_copy = b"COPY patches/zksync-crypto-native-fri-query-count.json patches/zksync-crypto-native-fri-query-count.patch ./patches/\n"
         raw = (ROOT / path).read_bytes()
         self.assertEqual(raw.count(copy), 1)
-        self.assertEqual(hashlib.sha256(raw.replace(copy, b"")).hexdigest(),
+        self.assertEqual(raw.count(crypto_copy), 1)
+        self.assertEqual(hashlib.sha256(raw.replace(copy, b"").replace(crypto_copy, b"")).hexdigest(),
                          "007eb0f396686d224c635b39fc505b497cb536dab40690f766dc016806e1d868")
 
     def test_gpu_routes_require_opt_in_overlay_and_no_cpu_cache_argument(self):

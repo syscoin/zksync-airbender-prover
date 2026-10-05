@@ -223,8 +223,909 @@ index 1a47997..055acb7 100644
          proving_assembly.finalize_to_size_log_2_with_randomization(
              finalization_hint.trailing_zeros() as usize,
              NUM_PADDING_TERMS,
+diff --git a/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json b/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json
+index 80e844d..a63adff 100644
+--- a/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json
++++ b/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json
+@@ -393,9 +393,9 @@
+     },
+     "scratch_space_columns_range": {
+       "start": 71,
+-      "num_elements": 35
++      "num_elements": 36
+     },
+-    "total_width": 106
++    "total_width": 107
+   },
+   "memory_layout": {
+     "shuffle_ram_inits_and_teardowns": [
+@@ -1771,7 +1771,7 @@
+             "WitnessSubtree": 35
+           },
+           {
+-            "WitnessSubtree": 85
++            "WitnessSubtree": 86
+           }
+         ]
+       ],
+@@ -1779,13 +1779,13 @@
+         [
+           1,
+           {
+-            "WitnessSubtree": 79
++            "WitnessSubtree": 80
+           }
+         ],
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 86
++            "WitnessSubtree": 87
+           }
+         ]
+       ],
+@@ -1799,7 +1799,7 @@
+             "WitnessSubtree": 35
+           },
+           {
+-            "WitnessSubtree": 80
++            "WitnessSubtree": 81
+           }
+         ]
+       ],
+@@ -1807,19 +1807,19 @@
+         [
+           1,
+           {
+-            "WitnessSubtree": 80
++            "WitnessSubtree": 81
+           }
+         ],
+         [
+           1,
+           {
+-            "WitnessSubtree": 81
++            "WitnessSubtree": 85
+           }
+         ],
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 87
++            "WitnessSubtree": 88
+           }
+         ]
+       ],
+@@ -1850,7 +1850,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 90
++            "WitnessSubtree": 91
+           }
+         ],
+         [
+@@ -1887,7 +1887,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 91
++            "WitnessSubtree": 92
+           }
+         ],
+         [
+@@ -1957,7 +1957,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 92
++            "WitnessSubtree": 93
+           }
+         ]
+       ],
+@@ -2007,7 +2007,7 @@
+             "WitnessSubtree": 35
+           },
+           {
+-            "WitnessSubtree": 92
++            "WitnessSubtree": 93
+           }
+         ],
+         [
+@@ -2051,13 +2051,13 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 93
++            "WitnessSubtree": 94
+           }
+         ],
+         [
+           2147418111,
+           {
+-            "WitnessSubtree": 94
++            "WitnessSubtree": 95
+           }
+         ]
+       ],
+@@ -2080,7 +2080,7 @@
+             "WitnessSubtree": 30
+           },
+           {
+-            "WitnessSubtree": 93
++            "WitnessSubtree": 94
+           }
+         ]
+       ],
+@@ -2104,7 +2104,7 @@
+             "WitnessSubtree": 30
+           },
+           {
+-            "WitnessSubtree": 94
++            "WitnessSubtree": 95
+           }
+         ]
+       ],
+@@ -2155,7 +2155,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 95
++            "WitnessSubtree": 96
+           }
+         ]
+       ],
+@@ -2177,7 +2177,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 96
++            "WitnessSubtree": 97
+           }
+         ]
+       ],
+@@ -2191,13 +2191,13 @@
+             "WitnessSubtree": 11
+           },
+           {
+-            "WitnessSubtree": 95
++            "WitnessSubtree": 96
+           }
+         ],
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 95
++            "WitnessSubtree": 96
+           },
+           {
+             "MemorySubtree": 16
+@@ -2215,13 +2215,13 @@
+             "WitnessSubtree": 12
+           },
+           {
+-            "WitnessSubtree": 95
++            "WitnessSubtree": 96
+           }
+         ],
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 95
++            "WitnessSubtree": 96
+           },
+           {
+             "MemorySubtree": 17
+@@ -2239,13 +2239,13 @@
+             "WitnessSubtree": 11
+           },
+           {
+-            "WitnessSubtree": 96
++            "WitnessSubtree": 97
+           }
+         ],
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 96
++            "WitnessSubtree": 97
+           },
+           {
+             "MemorySubtree": 16
+@@ -2263,13 +2263,13 @@
+             "WitnessSubtree": 12
+           },
+           {
+-            "WitnessSubtree": 96
++            "WitnessSubtree": 97
+           }
+         ],
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 96
++            "WitnessSubtree": 97
+           },
+           {
+             "MemorySubtree": 17
+@@ -2524,6 +2524,28 @@
+       ],
+       "constant_term": 0
+     },
++    {
++      "quadratic_terms": [
++        [
++          2147483646,
++          {
++            "MemorySubtree": 27
++          },
++          {
++            "MemorySubtree": 30
++          }
++        ]
++      ],
++      "linear_terms": [
++        [
++          1,
++          {
++            "MemorySubtree": 27
++          }
++        ]
++      ],
++      "constant_term": 0
++    },
+     {
+       "quadratic_terms": [
+         [
+@@ -2768,7 +2790,7 @@
+             "WitnessSubtree": 27
+           },
+           {
+-            "WitnessSubtree": 90
++            "WitnessSubtree": 91
+           }
+         ],
+         [
+@@ -2994,7 +3016,7 @@
+             "WitnessSubtree": 27
+           },
+           {
+-            "WitnessSubtree": 91
++            "WitnessSubtree": 92
+           }
+         ],
+         [
+@@ -3158,7 +3180,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 97
++            "WitnessSubtree": 98
+           }
+         ]
+       ],
+@@ -3180,7 +3202,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 98
++            "WitnessSubtree": 99
+           }
+         ]
+       ],
+@@ -3191,19 +3213,19 @@
+         [
+           1,
+           {
+-            "WitnessSubtree": 97
++            "WitnessSubtree": 98
+           },
+           {
+-            "WitnessSubtree": 99
++            "WitnessSubtree": 100
+           }
+         ],
+         [
+           1,
+           {
+-            "WitnessSubtree": 98
++            "WitnessSubtree": 99
+           },
+           {
+-            "WitnessSubtree": 99
++            "WitnessSubtree": 100
+           }
+         ]
+       ],
+@@ -3225,7 +3247,7 @@
+             "WitnessSubtree": 40
+           },
+           {
+-            "WitnessSubtree": 97
++            "WitnessSubtree": 98
+           }
+         ],
+         [
+@@ -3234,7 +3256,7 @@
+             "WitnessSubtree": 40
+           },
+           {
+-            "WitnessSubtree": 98
++            "WitnessSubtree": 99
+           }
+         ]
+       ],
+@@ -3303,7 +3325,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 77
++            "WitnessSubtree": 71
+           }
+         ]
+       ],
+@@ -3364,6 +3386,15 @@
+             "WitnessSubtree": 78
+           }
+         ],
++        [
++          1,
++          {
++            "WitnessSubtree": 31
++          },
++          {
++            "WitnessSubtree": 78
++          }
++        ],
+         [
+           1,
+           {
+@@ -3375,12 +3406,6 @@
+         ]
+       ],
+       "linear_terms": [
+-        [
+-          31,
+-          {
+-            "WitnessSubtree": 31
+-          }
+-        ],
+         [
+           2147483646,
+           {
+@@ -3443,7 +3468,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 78
++            "WitnessSubtree": 79
+           }
+         ],
+         [
+@@ -3504,7 +3529,7 @@
+           }
+         ],
+         [
+-          7,
++          47,
+           {
+             "WitnessSubtree": 31
+           }
+@@ -3698,7 +3723,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 79
++            "WitnessSubtree": 80
+           }
+         ],
+         [
+@@ -3756,7 +3781,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 80
++            "WitnessSubtree": 81
+           }
+         ],
+         [
+@@ -3909,7 +3934,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 81
++            "WitnessSubtree": 85
+           }
+         ]
+       ],
+@@ -3940,7 +3965,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 85
++            "WitnessSubtree": 86
+           }
+         ]
+       ],
+@@ -4048,7 +4073,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 88
++            "WitnessSubtree": 89
+           }
+         ]
+       ],
+@@ -4079,7 +4104,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 89
++            "WitnessSubtree": 90
+           }
+         ]
+       ],
+@@ -4219,7 +4244,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 86
++            "WitnessSubtree": 87
+           }
+         ],
+         [
+@@ -4228,7 +4253,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 88
++            "WitnessSubtree": 89
+           }
+         ],
+         [
+@@ -4237,13 +4262,13 @@
+             "WitnessSubtree": 80
+           },
+           {
+-            "WitnessSubtree": 95
++            "WitnessSubtree": 96
+           }
+         ],
+         [
+           1,
+           {
+-            "WitnessSubtree": 96
++            "WitnessSubtree": 97
+           },
+           {
+             "MemorySubtree": 13
+@@ -4254,7 +4279,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 100
++            "WitnessSubtree": 101
+           }
+         ]
+       ],
+@@ -4349,7 +4374,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 87
++            "WitnessSubtree": 88
+           }
+         ],
+         [
+@@ -4358,7 +4383,7 @@
+             "WitnessSubtree": 31
+           },
+           {
+-            "WitnessSubtree": 89
++            "WitnessSubtree": 90
+           }
+         ],
+         [
+@@ -4367,13 +4392,13 @@
+             "WitnessSubtree": 81
+           },
+           {
+-            "WitnessSubtree": 95
++            "WitnessSubtree": 96
+           }
+         ],
+         [
+           1,
+           {
+-            "WitnessSubtree": 96
++            "WitnessSubtree": 97
+           },
+           {
+             "MemorySubtree": 14
+@@ -4384,7 +4409,7 @@
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 101
++            "WitnessSubtree": 102
+           }
+         ]
+       ],
+@@ -4398,7 +4423,7 @@
+             "WitnessSubtree": 2
+           },
+           {
+-            "WitnessSubtree": 100
++            "WitnessSubtree": 101
+           }
+         ]
+       ],
+@@ -4406,13 +4431,13 @@
+         [
+           1,
+           {
+-            "WitnessSubtree": 100
++            "WitnessSubtree": 101
+           }
+         ],
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 102
++            "WitnessSubtree": 103
+           }
+         ]
+       ],
+@@ -4426,7 +4451,7 @@
+             "WitnessSubtree": 2
+           },
+           {
+-            "WitnessSubtree": 101
++            "WitnessSubtree": 102
+           }
+         ]
+       ],
+@@ -4434,13 +4459,13 @@
+         [
+           1,
+           {
+-            "WitnessSubtree": 101
++            "WitnessSubtree": 102
+           }
+         ],
+         [
+           2147483646,
+           {
+-            "WitnessSubtree": 103
++            "WitnessSubtree": 104
+           }
+         ]
+       ],
+@@ -4523,7 +4548,7 @@
+             "WitnessSubtree": 19
+           },
+           {
+-            "WitnessSubtree": 102
++            "WitnessSubtree": 103
+           }
+         ],
+         [
+@@ -4547,7 +4572,7 @@
+             "WitnessSubtree": 19
+           },
+           {
+-            "WitnessSubtree": 103
++            "WitnessSubtree": 104
+           }
+         ],
+         [
+@@ -5302,34 +5327,34 @@
+       "WitnessSubtree": 96
+     },
+     "87": {
+-      "MemorySubtree": 15
++      "WitnessSubtree": 97
+     },
+     "88": {
+-      "MemorySubtree": 22
++      "MemorySubtree": 15
+     },
+     "89": {
+-      "WitnessSubtree": 15
++      "MemorySubtree": 22
+     },
+     "90": {
+-      "WitnessSubtree": 16
++      "WitnessSubtree": 15
+     },
+     "91": {
+-      "MemorySubtree": 27
++      "WitnessSubtree": 16
+     },
+     "92": {
+-      "MemorySubtree": 29
++      "MemorySubtree": 27
+     },
+     "93": {
+-      "MemorySubtree": 28
++      "MemorySubtree": 29
+     },
+     "94": {
+-      "WitnessSubtree": 42
++      "MemorySubtree": 28
+     },
+     "95": {
+-      "WitnessSubtree": 43
++      "WitnessSubtree": 42
+     },
+     "96": {
+-      "WitnessSubtree": 97
++      "WitnessSubtree": 43
+     },
+     "97": {
+       "WitnessSubtree": 98
+@@ -5338,55 +5363,55 @@
+       "WitnessSubtree": 99
+     },
+     "99": {
+-      "WitnessSubtree": 55
++      "WitnessSubtree": 100
+     },
+     "100": {
+-      "WitnessSubtree": 56
++      "WitnessSubtree": 55
+     },
+     "101": {
+-      "WitnessSubtree": 57
++      "WitnessSubtree": 56
+     },
+     "102": {
+-      "WitnessSubtree": 58
++      "WitnessSubtree": 57
+     },
+     "103": {
+-      "WitnessSubtree": 59
++      "WitnessSubtree": 58
+     },
+     "104": {
+-      "WitnessSubtree": 60
++      "WitnessSubtree": 59
+     },
+     "105": {
+-      "WitnessSubtree": 61
++      "WitnessSubtree": 60
+     },
+     "106": {
+-      "WitnessSubtree": 62
++      "WitnessSubtree": 61
+     },
+     "107": {
+-      "WitnessSubtree": 63
++      "WitnessSubtree": 62
+     },
+     "108": {
+-      "WitnessSubtree": 64
++      "WitnessSubtree": 63
+     },
+     "109": {
+-      "WitnessSubtree": 65
++      "WitnessSubtree": 64
+     },
+     "110": {
+-      "WitnessSubtree": 66
++      "WitnessSubtree": 65
+     },
+     "111": {
+-      "WitnessSubtree": 67
++      "WitnessSubtree": 66
+     },
+     "112": {
+-      "WitnessSubtree": 68
++      "WitnessSubtree": 67
+     },
+     "113": {
+-      "WitnessSubtree": 69
++      "WitnessSubtree": 68
+     },
+     "114": {
+-      "WitnessSubtree": 70
++      "WitnessSubtree": 69
+     },
+     "115": {
+-      "WitnessSubtree": 100
++      "WitnessSubtree": 70
+     },
+     "116": {
+       "WitnessSubtree": 101
+@@ -5404,63 +5429,66 @@
+       "WitnessSubtree": 105
+     },
+     "121": {
+-      "WitnessSubtree": 17
++      "WitnessSubtree": 106
+     },
+     "122": {
+-      "WitnessSubtree": 18
++      "WitnessSubtree": 17
+     },
+     "123": {
+-      "WitnessSubtree": 44
++      "WitnessSubtree": 18
+     },
+     "124": {
+-      "WitnessSubtree": 45
++      "WitnessSubtree": 44
+     },
+     "125": {
+-      "MemorySubtree": 0
++      "WitnessSubtree": 45
+     },
+     "126": {
+-      "MemorySubtree": 1
++      "MemorySubtree": 0
+     },
+     "127": {
+-      "MemorySubtree": 2
++      "MemorySubtree": 1
+     },
+     "128": {
+-      "MemorySubtree": 3
++      "MemorySubtree": 2
+     },
+     "129": {
+-      "MemorySubtree": 4
++      "MemorySubtree": 3
+     },
+     "130": {
+-      "MemorySubtree": 5
++      "MemorySubtree": 4
+     },
+     "131": {
+-      "MemorySubtree": 6
++      "MemorySubtree": 5
+     },
+     "132": {
+-      "MemorySubtree": 7
++      "MemorySubtree": 6
+     },
+     "133": {
+-      "WitnessSubtree": 46
++      "MemorySubtree": 7
+     },
+     "134": {
+-      "MemorySubtree": 11
++      "WitnessSubtree": 46
+     },
+     "135": {
+-      "MemorySubtree": 12
++      "MemorySubtree": 11
+     },
+     "136": {
+-      "WitnessSubtree": 47
++      "MemorySubtree": 12
+     },
+     "137": {
+-      "MemorySubtree": 18
++      "WitnessSubtree": 47
+     },
+     "138": {
+-      "MemorySubtree": 19
++      "MemorySubtree": 18
+     },
+     "139": {
+-      "WitnessSubtree": 48
++      "MemorySubtree": 19
+     },
+     "140": {
++      "WitnessSubtree": 48
++    },
++    "141": {
+       "WitnessSubtree": 49
+     }
+   },
+@@ -5584,20 +5612,20 @@
+     5705985,
+     5705985,
+     5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985,
+-    5705985
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521,
++    5771521
+   ],
+-  "total_tables_size": 5705985
++  "total_tables_size": 5771521
+ }
+\ No newline at end of file
+diff --git a/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.rs b/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.rs
+index 2b5099f..83c63dd 100644
+--- a/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.rs
++++ b/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.rs
+@@ -1537,6 +1537,15 @@ pub const VERIFIER_COMPILED_LAYOUT: VerifierCompiledCircuitArtifact<'static, Mer
+                 )],
+                 constant_term: Mersenne31Field(0u32),
+             },
++            StaticVerifierCompiledDegree2Constraint {
++                quadratic_terms: &[(
++                    Mersenne31Field(2147483646u32),
++                    ColumnAddress::MemorySubtree(27usize),
++                    ColumnAddress::MemorySubtree(30usize),
++                )],
++                linear_terms: &[(Mersenne31Field(1u32), ColumnAddress::MemorySubtree(27usize))],
++                constant_term: Mersenne31Field(0u32),
++            },
+             StaticVerifierCompiledDegree2Constraint {
+                 quadratic_terms: &[(
+                     Mersenne31Field(1u32),
+diff --git a/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_quotient.rs b/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_quotient.rs
+index b1a8ddd..337effe 100644
+--- a/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_quotient.rs
++++ b/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_quotient.rs
+@@ -2620,6 +2620,39 @@ unsafe fn evaluate_every_row_except_last<F: SmallField, CS: ConstraintSystem<F>>
+                 accumulated_contribution = accumulated_contribution.add(cs, &intermediate)
+             };
+         }
++        {
++            {
++                let intermediate = quotient_alpha;
++                accumulated_contribution = accumulated_contribution.mul(cs, &intermediate)
++            };
++            let contribution = {
++                let individual_term = {
++                    let mut individual_term = {
++                        let mut a = *(memory.get_unchecked(27usize));
++                        let b = *(memory.get_unchecked(30usize));
++                        {
++                            let intermediate = b;
++                            a = a.mul(cs, &intermediate)
++                        };
++                        a = a.negated(cs);
++                        a
++                    };
++                    {
++                        let a = *(memory.get_unchecked(27usize));
++                        {
++                            let intermediate = a;
++                            individual_term = individual_term.add(cs, &intermediate)
++                        };
++                    }
++                    individual_term
++                };
++                individual_term
++            };
++            {
++                let intermediate = contribution;
++                accumulated_contribution = accumulated_contribution.add(cs, &intermediate)
++            };
++        }
+         {
+             {
+                 let intermediate = quotient_alpha;
 diff --git a/wrapper/src/lib.rs b/wrapper/src/lib.rs
-index 3fae70b..ffa7a33 100644
+index 3fae70b..c2a566e 100644
 --- a/wrapper/src/lib.rs
 +++ b/wrapper/src/lib.rs
 @@ -9,6 +9,7 @@ compile_error!("features `security_80` and `security_100` are mutually exclusive
@@ -260,7 +1161,37 @@ index 3fae70b..ffa7a33 100644
  pub type GL = boojum::field::goldilocks::GoldilocksField;
  pub type GLExt2 = boojum::field::goldilocks::GoldilocksExt2;
  pub type RiscLeafInclusionVerifier = CircuitBlake2sForEverythingVerifier<GL>;
-@@ -447,7 +457,7 @@ pub fn prove_snark_wrapper(
+@@ -250,7 +260,13 @@ pub fn prove_risc_wrapper(
+ pub fn verify_risc_wrapper_proof(proof: &RiscWrapperProof, vk: &RiscWrapperVK) -> bool {
+     let verifier_builder = RiscWrapperCircuitBuilder::dyn_verifier_builder();
+     let verifier = verifier_builder.create_verifier();
+-    verifier.verify::<RiscWrapperTreeHasher, RiscWrapperTranscript, NoPow>((), vk, proof)
++    let expected_proof_config = RiscWrapper::get_proof_config();
++    verifier.verify::<RiscWrapperTreeHasher, RiscWrapperTranscript, NoPow>(
++        (),
++        vk,
++        proof,
++        &expected_proof_config,
++    )
+ }
+ 
+ // Stark -> Stark Compression
+@@ -352,7 +368,13 @@ pub fn prove_compression(
+ pub fn verify_compression_proof(proof: &CompressionProof, vk: &CompressionVK) -> bool {
+     let verifier_builder = CompressionCircuitBuilder::dyn_verifier_builder();
+     let verifier = verifier_builder.create_verifier();
+-    verifier.verify::<CompressionTreeHasher, CompressionTranscript, NoPow>((), vk, proof)
++    let expected_proof_config = CompressionCircuit::get_proof_config();
++    verifier.verify::<CompressionTreeHasher, CompressionTranscript, NoPow>(
++        (),
++        vk,
++        proof,
++        &expected_proof_config,
++    )
+ }
+ 
+ // Stark -> Snark Wrapper
+@@ -447,7 +469,7 @@ pub fn prove_snark_wrapper(
          tracing::info!("using zk (padding) proving");
          const NUM_PADDING_TERMS: usize = 2 + 2 + 2; // worst case witness polys are opened at 2 points, plus there are
          // indirect openings of grand product for permutation and for lookup

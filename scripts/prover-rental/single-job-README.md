@@ -126,12 +126,14 @@ SHA-256 hashes of the **actual** guest `.bin`/`.text`, standalone native worker,
 and GPU compact CRS for SNARK. FRI uses `crs_sha256: null`. These are immutable
 image inputs, not runtime fields a rental may choose. Both build-time and startup
 checks hash those files. The native workers additionally enforce their compiled
-app/program/VK constants. The server's registered V8 app-bound VK is
-`0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe`,
+app/program/VK constants. The compiled V8 candidate app-bound VK is
+`0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90`,
 bound to the reviewed guest tree
 `6935489bdbc7b1ed31e608677d1b2418b10691b5`; see the
 [registered proving identity](../../crates/protocol_version/src/lib.rs)
-and [validated source release](https://github.com/syscoin/zksync-os-server/blob/123174413b852490a6d81df529270390fbed0fc0/scripts/releases/era-v32/README.md).
+and the [historical source release](https://github.com/syscoin/zksync-os-server/blob/123174413b852490a6d81df529270390fbed0fc0/scripts/releases/era-v32/README.md)
+for the previous key. That historical qualification does not validate the corrected
+circuits or new key; the current server and generated Era verifier must match this identity.
 Use stage binaries built for that identity and hash their actual image contents.
 The source release does not qualify a rental image, selected hardware, live
 service deployment, or the still-absent canonical local-chain fixture.
