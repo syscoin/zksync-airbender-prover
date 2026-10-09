@@ -29,6 +29,11 @@ class StorageSdkTests(unittest.TestCase):
                 self.assertEqual(query["X-Amz-Algorithm"], ["AWS4-HMAC-SHA256"])
                 self.assertEqual(query["X-Amz-SignedHeaders"], ["host"])
                 self.assertFalse(any("checksum" in key.lower() for key in query))
+        claim = objects.compute_claim_plan("1" * 32)
+        self.assertEqual(parse_qs(urlsplit(claim["claim_get_url"]).query)["X-Amz-SignedHeaders"], ["host"])
+        signed = parse_qs(urlsplit(claim["claim_put_url"]).query)
+        self.assertEqual(signed["X-Amz-SignedHeaders"], ["host;if-none-match"])
+        self.assertFalse(any("checksum" in key.lower() for key in signed))
         with Stubber(client) as stub:
             stub.add_response("put_object", {}, {"Bucket": config["bucket"],
                 "Key": "test-prover/jobs/test.json", "Body": b"{}", "ContentType": "application/json",

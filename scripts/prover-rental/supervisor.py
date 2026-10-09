@@ -15,6 +15,7 @@ import uuid
 import job
 import pool
 import sentry
+import serverless
 import storage
 from runpod import (Controller, Error, Runpod, Store, TERMINAL, atomic_json, exact_fields,
                     positive_int, read_private_json, require)
@@ -37,9 +38,10 @@ def private_path(value):
 
 
 def load_config(config):
-    exact_fields(config, ("schema_version", "mode", "provider_state_dir", "releases", "storage", "poll_interval_seconds",
+    base_fields = ("schema_version", "mode", "provider_state_dir", "releases", "storage", "poll_interval_seconds",
                          "idle_grace_seconds", "startup_reserve_seconds", "runtime_seconds", "sequencers",
-                         "external_pool_dirs"))
+                         "external_pool_dirs")
+    exact_fields(config, base_fields + (("serverless_fri",) if "serverless_fri" in config else ()))
     require(config["schema_version"] == 1, "unsupported_supervisor_schema")
     require(config["mode"] in ("decentralized-service", "native-compute"), "invalid_supervisor_mode")
     if config["mode"] == "decentralized-service":
@@ -50,6 +52,16 @@ def load_config(config):
                 "native_compute_requires_native_sources_without_service_pools")
     provider = Store(private_path(config["provider_state_dir"]))
     policy = provider.load()["policy"]
+    fri_policy = None
+    if "serverless_fri" in config:
+        backend = config["serverless_fri"]
+        require(isinstance(backend, dict), "invalid_serverless_fri_configuration")
+        require(type(backend.get("enabled", True)) is bool, "invalid_serverless_fri_configuration")
+        if backend.get("enabled", True):
+            exact_fields(backend, ("state_dir", "enabled") if "enabled" in backend else ("state_dir",))
+            fri_policy = serverless.ServerlessStore(private_path(backend["state_dir"])).load()["policy"]
+        else:
+            require(set(backend) <= {"enabled", "state_dir"}, "invalid_serverless_fri_configuration")
     storage.validate_config(config["storage"])
     for name in ("poll_interval_seconds", "idle_grace_seconds", "startup_reserve_seconds"):
         positive_int(config[name])
@@ -66,7 +78,8 @@ def load_config(config):
         release = job.release_identity(raw)
         require(release["stage"] == stage, "supervisor_release_stage_mismatch")
         require(positive_int(config["runtime_seconds"][stage]) + config["startup_reserve_seconds"]
-                < policy["limits"]["max_runtime_seconds"], "job_must_fit_warm_session")
+                < (fri_policy if stage == "FRI" and fri_policy else policy)["limits"]["max_runtime_seconds"],
+                "job_must_fit_warm_session")
         inputs["releases"][stage], release_values[stage] = raw, release
         frozen["releases"][stage] = job.hash_bytes(raw)
     for field in ("vk_hash", "program_commitment", "app_bin_sha256", "app_text_sha256"):
@@ -104,6 +117,12 @@ def load_config(config):
         Store(private_path(directory))
     require(names or config["external_pool_dirs"], "at_least_one_work_source_required")
     frozen["provider_policy"] = policy
+    if fri_policy is not None:
+        frozen["serverless_fri"] = {"enabled": True, "state_dir": config["serverless_fri"]["state_dir"],
+                                    "policy": fri_policy}
+        require(config["storage"]["url_ttl_seconds"] > fri_policy["limits"]["max_runtime_seconds"]
+                + fri_policy["limits"]["result_retention_seconds"] + fri_policy["limits"]["startup_timeout_seconds"]
+                + 10 + 2 * config["startup_reserve_seconds"], "storage_urls_must_cover_serverless_and_recovery")
     return frozen, inputs
 
 
@@ -126,7 +145,7 @@ class Supervisor:
     # Supervisor lock -> external pool lock -> provider lock. The watchdog takes
     # only provider locks, and no provider call attempts a reverse acquisition.
     def __init__(self, store, api=None, objects=None, native=None, clock=time.time, controller_http=None,
-                 service_rpc=None, controller_type=Controller):
+                 service_rpc=None, controller_type=Controller, serverless_api=None):
         self.store, self.api, self.clock = store, api, clock
         self.objects, self.native = objects, native or job.NativeNetwork()
         self.controller_http, self.service_rpc, self.controller_type = controller_http, service_rpc, controller_type
@@ -135,6 +154,14 @@ class Supervisor:
         self.settings = self.state["settings"]
         self.provider = Store(private_path(self.settings["provider_state_dir"]))
         require(self.provider.load()["policy"] == self.settings["provider_policy"], "provider_policy_changed")
+        self.serverless_api = serverless_api
+        backend = self.settings.get("serverless_fri", {})
+        self.fri_provider = None
+        if backend.get("enabled", True) and backend:
+            exact_fields(backend, ("enabled", "state_dir", "policy"))
+            require(backend["enabled"] is True, "invalid_serverless_fri_configuration")
+            self.fri_provider = serverless.ServerlessStore(private_path(backend["state_dir"]))
+            require(self.fri_provider.load()["policy"] == backend["policy"], "serverless_policy_changed")
 
     def save(self):
         atomic_json(self.store.root / "supervisor.json", self.state)
@@ -142,7 +169,25 @@ class Supervisor:
     def controller(self):
         return self.controller_type(self.provider, self.api, clock=self.clock, http=self.controller_http)
 
-    def check_acquisition_capacity(self):
+    def uses_serverless(self, stage):
+        return stage == "FRI" and self.fri_provider is not None
+
+    def compute_provider(self, stage):
+        return self.fri_provider if self.uses_serverless(stage) else self.provider
+
+    def compute_controller(self, stage):
+        if self.uses_serverless(stage):
+            return serverless.ServerlessController(self.fri_provider, self.serverless_api, clock=self.clock,
+                                                    http=self.controller_http)
+        return self.controller()
+
+    def check_acquisition_capacity(self, stage=None):
+        if stage is not None and self.uses_serverless(stage):
+            with self.fri_provider.lock():
+                controller = self.compute_controller(stage)
+                controller.check_capacity()
+                controller.preflight()
+            return
         with self.provider.lock():
             controller = self.controller()
             session = self.state["session"]
@@ -240,7 +285,7 @@ class Supervisor:
         if not os.path.lexists(directory / "authority.json"):
             release = self.release(active["stage"])
             sentry.reset_unstarted_pick(directory, source["endpoint"], release, active["job_id"])
-            self.check_acquisition_capacity()
+            self.check_acquisition_capacity(active["stage"])
             # A pre-request crash may outlive the original compute window. Persist a new
             # bound only after proving that no native request could have happened yet.
             now = self.clock()
@@ -272,7 +317,8 @@ class Supervisor:
                     lane = candidate.settings["lanes"][op["lane"]]
                     entry = lane["stages"][stage]
                     require(entry["release_sha256"] == self.settings["releases"][stage]
-                            and entry["rental_policy"]["image"] == self.settings["provider_policy"]["image"],
+                            and entry["rental_policy"]["image"] == (self.settings["serverless_fri"]["policy"]
+                                if self.uses_serverless(stage) else self.settings["provider_policy"])["image"],
                             "external_pool_release_or_image_mismatch")
                     runtime = entry["rental_policy"]["limits"]["max_runtime_seconds"]
                     require(runtime <= self.settings["runtime_seconds"][stage], "external_runtime_exceeds_supervisor_limit")
@@ -284,7 +330,7 @@ class Supervisor:
                     if self.clock() + runtime + reserve >= op["deadline"]:
                         # A queued external payload owns no native capability. Do not let an
                         # unusable wrapper window block the next FRI opportunity.
-                        with self.provider.lock():
+                        with self.compute_provider(stage).lock():
                             self.require_unstarted_external(candidate, identifier)
                             self.mark_authorization_expired(op, "external_authorization_window_elapsed")
                             candidate.save()
@@ -299,7 +345,7 @@ class Supervisor:
                     self.state["active"] = active
                     self.save()
                     op.update(status="warm_claimed", warm_owner=self.state["supervisor_id"],
-                              warm_controller_dir=str(self.provider.root))
+                              warm_controller_dir=str(self.compute_provider(stage).root))
                     candidate.save()
                     active["phase"] = "ready"
                     self.save()
@@ -310,7 +356,8 @@ class Supervisor:
         op = candidate.operation(identifier)
         require(op["mode"] == "external" and op.get("rental_operation") is None,
                 "external_execution_requires_reconciliation")
-        controllers = [self.controller(), Controller(candidate.controller_store(op), None, clock=self.clock)]
+        selected_provider = self.compute_provider(op["stage"])
+        controllers = [self.compute_controller(op["stage"]), Controller(candidate.controller_store(op), None, clock=self.clock)]
         require(not any(controller.has_job(op["job_id"]) for controller in controllers),
                 "external_execution_requires_reconciliation")
         require(not (candidate.directory(identifier) / "returned-proof.json").exists(),
@@ -319,7 +366,7 @@ class Supervisor:
             require(active["rental_operation"] is None and active["phase"] in ("claim_intent", "ready", "exported"),
                     "published_authority_requires_recovery")
             require(controllers[0].find_operation(active["id"]) is None
-                    and not any((self.provider.root / filename).exists()
+                    and not any((selected_provider.root / filename).exists()
                                 for filename in (active["id"] + ".proof", "." + active["id"] + ".partial")),
                     "durable_result_requires_recovery")
 
@@ -348,11 +395,11 @@ class Supervisor:
             else:
                 candidate, op = self.external_bound(active)
             require(op["status"] in ("warm_claimed", "authorization_expired"), "external_claim_changed")
-            with self.provider.lock():
+            with self.compute_provider(active["stage"]).lock():
                 self.require_unstarted_external(candidate, active["pool_operation"], active)
                 session = self.state["session"]
-                controller = self.controller()
-                unallocated = session is None or (session["operation"] is None and not any(
+                controller = self.compute_controller(active["stage"])
+                unallocated = self.uses_serverless(active["stage"]) or session is None or (session["operation"] is None and not any(
                     entry.get("kind") == "warm_session"
                     and controller.operation(identifier)["session"] == session["descriptor"]
                     for identifier, entry in controller.state["operations"].items()))
@@ -368,7 +415,7 @@ class Supervisor:
                 # the pool's conservative budget when no allocation could have begun.
                 self.mark_authorization_expired(op, reason, release_reservation=unallocated)
                 candidate.save()
-                if unallocated:
+                if unallocated and not self.uses_serverless(active["stage"]):
                     self.state["session"] = None
         self.state["active"], self.state["idle_since"] = None, None
         self.save()
@@ -382,12 +429,12 @@ class Supervisor:
             require(op["status"] in ("ready", "warm_claimed")
                     and op.get("warm_owner") in (None, self.state["supervisor_id"]), "external_claim_conflict")
             op.update(status="warm_claimed", warm_owner=self.state["supervisor_id"],
-                      warm_controller_dir=str(self.provider.root))
+                      warm_controller_dir=str(self.compute_provider(active["stage"]).root))
             candidate.save()
             active["phase"] = "ready"
             self.save()
         require(op.get("warm_owner") == self.state["supervisor_id"]
-                and op.get("warm_controller_dir") == str(self.provider.root)
+                and op.get("warm_controller_dir") == str(self.compute_provider(active["stage"]).root)
                 and op["lane"] == active["lane"] and op["stage"] == active["stage"]
                 and op["job_id"] == active["job_id"] and op["chain_binding"] == active["chain_binding"]
                 and op["deadline"] == active["deadline"], "external_claim_changed")
@@ -421,7 +468,7 @@ class Supervisor:
                     reserve = max(reserve, service["policy"]["reserve_seconds"])
                     deadline = min(deadline, checked["state"]["deadline"])
         session = self.state["session"]
-        if session is not None:
+        if session is not None and not self.uses_serverless(active["stage"]):
             deadline = min(deadline, session["deadline"], session["plan"]["expires_at"] - reserve)
         require(self.clock() + active["runtime_seconds"] + reserve < deadline, "insufficient_compute_window_preserve_job")
         return deadline, reserve
@@ -518,6 +565,54 @@ class Supervisor:
         self.save()
         return True
 
+    def publish_serverless(self, active):
+        deadline, reserve = self.compute_window(active)
+        if "serverless_deadline" not in active:
+            active["serverless_deadline"] = min(int(deadline - reserve),
+                int(active["plan_expires_at"] - reserve),
+                int(self.clock()) + self.settings["serverless_fri"]["policy"]["limits"]["max_runtime_seconds"])
+            active["compute_claim_plan"] = self.objects.compute_claim_plan(active["id"])
+            self.save()
+        require(self.clock() + active["runtime_seconds"] < active["serverless_deadline"],
+                "insufficient_compute_window_preserve_job")
+        with self.fri_provider.lock():
+            controller = self.compute_controller("FRI")
+            selected = read_private_json(self.directory(active) / "controller-job.json")
+            operation = controller.launch(selected, active["id"], active["serverless_deadline"],
+                                          active["runtime_seconds"], active["compute_claim_plan"])
+        require(active["rental_operation"] in (None, operation), "serverless_attempt_changed")
+        active.update(phase="published", rental_operation=operation)
+        self.save()
+
+    def finish_serverless(self, active):
+        with self.fri_provider.lock():
+            controller = self.compute_controller("FRI")
+            if not controller.collect(active["id"]):
+                controller.tick(active["id"])
+                return False
+        # Object durability ends the GPU handler's work. Native verification and
+        # exact submission retries run on this host, outside the worker lifetime.
+        if active["kind"] == "native":
+            disposition = sentry.submit(self.directory(active), self.fri_provider, active["id"],
+                                        self.auth(self.source(active["source"])), self.native)
+        else:
+            with Store(Path(active["pool_dir"])).lock("pool.lock"):
+                candidate, op = self.external_bound(active)
+                sentry.verify_input_result(self.directory(active), self.fri_provider, active["id"],
+                                           self.directory(active) / "returned-proof.json")
+                op.update(status="returned", rental_operation=active["id"])
+                candidate.save()
+            disposition = "returned"
+        with self.fri_provider.lock():
+            controller = self.compute_controller("FRI")
+            # A status failure cannot erase the authoritative source disposition.
+            # The backend keeps the unresolved run blocking further FRI spend.
+            controller.finish(active["id"], disposition)
+        self.state["completed_jobs"] += 1
+        self.state["active"], self.state["idle_since"] = None, None
+        self.save()
+        return True
+
     def native_completion_expected(self, identifier, stage, source, binding):
         require(re.fullmatch(r"[0-9a-f]{32}", identifier) and stage in source["stages"],
                 "native_completion_identity_changed")
@@ -549,6 +644,11 @@ class Supervisor:
             authority = sentry.native_completion_authority(directory)
             if (authority.get("job_id") != self.state["supervisor_id"] + ":" + identifier
                     or authority.get("status") not in ("accepted", "rejected")):
+                skipped += 1
+                continue
+            if self.uses_serverless(authority.get("stage")):
+                # Pod compaction authenticates a warm-session command. Serverless
+                # keeps its private inputs until a separate retention format exists.
                 skipped += 1
                 continue
             sources = [entry for entry in self.settings["sequencers"] if entry["endpoint"] == authority["endpoint"]]
@@ -603,6 +703,8 @@ class Supervisor:
     def expire_active(self):
         active = self.state["active"]
         require(active is not None, "no_active_job")
+        if self.uses_serverless(active["stage"]):
+            return self.expire_serverless(active)
         self.tick_session()
         self.recover_warm_attempt(active)
         archive = self.store.root / "expired" / (active["id"] + ".json")
@@ -658,6 +760,9 @@ class Supervisor:
         return "expired"
 
     def recover_warm_attempt(self, active):
+        if self.uses_serverless(active["stage"]):
+            self.recover_serverless_attempt(active)
+            return
         if active["phase"] not in ("exported", "published"):
             return
         with self.provider.lock():
@@ -675,6 +780,68 @@ class Supervisor:
         require(active["rental_operation"] in (None, active["id"]), "warm_job_operation_changed")
         active.update(phase="published", rental_operation=active["id"])
         self.save()
+
+    def recover_serverless_attempt(self, active):
+        if active["phase"] not in ("exported", "published"):
+            return
+        with self.fri_provider.lock():
+            op = self.compute_controller("FRI").find_operation(active["id"])
+            if op is None:
+                require(active["phase"] != "published", "published_serverless_job_missing")
+                return
+            require(op["job"] == read_private_json(self.directory(active) / "controller-job.json")
+                    and op["input"]["runtime_limit_seconds"] == active["runtime_seconds"]
+                    and op["input"]["deadline_unix"] == active.get("serverless_deadline")
+                    and all(op["input"][key] == value for key, value in active["compute_claim_plan"].items()),
+                    "serverless_attempt_changed")
+        require(active["rental_operation"] in (None, active["id"]), "serverless_attempt_changed")
+        active.update(phase="published", rental_operation=active["id"])
+        self.save()
+
+    def expire_serverless(self, active):
+        self.recover_serverless_attempt(active)
+        archive = self.store.root / "expired" / (active["id"] + ".json")
+        retiring = archive.exists()
+        if retiring:
+            require(read_private_json(archive)["active"] == active, "expired_authority_changed")
+        if not retiring and active["phase"] == "published" and self.finish_serverless(active):
+            return "completed"
+        if active["kind"] == "native":
+            authority = read_private_json(self.directory(active) / "authority.json")
+            source = self.source(active["source"])
+            require(authority["endpoint"] == source["endpoint"] and authority["job_id"] == active["job_id"]
+                    and authority["stage"] == "FRI"
+                    and authority["release_sha256"] == self.settings["releases"]["FRI"], "native_authority_changed")
+            require(authority["status"] == "picked" and authority["lease_token"] is not None
+                    and not (self.directory(active) / "submission.json").exists(),
+                    "unknown_pick_or_submission_requires_origin_reconciliation")
+            require(active.get("expiry_not_before") is not None and self.clock() >= active["expiry_not_before"],
+                    "native_lease_not_expired")
+        else:
+            with Store(Path(active["pool_dir"])).lock("pool.lock"):
+                self.external_bound(active)
+            require(self.clock() >= active["deadline"], "external_assignment_not_expired")
+        with self.fri_provider.lock():
+            controller = self.compute_controller("FRI")
+            op = controller.find_operation(active["id"])
+            if op is not None:
+                controller.tick(active["id"])
+                require(op["provider_status"] in serverless.PROVIDER_FINAL,
+                        "serverless_operation_requires_reconciliation")
+                require(retiring or op["receipt"] is None, "durable_result_requires_recovery")
+            if not retiring:
+                atomic_json(archive, {"schema_version": 1, "active": active, "expired_at": self.clock()})
+            if op is not None:
+                controller.finish(active["id"], "expired")
+        if active["kind"] == "external":
+            with Store(Path(active["pool_dir"])).lock("pool.lock"):
+                candidate, op = self.external_bound(active)
+                require(op["status"] != "returned", "durable_result_requires_recovery")
+                op["status"] = "lease_expired"
+                candidate.save()
+        self.state["active"], self.state["idle_since"] = None, None
+        self.save()
+        return "expired"
 
     def active_tick(self):
         active = self.state["active"]
@@ -694,14 +861,25 @@ class Supervisor:
                 self.compute_window(active)
                 self.export(active)
             if active["phase"] == "exported":
-                self.ensure_session(active)
-                self.publish(active)
+                if self.uses_serverless(active["stage"]):
+                    self.publish_serverless(active)
+                else:
+                    self.ensure_session(active)
+                    self.publish(active)
         except Error as error:
             if active["kind"] == "external" and str(error) in STALE_EXTERNAL_AUTHORIZATION:
                 if self.retire_unstarted_external(active, str(error)):
                     return
             raise
         if active["phase"] == "published":
+            if self.uses_serverless(active["stage"]):
+                if not self.finish_serverless(active) and active["kind"] == "external" and self.clock() >= active["deadline"]:
+                    with self.fri_provider.lock():
+                        terminal = self.compute_controller("FRI").operation(active["id"])["provider_status"] \
+                            in serverless.PROVIDER_FINAL
+                    if terminal:
+                        self.expire_serverless(active)
+                return
             # A retained result or native submission remains recoverable even if
             # object-store writes fail after the worker has finished.
             if self.finish(active):
@@ -749,8 +927,18 @@ class Supervisor:
                 return self.status()
             if not acquire:
                 return self.status()
-            self.check_acquisition_capacity()
+            capacity_errors = []
             for stage in ("SNARK", "FRI"):
+                if not self.settings["external_pool_dirs"] and not any(
+                        stage in entry["stages"] for entry in self.settings["sequencers"]):
+                    continue
+                try:
+                    self.check_acquisition_capacity(stage)
+                except Error as error:
+                    if self.fri_provider is None:
+                        raise
+                    capacity_errors.append(error)
+                    continue
                 if self.claim_external(stage):
                     self.state["idle_since"] = None
                     self.save()
@@ -765,6 +953,10 @@ class Supervisor:
                         self.save()
                         self.active_tick()
                         return self.status()
+            if capacity_errors:
+                # Separate backend budgets may leave one stage available. Failure
+                # of another stage still cannot count as an empty queue observation.
+                raise capacity_errors[0]
             # Every configured native stage returned a marked empty response, and
             # every external pool was read successfully with no eligible job.
             if self.state["idle_since"] is None:
@@ -783,6 +975,8 @@ class Supervisor:
         active, session = self.state["active"], self.state["session"]
         return {"schema_version": 1, "supervisor_id": self.state["supervisor_id"],
                 "mode": self.settings["mode"],
+                "fri_backend": "runpod-serverless-flashboot" if self.fri_provider is not None else "runpod-pods",
+                "serverless": None if self.fri_provider is None else self.compute_controller("FRI").status(),
                 "active_job": None if active is None else {**{key: active[key]
                     for key in ("id", "kind", "stage", "phase", "deadline")},
                     "expiry_not_before": active.get("expiry_not_before")},
@@ -839,6 +1033,8 @@ def main(argv=None):
             key = os.environ.get("RUNPOD_API_KEY", "")
             require(bool(key), "RUNPOD_API_KEY_required")
             supervisor.api = Runpod(key)
+            if supervisor.fri_provider is not None:
+                supervisor.serverless_api = serverless.ServerlessApi(key)
             supervisor.objects = storage.S3Storage(supervisor.settings["storage"])
             if args.command == "expire-active":
                 action = supervisor.expire_active()
@@ -857,7 +1053,8 @@ def main(argv=None):
                     print(job.encode(supervisor.status()).decode(), flush=True)
                     if args.command == "recover" or args.once:
                         return 1
-                if args.command == "recover" or args.once or supervisor.state["draining"] and supervisor.state["session"] is None:
+                if args.command == "recover" or args.once or (supervisor.state["draining"]
+                        and supervisor.state["session"] is None and supervisor.state["active"] is None):
                     break
                 for _ in range(supervisor.settings["poll_interval_seconds"]):
                     if stopping:

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "endpoint_id": "REPLACE_WITH_ENDPOINT_ID",
+  "template_id": "REPLACE_WITH_TEMPLATE_ID",
+  "image": "REPLACE_WITH_REVIEWED_REGISTRY_IMAGE@sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS",
+  "gpu_type_ids": ["REPLACE_WITH_EXACT_RUNPOD_GPU_TYPE"],
+  "gpu_pools": ["REPLACE_WITH_OBSERVED_V2_GPU_POOL"],
+  "allowed_cuda_versions": ["12.9"],
+  "min_cuda_version": null,
+  "gpu_count": 1,
+  "workers_min": 0,
+  "workers_max": 1,
+  "flashboot": true,
+  "idle_timeout_seconds": 5,
+  "disk_gb": null,
+  "limits": {
+    "max_runtime_seconds": null,
+    "startup_timeout_seconds": 600,
+    "result_retention_seconds": 1800,
+    "max_hourly_usd": null,
+    "max_operation_usd": null,
+    "lifetime_budget_usd": null,
+    "max_artifact_bytes": null
+  }
+}

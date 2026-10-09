@@ -422,7 +422,8 @@ def export_input(directory, payload_bytes, release_bytes, job_id, plan, network,
 
 def collected_proof(authority, controller_store, operation_id):
     with controller_store.lock():
-        controller = Controller(controller_store, None)
+        from serverless import receipt_controller
+        controller = receipt_controller(controller_store)
         operation = controller.operation(operation_id)
         require(operation["job"]["job_id"] == authority["job_id"]
                 and operation["job"]["manifest_sha256"] == authority["manifest_sha256"], "rental_job_mismatch")

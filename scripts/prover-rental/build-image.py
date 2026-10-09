@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build single-job or reusable rental adapters over a pinned GPU prover image."""
+"""Build rental or Serverless adapters over a pinned GPU prover image."""
 
 import argparse
 from pathlib import Path
@@ -13,6 +13,12 @@ from runpod import require
 
 
 def releases_for(args):
+    if getattr(args, "serverless_fri", False):
+        require(not args.warm and args.fri_release and not args.release and not args.snark_release,
+                "serverless_requires_fri_release_only")
+        raw = job.read_file(args.fri_release, job.MAX_MANIFEST)
+        require(job.release_identity(raw)["stage"] == "FRI", "stage_release_mismatch")
+        return {"release.json": raw}
     if not args.warm:
         require(args.release and not args.fri_release and not args.snark_release,
                 "single_job_requires_one_release")
@@ -37,11 +43,21 @@ def releases_for(args):
     return releases
 
 
+def stage_serverless_module(source, destination):
+    # The provider SDK owns the name `runpod` in this image. Keep legacy adapters
+    # unchanged while giving their reviewed local utility a distinct staged name.
+    text = source.read_text()
+    text = re.sub(r"^from runpod import ", "from rental_provider import ", text, flags=re.MULTILINE)
+    text = re.sub(r"^import runpod$", "import rental_provider as runpod", text, flags=re.MULTILINE)
+    destination.write_text(text)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-image", required=True)
     parser.add_argument("--release")
     parser.add_argument("--warm", action="store_true")
+    parser.add_argument("--serverless-fri", action="store_true")
     parser.add_argument("--fri-release")
     parser.add_argument("--snark-release")
     parser.add_argument("--tag", required=True)
@@ -58,9 +74,16 @@ def main():
     source = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="zksys-rental-image-") as temporary:
         context = Path(temporary)
-        for name in ("runpod.py", "job.py", "worker.py", "entrypoint.py"):
-            shutil.copyfile(source / name, context / name)
-        recipe = "Dockerfile.warm" if args.warm else "Dockerfile"
+        if args.serverless_fri:
+            shutil.copyfile(source / "runpod.py", context / "rental_provider.py")
+            for name in ("job.py", "worker.py", "warm_protocol.py", "fri_session.py", "serverless_worker.py"):
+                stage_serverless_module(source / name, context / name)
+            for name in ("serverless_runner.py", "requirements-serverless.txt"):
+                shutil.copyfile(source / name, context / name)
+        else:
+            for name in ("runpod.py", "job.py", "worker.py", "entrypoint.py"):
+                shutil.copyfile(source / name, context / name)
+        recipe = "Dockerfile.serverless" if args.serverless_fri else "Dockerfile.warm" if args.warm else "Dockerfile"
         shutil.copyfile(source / recipe, context / "Dockerfile")
         if args.warm:
             for name in ("warm_worker.py", "warm_protocol.py", "fri_session.py"):

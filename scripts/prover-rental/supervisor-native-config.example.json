@@ -2,6 +2,10 @@
   "schema_version": 1,
   "mode": "native-compute",
   "provider_state_dir": "/absolute/private/provider-controller",
+  "serverless_fri": {
+    "enabled": true,
+    "state_dir": "/absolute/private/serverless-fri-controller"
+  },
   "releases": {
     "FRI": "/absolute/reviewed/FRI-release.json",
     "SNARK": "/absolute/reviewed/SNARK-release.json"
