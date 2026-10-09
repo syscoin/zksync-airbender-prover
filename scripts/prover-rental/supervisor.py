@@ -137,6 +137,7 @@ def initialize(root, config):
         job.write_new(root / "auth" / (name + ".txt"), raw)
     atomic_json(root / "supervisor.json", {"schema_version": 1, "supervisor_id": uuid.uuid4().hex,
         "settings": settings, "active": None, "session": None, "cursor": 0, "idle_since": None,
+        "pod_idle_since": None,
         "last_tick_at": None, "last_error": None, "completed_jobs": 0, "draining": False})
     return Store(root)
 
@@ -151,6 +152,7 @@ class Supervisor:
         self.controller_http, self.service_rpc, self.controller_type = controller_http, service_rpc, controller_type
         self.state = read_private_json(store.root / "supervisor.json")
         require(self.state.get("schema_version") == 1, "unsupported_supervisor_state")
+        self.state.setdefault("pod_idle_since", None)
         self.settings = self.state["settings"]
         self.provider = Store(private_path(self.settings["provider_state_dir"]))
         require(self.provider.load()["policy"] == self.settings["provider_policy"], "provider_policy_changed")
@@ -303,6 +305,9 @@ class Supervisor:
                 (directory / name).unlink()
             directory.rmdir()
             return False
+        if not self.uses_serverless(active["stage"]):
+            self.state["pod_idle_since"] = None
+            self.save()
         self.bind_native_evidence(active)
         return True
 
@@ -343,6 +348,8 @@ class Supervisor:
                     # Persist owner intent before the pool claim. Recovery finishes
                     # exactly this transition and never adopts another owner's job.
                     self.state["active"] = active
+                    if not self.uses_serverless(stage):
+                        self.state["pod_idle_since"] = None
                     self.save()
                     op.update(status="warm_claimed", warm_owner=self.state["supervisor_id"],
                               warm_controller_dir=str(self.compute_provider(stage).root))
@@ -417,6 +424,7 @@ class Supervisor:
                 candidate.save()
                 if unallocated and not self.uses_serverless(active["stage"]):
                     self.state["session"] = None
+                    self.state["pod_idle_since"] = None
         self.state["active"], self.state["idle_since"] = None, None
         self.save()
         return True
@@ -507,6 +515,7 @@ class Supervisor:
                        "deadline": now + self.settings["provider_policy"]["limits"]["max_runtime_seconds"]}
             require(plan["expires_at"] > session["deadline"] + reserve, "session_storage_urls_too_short")
             self.state["session"] = session
+            self.state["pod_idle_since"] = None
             self.save()
         session = self.state["session"]
         with self.provider.lock():
@@ -560,6 +569,7 @@ class Supervisor:
                                   self.native_completion_expected(active["id"], active["stage"], source,
                                                                   active["chain_binding"]))
         self.state["session"]["jobs"] += 1
+        self.state["pod_idle_since"] = None
         self.state["completed_jobs"] += 1
         self.state["active"], self.state["idle_since"] = None, None
         self.save()
@@ -567,12 +577,21 @@ class Supervisor:
 
     def publish_serverless(self, active):
         deadline, reserve = self.compute_window(active)
-        if "serverless_deadline" not in active:
-            active["serverless_deadline"] = min(int(deadline - reserve),
-                int(active["plan_expires_at"] - reserve),
-                int(self.clock()) + self.settings["serverless_fri"]["policy"]["limits"]["max_runtime_seconds"])
-            active["compute_claim_plan"] = self.objects.compute_claim_plan(active["id"])
+        if "compute_claim_plan" not in active:
+            if "serverless_deadline" in active:
+                frozen_deadline = active["serverless_deadline"]
+            else:
+                frozen_deadline = min(int(deadline - reserve),
+                    int(active["plan_expires_at"] - reserve),
+                    int(self.clock()) + self.settings["serverless_fri"]["policy"]["limits"]["max_runtime_seconds"])
+            require(type(frozen_deadline) is int and frozen_deadline <= int(deadline - reserve)
+                    and frozen_deadline <= int(active["plan_expires_at"] - reserve), "serverless_attempt_changed")
+            claim_plan = self.objects.compute_claim_plan(active["id"])
+            # Presigning may fail before any provider request. Persist this pair
+            # together so a failed dependency cannot leave a half-prepared attempt.
+            active.update(serverless_deadline=frozen_deadline, compute_claim_plan=claim_plan)
             self.save()
+        require("serverless_deadline" in active, "serverless_attempt_changed")
         require(self.clock() + active["runtime_seconds"] < active["serverless_deadline"],
                 "insufficient_compute_window_preserve_job")
         with self.fri_provider.lock():
@@ -667,7 +686,8 @@ class Supervisor:
         session = self.state["session"]
         if session is None:
             return
-        require(self.state["active"] is None, "pending_authority_prevents_idle_stop")
+        active = self.state["active"]
+        require(active is None or self.uses_serverless(active["stage"]), "pending_authority_prevents_idle_stop")
         with self.provider.lock():
             controller = self.controller()
             import warm_protocol
@@ -676,28 +696,58 @@ class Supervisor:
         self.save()
         self.objects.publish_command(session["descriptor"]["session_id"], command)
 
+    def mark_pod_idle(self):
+        if self.fri_provider is not None and self.state["session"] is not None \
+                and self.state["pod_idle_since"] is None:
+            self.state["pod_idle_since"] = self.clock()
+            self.save()
+
+    def tick_pod_idle(self):
+        if self.fri_provider is None or self.state["session"] is None:
+            return
+        active = self.state["active"]
+        if active is not None and not self.uses_serverless(active["stage"]):
+            return
+        session = self.state["session"]
+        since = self.state["pod_idle_since"]
+        if (session["stopping"] or self.state["draining"] or session["jobs"] >= MAX_JOBS_PER_SESSION
+                or self.clock() + self.settings["runtime_seconds"]["SNARK"] + self.settings["startup_reserve_seconds"]
+                    >= session["deadline"]
+                or since is not None and self.clock() - since >= self.settings["idle_grace_seconds"]):
+            try:
+                self.stop_session()
+            except (Error, OSError, ValueError, KeyError, TypeError):
+                self.state["pod_idle_since"] = None
+                raise
+
     def tick_session(self):
         session = self.state["session"]
         if session is None:
             return
-        with self.provider.lock():
-            controller = self.controller()
-            if session["operation"] is None:
-                matches = [identifier for identifier, op in controller.state["operations"].items()
-                           if op.get("kind") == "warm_session"
-                           and op["session"]["session_id"] == session["descriptor"]["session_id"]]
-                require(len(matches) <= 1, "multiple_matching_warm_sessions")
-                if not matches:
-                    return
-                session["operation"] = matches[0]
-                require(controller.operation(matches[0])["session"] == session["descriptor"],
-                        "session_configuration_changed")
-                self.save()
-            controller.tick(session["operation"])
-            op = controller.operation(session["operation"])
-            terminal = op["status"] in TERMINAL
-        if terminal and self.state["active"] is None:
+        try:
+            with self.provider.lock():
+                controller = self.controller()
+                if session["operation"] is None:
+                    matches = [identifier for identifier, op in controller.state["operations"].items()
+                               if op.get("kind") == "warm_session"
+                               and op["session"]["session_id"] == session["descriptor"]["session_id"]]
+                    require(len(matches) <= 1, "multiple_matching_warm_sessions")
+                    if not matches:
+                        return
+                    session["operation"] = matches[0]
+                    require(controller.operation(matches[0])["session"] == session["descriptor"],
+                            "session_configuration_changed")
+                    self.save()
+                controller.tick(session["operation"])
+                op = controller.operation(session["operation"])
+                terminal = op["status"] in TERMINAL
+        except (Error, OSError, ValueError, KeyError, TypeError):
+            self.state["pod_idle_since"] = None
+            raise
+        active = self.state["active"]
+        if terminal and (active is None or self.uses_serverless(active["stage"])):
             self.state["session"], self.state["idle_since"] = None, None
+            self.state["pod_idle_since"] = None
             self.save()
 
     def expire_active(self):
@@ -756,6 +806,7 @@ class Supervisor:
                 op["status"] = "lease_expired"
                 candidate.save()
         self.state["active"], self.state["session"], self.state["idle_since"] = None, None, None
+        self.state["pod_idle_since"] = None
         self.save()
         return "expired"
 
@@ -789,13 +840,21 @@ class Supervisor:
             if op is None:
                 require(active["phase"] != "published", "published_serverless_job_missing")
                 return
+            retained_deadline = op["input"]["deadline_unix"]
+            retained_claim = {key: op["input"][key] for key in ("claim_get_url", "claim_put_url")}
+            reserve = self.settings["startup_reserve_seconds"]
             require(op["job"] == read_private_json(self.directory(active) / "controller-job.json")
                     and op["input"]["runtime_limit_seconds"] == active["runtime_seconds"]
-                    and op["input"]["deadline_unix"] == active.get("serverless_deadline")
-                    and all(op["input"][key] == value for key, value in active["compute_claim_plan"].items()),
+                    and retained_deadline <= int(active["deadline"] - reserve)
+                    and retained_deadline <= int(active["plan_expires_at"] - reserve)
+                    and ("serverless_deadline" not in active or active["serverless_deadline"] == retained_deadline)
+                    and ("compute_claim_plan" not in active or active["compute_claim_plan"] == retained_claim),
                     "serverless_attempt_changed")
         require(active["rental_operation"] in (None, active["id"]), "serverless_attempt_changed")
-        active.update(phase="published", rental_operation=active["id"])
+        # A submitted backend journal is authoritative for a missing local half;
+        # never generate fresh URLs or a later deadline after submission intent.
+        active.update(phase="published", rental_operation=active["id"],
+                      serverless_deadline=retained_deadline, compute_claim_plan=retained_claim)
         self.save()
 
     def expire_serverless(self, active):
@@ -912,7 +971,10 @@ class Supervisor:
             self.save()
             if self.state["active"] is not None:
                 self.state["idle_since"] = None
+                if not self.uses_serverless(self.state["active"]["stage"]):
+                    self.state["pod_idle_since"] = None
                 self.save()
+                self.tick_pod_idle()
                 self.active_tick()
                 return self.status()
             session = self.state["session"]
@@ -921,11 +983,13 @@ class Supervisor:
                     self.stop_session()
                 return self.status()
             if session is not None and (session["stopping"] or session["jobs"] >= MAX_JOBS_PER_SESSION
-                    or now + max(self.settings["runtime_seconds"].values()) + self.settings["startup_reserve_seconds"]
+                    or now + max(runtime for stage, runtime in self.settings["runtime_seconds"].items()
+                                 if not self.uses_serverless(stage)) + self.settings["startup_reserve_seconds"]
                     >= session["deadline"]):
                 self.stop_session()
                 return self.status()
             if not acquire:
+                self.tick_pod_idle()
                 return self.status()
             capacity_errors = []
             for stage in ("SNARK", "FRI"):
@@ -935,24 +999,43 @@ class Supervisor:
                 try:
                     self.check_acquisition_capacity(stage)
                 except Error as error:
+                    if not self.uses_serverless(stage):
+                        self.state["pod_idle_since"] = None
                     if self.fri_provider is None:
                         raise
                     capacity_errors.append(error)
                     continue
-                if self.claim_external(stage):
+                try:
+                    claimed = self.claim_external(stage)
+                except (Error, OSError, ValueError, KeyError, TypeError):
+                    if not self.uses_serverless(stage):
+                        self.state["pod_idle_since"] = None
+                    raise
+                if claimed:
                     self.state["idle_since"] = None
                     self.save()
+                    self.tick_pod_idle()
                     self.active_tick()
                     return self.status()
                 sources = [entry for entry in self.settings["sequencers"] if stage in entry["stages"]]
                 for offset in range(len(sources)):
                     index = (self.state["cursor"] + offset) % len(sources)
-                    if self.pick_native(sources[index], stage):
+                    try:
+                        picked = self.pick_native(sources[index], stage)
+                    except (Error, OSError, ValueError, KeyError, TypeError):
+                        if not self.uses_serverless(stage):
+                            self.state["pod_idle_since"] = None
+                        raise
+                    if picked:
                         self.state["cursor"] = index + 1
                         self.state["idle_since"] = None
                         self.save()
+                        self.tick_pod_idle()
                         self.active_tick()
                         return self.status()
+                if not self.uses_serverless(stage):
+                    self.mark_pod_idle()
+                    self.tick_pod_idle()
             if capacity_errors:
                 # Separate backend budgets may leave one stage available. Failure
                 # of another stage still cannot count as an empty queue observation.
@@ -962,7 +1045,8 @@ class Supervisor:
             if self.state["idle_since"] is None:
                 self.state["idle_since"] = self.clock()
             self.save()
-            if session is not None and self.clock() - self.state["idle_since"] >= self.settings["idle_grace_seconds"]:
+            if self.fri_provider is None and session is not None \
+                    and self.clock() - self.state["idle_since"] >= self.settings["idle_grace_seconds"]:
                 self.stop_session()
             return self.status()
         except (Error, OSError, ValueError, KeyError, TypeError) as error:
@@ -983,6 +1067,7 @@ class Supervisor:
                 "session_operation": None if session is None else session["operation"],
                 "session_stopping": session is not None and session["stopping"],
                 "completed_jobs": self.state["completed_jobs"], "idle_since": self.state["idle_since"],
+                "pod_idle_since": self.state["pod_idle_since"],
                 "draining": self.state["draining"], "last_error": self.state["last_error"]}
 
 

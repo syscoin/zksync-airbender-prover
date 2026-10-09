@@ -23,7 +23,7 @@ import supervisor
 import warm_worker
 from test_adapter import (RELEASE_WRITE_FAILURES, interrupted_authority_directory_fsync, interrupted_release_write,
                           payload, release, storage_plan, successful_native)
-from test_pool import IDENTITIES, evidence
+from test_pool import IDENTITIES, evidence, registry_rpc_fixture
 from test_runpod import FakeApi, policy
 from test_storage import config as storage_config
 from test_warm import MailboxStorage, RecordingFriSession
@@ -489,7 +489,10 @@ class SupervisorTests(unittest.TestCase):
         f = fixture()
         service, request, item = setup(f)
         rpc = NativeRpc(f, service, item)
+        self.service_registry_rpc = registry_rpc_fixture(self, keeper, f)
         permit = keeper.permit(service, rpc, request, f["evidence"], f["fri_payload"], self.now, 50)
+        self.assertTrue(self.service_registry_rpc.anchors)
+        self.assertEqual(set(self.service_registry_rpc.anchors), {service["enrollment"]["block_hash"]})
         for stage, path in self.config["releases"].items():
             runpod.atomic_json(Path(path), {**release(stage), "vk_hash": service["settings"]["vk_hash"]})
         for entry in self.config["sequencers"]:
@@ -1218,6 +1221,12 @@ class SupervisorTests(unittest.TestCase):
 
 
 class ServerlessSupervisorTests(unittest.TestCase):
+    advance = SupervisorTests.advance
+    pod = SupervisorTests.pod
+    complete = SupervisorTests.complete
+    count = SupervisorTests.count
+    picks = SupervisorTests.picks
+
     def setUp(self):
         SupervisorTests.setUp(self)
         self.fri_provider = serverless.ServerlessStore.initialize(self.root / "fri-provider", serverless_policy())
@@ -1290,6 +1299,82 @@ class ServerlessSupervisorTests(unittest.TestCase):
             self.instance.expire_active()
         self.assertIsNotNone(self.instance.state["active"])
 
+    def test_claim_presign_failure_keeps_preparation_atomic_and_retries_same_lease(self):
+        self.native.ready.add(("child", "FRI"))
+        with patch.object(self.objects, "compute_claim_plan", side_effect=runpod.Error("presign_failed")), \
+                self.assertRaisesRegex(runpod.Error, "presign_failed"):
+            self.instance.tick()
+        retained = runpod.read_private_json(self.store.root / "supervisor.json")["active"]
+        self.assertEqual(retained["phase"], "exported")
+        self.assertNotIn("serverless_deadline", retained)
+        self.assertNotIn("compute_claim_plan", retained)
+        self.assertEqual(self.posts(), [])
+        picks = len(self.picks())
+        self.advance(10)
+        self.reload().tick(acquire=False)
+        self.assertEqual(self.instance.state["active"]["id"], retained["id"])
+        self.assertEqual(self.instance.state["active"]["phase"], "published")
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual(len(self.picks()), picks)
+
+    def test_old_deadline_only_preparation_recovers_without_extending_deadline(self):
+        self.native.ready.add(("child", "FRI"))
+        with patch.object(self.instance, "publish_serverless", side_effect=runpod.Error("old_presign_failure")), \
+                self.assertRaises(runpod.Error):
+            self.instance.tick()
+        active = self.instance.state["active"]
+        active["serverless_deadline"] = self.now + 300
+        self.instance.save()
+        self.advance(10)
+        self.reload().tick(acquire=False)
+        self.assertEqual(self.instance.state["active"]["serverless_deadline"], 1300)
+        self.assertEqual(self.posts()[0][2]["input"]["deadline_unix"], 1300)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_old_expired_partial_deadline_cannot_get_a_fresh_compute_window(self):
+        self.native.ready.add(("child", "FRI"))
+        with patch.object(self.instance, "publish_serverless", side_effect=runpod.Error("old_presign_failure")), \
+                self.assertRaises(runpod.Error):
+            self.instance.tick()
+        active = self.instance.state["active"]
+        active["serverless_deadline"] = self.now + 30
+        self.instance.save()
+        self.advance(31)
+        with self.assertRaisesRegex(runpod.Error, "insufficient_compute_window"):
+            self.reload().tick(acquire=False)
+        self.assertEqual(self.instance.state["active"]["serverless_deadline"], 1030)
+        self.assertEqual(self.posts(), [])
+
+    def test_submitted_backend_recovers_missing_preparation_from_exact_original_input(self):
+        original = self.publish()
+        for missing in (("compute_claim_plan",), ("serverless_deadline",),
+                        ("compute_claim_plan", "serverless_deadline")):
+            with self.subTest(missing=missing):
+                partial = copy.deepcopy(original)
+                partial.update(phase="exported", rental_operation=None)
+                for key in missing:
+                    del partial[key]
+                self.instance.state["active"] = partial
+                self.instance.save()
+                with patch.object(self.objects, "compute_claim_plan", side_effect=AssertionError("no fresh signature")):
+                    self.reload().tick(acquire=False)
+                self.assertEqual(self.instance.state["active"], original)
+                self.assertEqual(len(self.posts()), 1)
+
+    def test_submitted_backend_cannot_repair_conflicting_local_authority(self):
+        original = self.publish()
+        for key, value in (("serverless_deadline", original["serverless_deadline"] + 1),
+                           ("compute_claim_plan", {"claim_get_url": "https://other.example/claim",
+                                                   "claim_put_url": "https://other.example/claim"})):
+            with self.subTest(key=key):
+                partial = {**copy.deepcopy(original), key: value, "phase": "exported", "rental_operation": None}
+                self.instance.state["active"] = partial
+                self.instance.save()
+                with self.assertRaisesRegex(runpod.Error, "serverless_attempt_changed"):
+                    self.reload().tick(acquire=False)
+                self.assertEqual(self.instance.state["active"], partial)
+                self.assertEqual(len(self.posts()), 1)
+
     def test_ambiguous_native_submission_reuses_exact_proof_and_does_not_hold_worker(self):
         active = self.publish()
         result = self.result(active)
@@ -1337,6 +1422,115 @@ class ServerlessSupervisorTests(unittest.TestCase):
         self.fri_provider.save(state)
         with self.assertRaisesRegex(runpod.Error, "policy_changed"):
             self.reload()
+
+    def finish_snark(self):
+        self.native.ready.add(("child", "SNARK"))
+        self.instance.tick()
+        self.complete()
+        self.assertIsNone(self.instance.state["pod_idle_since"])
+
+    def test_idle_snark_pod_stops_and_deletes_while_serverless_fri_stays_pending(self):
+        self.finish_snark()
+        active = self.publish()
+        pod = self.pod()
+        self.assertEqual(self.instance.state["pod_idle_since"], self.now)
+        self.advance(30)
+        self.reload().tick(acquire=False)
+        self.assertTrue(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(pod.tick(), "finished")
+        self.instance.tick(acquire=False)
+        self.assertIsNone(self.instance.state["session"])
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(self.count("delete"), 1)
+        self.assertEqual(len(self.posts()), 1)
+        self.result(active)
+        self.instance.tick(acquire=False)
+        self.assertIsNone(self.instance.state["active"])
+
+    def test_successive_serverless_fri_jobs_do_not_reset_pod_idle_grace(self):
+        self.finish_snark()
+        active = self.publish()
+        since = self.instance.state["pod_idle_since"]
+        for _ in range(2):
+            self.advance(10)
+            result = self.result(active)
+            self.serverless_api.result.update(status="COMPLETED", output=result)
+            self.instance.tick(acquire=False)
+            self.assertEqual(self.instance.state["pod_idle_since"], since)
+            with self.fri_provider.lock():
+                self.instance.compute_controller("FRI").check_capacity()
+            self.serverless_api.result = {"id": "run-test", "status": "IN_QUEUE"}
+            active = self.publish()
+            self.assertEqual(self.instance.state["pod_idle_since"], since)
+        self.advance(10)
+        self.instance.tick(acquire=False)
+        self.assertTrue(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+
+    def test_pod_capacity_failure_is_not_an_empty_observation_during_fri(self):
+        self.finish_snark()
+        original = self.instance.check_acquisition_capacity
+        def failed_snark(stage=None):
+            if stage == "SNARK":
+                raise runpod.Error("pod_capacity_unavailable")
+            return original(stage)
+        with patch.object(self.instance, "check_acquisition_capacity", failed_snark):
+            active = self.publish()
+        self.assertIsNone(self.instance.state["pod_idle_since"])
+        self.advance(31)
+        self.reload().tick(acquire=False)
+        self.assertFalse(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(self.count("delete"), 0)
+
+    def test_serverless_failure_preserves_confirmed_pod_idle_and_does_not_block_stop(self):
+        self.finish_snark()
+        active = self.publish()
+        since = self.instance.state["pod_idle_since"]
+        self.advance(29)
+        with patch.object(self.serverless_api, "status", side_effect=runpod.Error("serverless_outage")):
+            with self.assertRaisesRegex(runpod.Error, "serverless_outage"):
+                self.instance.tick(acquire=False)
+            self.assertEqual(self.instance.state["pod_idle_since"], since)
+            self.advance(1)
+            with self.assertRaisesRegex(runpod.Error, "serverless_outage"):
+                self.instance.tick(acquire=False)
+        self.assertTrue(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+
+    def test_pod_observation_failure_clears_idle_evidence_during_serverless_fri(self):
+        self.finish_snark()
+        active = self.publish()
+        self.advance(29)
+        with patch.object(self.api, "get", side_effect=runpod.Error("pod_provider_outage")), \
+                self.assertRaisesRegex(runpod.Error, "pod_provider_outage"):
+            self.instance.tick(acquire=False)
+        self.assertIsNone(self.instance.state["pod_idle_since"])
+        self.advance(2)
+        self.reload().tick(acquire=False)
+        self.assertFalse(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+
+    def test_pending_snark_authority_still_prevents_idle_stop(self):
+        self.native.ready.add(("child", "SNARK"))
+        self.instance.tick()
+        with self.assertRaisesRegex(runpod.Error, "pending_authority_prevents_idle_stop"):
+            self.instance.stop_session()
+        self.advance(31)
+        self.instance.tick(acquire=False)
+        self.assertFalse(self.instance.state["session"]["stopping"])
+
+    def test_older_journal_defaults_to_no_pod_empty_evidence(self):
+        self.finish_snark()
+        active = self.publish()
+        del self.instance.state["pod_idle_since"]
+        self.instance.save()
+        self.advance(31)
+        self.reload().tick(acquire=False)
+        self.assertIsNone(self.instance.state["pod_idle_since"])
+        self.assertFalse(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
 
     def test_scoped_urls_must_cover_provider_retention_and_startup_recovery(self):
         selected = copy.deepcopy(self.config)

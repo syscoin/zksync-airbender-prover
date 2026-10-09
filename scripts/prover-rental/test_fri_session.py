@@ -257,6 +257,32 @@ fri_session._guard(int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), sys.a
         self.assertIsNotNone(session.process.returncode)
         self.assertEqual([event["kind"] for event in self.events()], ["init"])
 
+    def test_full_timeout_admission_rejects_short_guardian_before_exposing_work(self):
+        for field, now in (("deadline", time.monotonic), ("wall_deadline", time.time)):
+            with self.subTest(clock=field):
+                session = self.session()
+                session.prewarm(release("FRI"), 5)
+                setattr(session, field, now() + .5)
+                self.assertTrue(session.usable())
+                self.assertFalse(session.usable(1))
+                work = self.work(12 if field == "deadline" else 13)
+                with self.assertRaisesRegex(runpod.Error, "fri_session_insufficient_lifetime"):
+                    session.run(work, release("FRI"), self.root, 1, require_full_timeout=True)
+                self.assertFalse(work.picked)
+                self.assertIsNone(work.result)
+                self.assertTrue(session.closed)
+                self.assertIsNone(session.current)
+
+    def test_full_timeout_admission_proves_through_real_native_http_session(self):
+        session = self.session()
+        session.prewarm(release("FRI"), 5)
+        work = self.work()
+        session.run(work, release("FRI"), self.root, 2, deadline_unix=time.time() + 5,
+                    require_full_timeout=True)
+        self.assertTrue(work.picked)
+        self.assertIsNotNone(work.result)
+        self.assertTrue(session.usable())
+
     def test_guardian_enforces_absolute_lifetime_without_active_parent_handler(self):
         session = self.session(lifetime_seconds=20)
         session.wall_deadline = time.time() + .8

@@ -25,6 +25,19 @@ INPUT_FIELDS = ("schema_version", "attempt_id", "job_id", "stage", "manifest_url
                 "artifact_get_url", "result_manifest_get_url")
 CLAIM_FIELDS = ("schema_version", "attempt_id", "job_id", "manifest_sha256", "claim_nonce", "deadline_unix")
 RESULT_FIELDS = ("schema_version", "operation_id", "job_id", "manifest_sha256", "artifact_sha256", "artifact_bytes")
+MAX_RUNTIME_SECONDS = 86400
+ADMISSION_MARGIN_SECONDS = 1
+PUBLICATION_RETRY_SECONDS = .25
+
+
+class TransientStorageError(Error):
+    """A bounded publication retry is safe; no capability is included in the error."""
+
+
+def _storage_status(status, allowed):
+    if status in (408, 429) or 500 <= status < 600:
+        raise TransientStorageError("transient_storage_failure")
+    require(status in allowed, "scoped_storage_refused")
 
 
 def validate_input(value):
@@ -36,7 +49,7 @@ def validate_input(value):
             "invalid_job_id")
     sha256(value["manifest_sha256"])
     positive_int(value["deadline_unix"])
-    positive_int(value["runtime_limit_seconds"])
+    require(positive_int(value["runtime_limit_seconds"]) <= MAX_RUNTIME_SECONDS, "unsupported_serverless_runtime")
     for name in INPUT_FIELDS:
         if name.endswith("_url"):
             https_url(value[name])
@@ -47,8 +60,12 @@ def validate_input(value):
 class ScopedNetwork(job.Network):
     def optional(self, url, maximum, deadline):
         status, _, body = self.request(url, maximum=maximum, deadline=deadline)
-        require(status in (200, 404), "scoped_download_failed")
+        _storage_status(status, (200, 404))
         return body if status == 200 else None
+
+    def put(self, url, data, deadline=None):
+        status, _, _ = self.request(url, "PUT", data, maximum=job.MAX_MANIFEST, deadline=deadline)
+        _storage_status(status, (200, 201, 204))
 
     def claim(self, url, data, deadline):
         # The trusted controller signs this header into the attempt-scoped PUT.
@@ -142,21 +159,22 @@ class ServerlessFriWorker:
             os.close(self.runtime_lock)
             self.runtime_lock = None
 
-    def _ensure_session(self, timeout, cancelled=None):
+    def _ensure_session(self, timeout, cancelled=None, *, minimum_remaining_seconds=0, lifetime_seconds=None):
         require(not self.closed and not self.poisoned, "serverless_worker_unavailable")
         if cancelled is not None:
             require(not cancelled.is_set(), "serverless_cancelled")
-        if self.session is not None and self.session.usable():
+        if self.session is not None and self.session.usable(minimum_remaining_seconds):
             return self.session
         self._retire_session()
-        current = self.session_factory(lock_fd=self.runtime_lock, lifetime_seconds=self.session_lifetime)
+        current = self.session_factory(lock_fd=self.runtime_lock,
+                                       lifetime_seconds=lifetime_seconds or self.session_lifetime)
         self.session = current
         try:
             require(not self.closed and not self.poisoned, "serverless_worker_unavailable")
             if cancelled is not None:
                 require(not cancelled.is_set(), "serverless_cancelled")
             current.prewarm(self.release, min(timeout, self.initialization_timeout))
-            require(current.usable(), "serverless_native_not_ready")
+            require(current.usable(minimum_remaining_seconds), "serverless_native_not_ready")
             return current
         except BaseException:
             self._retire_session()
@@ -223,8 +241,8 @@ class ServerlessFriWorker:
         # restoration. A nonce captured in an initialized image could be reused
         # by two workers and defeat reconciliation of an ambiguous claim PUT.
         nonce = secrets.token_hex(32)
-        wall_deadline = min(value["deadline_unix"], time.time() + value["runtime_limit_seconds"])
-        monotonic_deadline = time.monotonic() + value["runtime_limit_seconds"]
+        wall_deadline = value["deadline_unix"]
+        monotonic_deadline = time.monotonic() + max(0, wall_deadline - time.time())
 
         def check():
             require(not self.closed and not self.poisoned and not cancelled.is_set(), "serverless_cancelled")
@@ -256,17 +274,27 @@ class ServerlessFriWorker:
         binding = {"attempt_id": value["attempt_id"], "job_id": value["job_id"],
                    "manifest_sha256": value["manifest_sha256"], "deadline_unix": value["deadline_unix"]}
         binding_path, proof_path = directory / "binding.json", directory / "proof.json"
-        if directory.exists():
+        orphan = False
+        if os.path.lexists(directory):
             _private_directory(directory)
-            require(job.read_file(binding_path, job.MAX_MANIFEST, private=True) == job.encode(binding),
-                    "local_attempt_mismatch")
+            require({path.name for path in directory.iterdir()} <= {"binding.json", "proof.json"},
+                    "unknown_local_attempt_file")
+            if os.path.lexists(binding_path):
+                require(job.read_file(binding_path, job.MAX_MANIFEST, private=True) == job.encode(binding),
+                        "local_attempt_mismatch")
+            else:
+                # Cleanup can be interrupted after removing the binding. Such a
+                # directory grants no compute or publication authority by itself.
+                orphan = True
 
         def complete(result):
             # Remote readback is the recovery authority after acknowledgment;
             # keeping every successful witness would fill a long-lived image.
-            if directory.exists():
+            if os.path.lexists(directory):
+                require({path.name for path in directory.iterdir()} <= {"binding.json", "proof.json"},
+                        "unknown_local_attempt_file")
                 for path in (proof_path, binding_path):
-                    if path.exists():
+                    if os.path.lexists(path):
                         path.unlink()
                 sync_dir(directory)
                 directory.rmdir()
@@ -292,22 +320,43 @@ class ServerlessFriWorker:
                     "manifest_sha256": value["manifest_sha256"], "artifact_sha256": job.hash_bytes(proof),
                     "artifact_bytes": len(proof)}
 
-        def publish(proof, artifact_present=False):
+        def durable_write(put_url, get_url, expected, maximum):
+            while True:
+                try:
+                    existing = optional(get_url, maximum)
+                    if existing is not None:
+                        require(existing == expected, "publication_readback_mismatch")
+                        return
+                    self.network.put(put_url, expected, deadline())
+                    existing = optional(get_url, maximum)
+                    if existing is not None:
+                        require(existing == expected, "publication_readback_mismatch")
+                        return
+                except Error as error:
+                    if not isinstance(error, TransientStorageError) and str(error) != "transport_failure":
+                        raise
+                # Read back first on every retry: a failed PUT response may
+                # already have committed these exact bytes. Cancellation wakes
+                # this wait immediately, without another upload or computation.
+                cancelled.wait(min(PUBLICATION_RETRY_SECONDS, max(0, deadline() - time.monotonic())))
+                check()
+
+        def publish(proof):
             validate_proof(proof)
-            if not artifact_present:
-                self.network.put(manifest["artifact_put_url"], proof, deadline())
-            require(optional(value["artifact_get_url"], job.MAX_SUBMIT) == proof, "artifact_readback_mismatch")
+            durable_write(manifest["artifact_put_url"], value["artifact_get_url"], proof, job.MAX_SUBMIT)
             result = receipt(proof)
-            self.network.put(manifest["result_manifest_put_url"], job.encode(result), deadline())
-            require(optional(value["result_manifest_get_url"], job.MAX_MANIFEST) == job.encode(result),
-                    "result_readback_mismatch")
+            durable_write(manifest["result_manifest_put_url"], value["result_manifest_get_url"],
+                          job.encode(result), job.MAX_MANIFEST)
             check()
             return complete(result)
 
         def recover(raw_claim):
             raw_result = optional(value["result_manifest_get_url"], job.MAX_MANIFEST)
             artifact = optional(value["artifact_get_url"], job.MAX_SUBMIT)
-            local = job.read_file(proof_path, job.MAX_SUBMIT, private=True) if proof_path.exists() else None
+            local = job.read_file(proof_path, job.MAX_SUBMIT, private=True) if os.path.lexists(proof_path) else None
+            if orphan:
+                require(raw_claim is not None and raw_result is not None and artifact is not None,
+                        "orphan_requires_complete_remote_result")
             if raw_result is not None or artifact is not None or local is not None:
                 require(raw_claim is not None, "proof_without_compute_claim")
                 validate_claim(raw_claim)
@@ -321,7 +370,7 @@ class ServerlessFriWorker:
                     exact_fields(result, RESULT_FIELDS)
                     require(artifact is not None and result == receipt(artifact), "invalid_stored_result")
                     return complete(result)
-                return publish(artifact if artifact is not None else local, artifact is not None)
+                return publish(artifact if artifact is not None else local)
             return None
 
         raw_claim = optional(value["claim_get_url"], job.MAX_MANIFEST)
@@ -332,7 +381,24 @@ class ServerlessFriWorker:
             return recovered
         require(raw_claim is None, "attempt_already_started")
         native_active.set()
-        current = self._ensure_session(max(.01, deadline() - time.monotonic()), cancelled)
+        setup_remaining = self.initialization_timeout
+        required_remaining = value["runtime_limit_seconds"] + ADMISSION_MARGIN_SECONDS
+
+        def prepare_session():
+            nonlocal setup_remaining
+            remaining = deadline() - time.monotonic()
+            require(remaining > required_remaining, "insufficient_proving_window")
+            timeout = min(setup_remaining, remaining - required_remaining)
+            require(timeout > 0 or (self.session is not None and self.session.usable(required_remaining)),
+                    "serverless_startup_budget_exhausted")
+            started, wall_started = time.monotonic(), time.time()
+            current = self._ensure_session(timeout, cancelled, minimum_remaining_seconds=required_remaining,
+                                           lifetime_seconds=max(self.session_lifetime, timeout + required_remaining + 1))
+            setup_remaining -= max(time.monotonic() - started, time.time() - wall_started)
+            require(deadline() - time.monotonic() > required_remaining, "insufficient_proving_window")
+            return current
+
+        current = prepare_session()
         check()
         claim = {"schema_version": 1, **binding, "claim_nonce": nonce}
         try:
@@ -352,9 +418,18 @@ class ServerlessFriWorker:
         _private_directory(directory)
         job.write_new(binding_path, job.encode(binding))
         work = worker.OneJob(payload, self.release, proof_path)
-        work.on_result = lambda _: check()
-        current.run(work, self.release, directory, max(.01, deadline() - time.monotonic()),
-                    deadline_unix=wall_deadline)
+        # Claim I/O and fsync can age the prewarmed guardian. Rotate while still
+        # owning this nonce and before any native work is exposed to a pick.
+        current = prepare_session()
+        compute_wall_deadline = min(wall_deadline, time.time() + value["runtime_limit_seconds"])
+        compute_monotonic_deadline = time.monotonic() + value["runtime_limit_seconds"]
+        def check_compute():
+            check()
+            require(time.time() < compute_wall_deadline and time.monotonic() < compute_monotonic_deadline,
+                    "serverless_proving_deadline")
+        work.on_result = lambda _: check_compute()
+        current.run(work, self.release, directory, value["runtime_limit_seconds"],
+                    deadline_unix=wall_deadline, require_full_timeout=True)
         check()
         require(work.result is not None, "native_worker_did_not_return_proof")
         return publish(work.result)

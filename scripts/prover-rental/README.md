@@ -11,6 +11,9 @@ SNARK jobs use the existing rented Pods and their independent watchdog. The loca
 supervisor remains running to submit work as it arrives. Multiple supervisors
 can share provider directories and their limits. Each Serverless controller
 allows one unresolved FRI attempt at a time; its endpoint permits one GPU worker.
+With Serverless FRI enabled, an unused SNARK Pod keeps its own idle timer and
+can stop while a FRI job is still running. Successful empty SNARK polls establish
+that timer; FRI activity does not reset it.
 
 `supervisor.py` is the continuous runner. It checks actual SNARK job claims before
 FRI work, retains exact lease and submission state locally, and never interprets
@@ -135,8 +138,15 @@ This does not extend the worker's absolute computation deadline or its lease.
 
 Each Serverless attempt conditionally creates one durable object-store claim.
 Repeated deliveries and conflicting workers cannot both compute that attempt;
-upload retries recover the retained proof. A failed or unknown execution is kept
-for reconciliation rather than silently recomputed. A missing Runpod status is
+the same handler retries transient publication failures using retained proof
+bytes, with readback after an ambiguous upload and no repeated computation.
+The original absolute lease deadline bounds initialization, proving and uploads.
+Initialization has its own 600-second allowance; the configured proving allowance
+starts after setup. A restored session without enough remaining lifetime is
+reaped and replaced before admitting native work. Interrupted local cleanup can
+recover only against the matching complete remote claim, proof and receipt.
+A failed or unknown execution is kept for reconciliation rather than silently
+recomputed. A missing Runpod status is
 not evidence that its worker stopped. If a POST response was lost but the run
 completed, identify its run ID in Runpod, then bind it using:
 
@@ -289,4 +299,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/prover-rental 
 ```
 
 Set `ZKSYNC_OS_SERVER_DIR` for the optional cross-repository service/keeper tests;
-install the controller requirements to run the offline SDK contract test.
+install Foundry `cast` v1.7.1 for their real service signatures and install the
+controller requirements to run the offline SDK contract test.
+The Linux rental CI pins a companion server checkout, requires all tests to run
+without skips, and installs the hash-locked Serverless SDK in Python 3.12. That
+dependency check does not qualify the CUDA image or GPU snapshot restoration.

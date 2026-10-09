@@ -289,11 +289,13 @@ class FriSession:
         finally:
             os.close(ready_read)
 
-    def usable(self):
+    def usable(self, minimum_remaining_seconds=0):
         with self.condition:
             return (not self.closed and self.current is None and self.process is not None
-                    and self.process.poll() is None and time.monotonic() < self.deadline
-                    and time.time() < self.wall_deadline and len(self.completed) < MAX_JOBS)
+                    and self.process.poll() is None and self.ready
+                    and time.monotonic() + minimum_remaining_seconds < self.deadline
+                    and time.time() + minimum_remaining_seconds < self.wall_deadline
+                    and len(self.completed) < MAX_JOBS)
 
     def prewarm(self, release, timeout):
         try:
@@ -318,7 +320,7 @@ class FriSession:
             self.close()
             raise
 
-    def run(self, work, release, directory, timeout, *, deadline_unix=None):
+    def run(self, work, release, directory, timeout, *, deadline_unix=None, require_full_timeout=False):
         del directory  # The native cwd and submission spool belong to the session.
         try:
             with self.condition:
@@ -326,6 +328,14 @@ class FriSession:
                 require(release["stage"] == "FRI" and (self.release is None or self.release == release),
                         "fri_session_release_mismatch")
                 require(len(self.completed) < MAX_JOBS, "fri_session_capacity")
+                if require_full_timeout:
+                    # Admission is the last fence after adapter disk/network I/O:
+                    # never expose work whose guardian would truncate its budget.
+                    require(self.ready and self.process is not None and self.process.poll() is None
+                            and time.monotonic() + timeout < self.deadline
+                            and time.time() + timeout < self.wall_deadline
+                            and (deadline_unix is None or time.time() + timeout < deadline_unix),
+                            "fri_session_insufficient_lifetime")
                 self.current = work
             deadline = min(self.deadline, time.monotonic() + timeout)
             wall_deadline = min(self.wall_deadline, time.time() + timeout,
