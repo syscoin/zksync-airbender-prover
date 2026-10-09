@@ -1554,6 +1554,79 @@ class ServerlessSupervisorTests(unittest.TestCase):
         self.assertIsNone(self.instance.state["active"])
         self.assertEqual(self.fri_provider.load()["reserved_usd"], "2")
 
+    def close_provider_lifetime(self, active):
+        op = self.instance.compute_controller("FRI").operation(active["id"])
+        self.now = serverless.lifetime_bound(op["provider_lifetime"])
+        self.serverless_api.fail_status = True
+        with self.fri_provider.lock():
+            self.instance.compute_controller("FRI").tick(active["id"])
+        return self.instance.compute_controller("FRI").operation(active["id"])
+
+    def test_bounded_absent_native_expiry_keeps_separate_source_lease_gate(self):
+        active = self.publish()
+        original_input = copy.deepcopy(self.posts()[0][2]["input"])
+        op = self.close_provider_lifetime(active)
+        self.assertTrue(serverless.provider_resolved(op))
+        # Provider closure alone cannot shorten the independently retained source lease.
+        self.instance.state["active"]["expiry_not_before"] = self.now + 10
+        self.instance.save()
+        with self.assertRaisesRegex(runpod.Error, "native_lease_not_expired"):
+            self.reload().expire_active()
+        self.assertIsNotNone(self.instance.state["active"])
+        self.advance(10)
+        self.assertEqual(self.instance.expire_active(), "expired")
+        self.assertIsNone(self.instance.state["active"])
+        archived = self.instance.compute_controller("FRI").operation(active["id"])
+        self.assertEqual(archived["provider_status"], "ABSENT")
+        self.assertEqual(archived["disposition"], "expired")
+        self.assertEqual(archived["input"], original_input)
+        self.assertEqual(self.fri_provider.load()["reserved_usd"], "2")
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_bounded_absent_native_submission_ambiguity_still_blocks_expiry(self):
+        active = self.publish()
+        self.close_provider_lifetime(active)
+        directory = self.instance.directory(active)
+        runpod.atomic_json(directory / "submission.json", {"schema_version": 1, "unknown": True})
+        with self.assertRaisesRegex(runpod.Error, "origin_reconciliation"):
+            self.reload().expire_active()
+        self.assertIsNotNone(self.instance.state["active"])
+        self.assertIn(active["id"], self.fri_provider.load()["operations"])
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_bounded_absent_external_expiry_preserves_ownership_and_reservation(self):
+        external = self.external_pool()
+        operation = SupervisorTests.enqueue_external_fri(self, external, "dispatcher:absent", 1400)
+        self.instance.tick()
+        active = copy.deepcopy(self.instance.state["active"])
+        before = copy.deepcopy(pool.Pool(external.store).operation(operation))
+        self.close_provider_lifetime(active)
+        self.reload().tick(acquire=False)
+        self.assertIsNone(self.instance.state["active"])
+        retired = pool.Pool(external.store).operation(operation)
+        self.assertEqual(retired["status"], "lease_expired")
+        self.assertEqual(retired["warm_owner"], before["warm_owner"])
+        self.assertEqual(retired["reserved_usd"], before["reserved_usd"])
+        self.assertEqual(retired["deadline"], before["deadline"])
+        self.assertEqual(self.fri_provider.load()["reserved_usd"], "2")
+        self.assertEqual(self.native.calls, [])
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_bounded_absent_external_owner_mismatch_cannot_retire(self):
+        external = self.external_pool()
+        operation = SupervisorTests.enqueue_external_fri(self, external, "dispatcher:changed-owner", 1400)
+        self.instance.tick()
+        active = copy.deepcopy(self.instance.state["active"])
+        self.close_provider_lifetime(active)
+        candidate = pool.Pool(external.store)
+        candidate.operation(operation)["warm_owner"] = "f" * 32
+        candidate.save()
+        with self.assertRaises(runpod.Error):
+            self.reload().expire_active()
+        self.assertEqual(pool.Pool(external.store).operation(operation)["status"], "warm_claimed")
+        self.assertIsNotNone(self.instance.state["active"])
+        self.assertEqual(len(self.posts()), 1)
+
     def test_external_pool_claim_returns_with_strict_serverless_receipt_factory(self):
         external = self.external_pool()
         operation = SupervisorTests.enqueue_external_fri(self, external, "dispatcher:flashboot", 1400)

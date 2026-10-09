@@ -4,6 +4,7 @@
 import argparse
 from decimal import Decimal
 import hashlib
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,56 @@ FINAL = {"accepted", "rejected", "returned", "expired"}
 PROVIDER_FINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}
 OP_FIELDS = ("backend", "controller_id", "job", "input", "created_at", "deadline", "reserved_usd",
              "provider_job_id", "provider_status", "status", "receipt", "disposition", "last_error")
+
+
+def timestamp(value):
+    require(type(value) in (int, float) and math.isfinite(value) and 0 <= value < 1e12,
+            "invalid_serverless_timestamp")
+    return value
+
+
+def lifetime_bound(evidence):
+    return (evidence["anchor_at"] + (evidence["ttl_ms"] + evidence["execution_timeout_ms"]) / 1000
+            + evidence["cleanup_allowance_seconds"])
+
+
+def provider_resolved(operation):
+    # ABSENT alone is never final. This separate local closure retains the actual
+    # 404 observation, not a fabricated Runpod COMPLETED/TIMED_OUT response.
+    evidence = operation.get("provider_lifetime")
+    return operation["provider_status"] in PROVIDER_FINAL or (
+        operation["provider_status"] == "ABSENT" and evidence is not None and evidence["closed_at"] is not None)
+
+
+def validate_lifetime(operation, policy):
+    evidence = operation.get("provider_lifetime")
+    if "provider_lifetime" not in operation:
+        return
+    exact_fields(evidence, ("basis", "endpoint_id", "provider_job_id", "anchor_at", "ttl_ms",
+                            "execution_timeout_ms", "cleanup_allowance_seconds", "closed_at", "contradicted_at"))
+    require(evidence["basis"] in ("submit_ack", "legacy_observation")
+            and evidence["endpoint_id"] == policy["endpoint_id"]
+            and operation["provider_job_id"] is not None
+            and evidence["provider_job_id"] == operation["provider_job_id"], "serverless_lifetime_identity_changed")
+    require(timestamp(evidence["anchor_at"]) >= operation["created_at"], "serverless_lifetime_clock_rollback")
+    # New records bind the exact request; legacy records conservatively wait
+    # from a fresh observation using maximum policy bounds, not an invented ACK.
+    runtime = (int(operation["deadline"] - operation["created_at"]) if evidence["basis"] == "submit_ack"
+               else policy["limits"]["max_runtime_seconds"])
+    require(0 < runtime <= policy["limits"]["max_runtime_seconds"]
+            and type(evidence["execution_timeout_ms"]) is int and evidence["execution_timeout_ms"] == runtime * 1000
+            and type(evidence["ttl_ms"]) is int
+            and evidence["ttl_ms"] == (runtime + policy["limits"]["result_retention_seconds"]) * 1000
+            and type(evidence["cleanup_allowance_seconds"]) is int
+            and evidence["cleanup_allowance_seconds"] == policy["limits"]["startup_timeout_seconds"]
+                + 10 + policy["idle_timeout_seconds"], "serverless_lifetime_bounds_changed")
+    if evidence["closed_at"] is not None:
+        require(timestamp(evidence["closed_at"]) >= lifetime_bound(evidence)
+                and evidence["contradicted_at"] is None
+                and operation["provider_status"] == "ABSENT", "invalid_serverless_lifetime_closure")
+    if evidence["contradicted_at"] is not None:
+        require(timestamp(evidence["contradicted_at"]) >= lifetime_bound(evidence),
+                "invalid_serverless_lifetime_counterevidence")
 
 
 def identifier(value):
@@ -96,8 +147,8 @@ def validate_input(value):
     return value
 
 
-def validate_operation(value, controller_id):
-    exact_fields(value, OP_FIELDS)
+def validate_operation(value, controller_id, policy):
+    exact_fields(value, OP_FIELDS + (("provider_lifetime",) if "provider_lifetime" in value else ()))
     require(value["backend"] == BACKEND and value["controller_id"] == controller_id, "serverless_controller_changed")
     validate_job(value["job"])
     validate_input(value["input"])
@@ -124,6 +175,7 @@ def validate_operation(value, controller_id):
         sha256(value["receipt"]["sha256"])
         positive_int(value["receipt"]["bytes"])
         require(value["receipt"]["proof_verified"] is False, "transport_receipt_cannot_verify_proof")
+    validate_lifetime(value, policy)
     return value
 
 
@@ -151,7 +203,7 @@ class ServerlessStore(Store):
                 "serverless_state_capacity_reached")
         for key, op in value["operations"].items():
             attempt(key)
-            validate_operation(op, value["controller_id"])
+            validate_operation(op, value["controller_id"], value["policy"])
             require(op["input"]["attempt_id"] == key, "serverless_attempt_changed")
         reserved = money(value["reserved_usd"], allow_zero=True)
         require(reserved <= money(value["policy"]["limits"]["lifetime_budget_usd"])
@@ -211,7 +263,7 @@ class ServerlessController:
         if op is None:
             op = self.store.history_json("serverless-op-" + operation_id + ".json")
         if op is not None:
-            validate_operation(op, self.state["controller_id"])
+            validate_operation(op, self.state["controller_id"], self.policy)
             require(op["input"]["attempt_id"] == operation_id, "serverless_attempt_changed")
         return op
 
@@ -240,6 +292,14 @@ class ServerlessController:
         require(len(self.state["operations"]) < 128, "serverless_state_capacity_reached")
         require(money(self.state["reserved_usd"], allow_zero=True) + money(self.limits["max_operation_usd"])
                 <= money(self.limits["lifetime_budget_usd"]), "serverless_lifetime_budget_exhausted")
+
+    def lifetime_evidence(self, op, basis, observed_at):
+        runtime = int(op["deadline"] - op["created_at"]) if basis == "submit_ack" else self.limits["max_runtime_seconds"]
+        return {"basis": basis, "endpoint_id": self.policy["endpoint_id"], "provider_job_id": op["provider_job_id"],
+                "anchor_at": timestamp(observed_at), "ttl_ms": (runtime + self.limits["result_retention_seconds"]) * 1000,
+                "execution_timeout_ms": runtime * 1000,
+                "cleanup_allowance_seconds": self.limits["startup_timeout_seconds"] + 10 + self.policy["idle_timeout_seconds"],
+                "closed_at": None, "contradicted_at": None}
 
     def preflight(self):
         require(self.api is not None, "serverless_api_required")
@@ -317,9 +377,9 @@ class ServerlessController:
         self.state["operations"][attempt_id] = op
         self.state["reserved_usd"] = str(money(self.state["reserved_usd"], allow_zero=True) + money(reserved))
         self.save()
-        # Provider retention cannot renew the native capability. Late delivery
-        # rejects at the worker's absolute deadline, while terminal status survives
-        # long enough for trusted-host recovery rather than disappearing at expiry.
+        # TTL is a job lifetime bound, NOT result retention: /run results expire
+        # 30 minutes after completion regardless of TTL. Late delivery still
+        # cannot renew the worker's original absolute computation deadline.
         try:
             response = self.api.submit(self.policy["endpoint_id"], {"input": value,
                 "policy": {"executionTimeout": remaining * 1000,
@@ -328,6 +388,11 @@ class ServerlessController:
                     "invalid_serverless_submit_response")
             op.update(provider_job_id=identifier(response.get("id")), provider_status=response["status"],
                       status="submitted")
+            # Receipt of the response is an upper bound on provider acceptance;
+            # created_at (before POST) cannot safely anchor a delayed request.
+            evidence = self.lifetime_evidence(op, "submit_ack", self.clock())
+            validate_lifetime({**op, "provider_lifetime": evidence}, self.policy)
+            op["provider_lifetime"] = evidence
         except Exception:
             op["last_error"] = "serverless_submission_uncertain"
             self.save()
@@ -337,7 +402,7 @@ class ServerlessController:
 
     def tick(self, operation_id):
         op = self.operation(operation_id)
-        if op["provider_job_id"] is None or op["provider_status"] in PROVIDER_FINAL:
+        if op["provider_job_id"] is None or provider_resolved(op):
             return
         require(self.api is not None, "serverless_api_required")
         try:
@@ -346,10 +411,30 @@ class ServerlessController:
             if error.status != 404:
                 raise
             op["provider_status"] = "ABSENT"
+            observed_at = timestamp(self.clock())
+            if "provider_lifetime" not in op:
+                op["provider_lifetime"] = self.lifetime_evidence(op, "legacy_observation", observed_at)
+            evidence = op["provider_lifetime"]
+            require(observed_at >= evidence["anchor_at"], "serverless_lifetime_clock_rollback")
+            # A fresh authenticated 404 after the conservative lifetime bound is
+            # distinct from proof delivery or an early/missing status. No retry,
+            # cancellation, extra compute permission or budget release occurs.
+            if observed_at >= lifetime_bound(evidence) and evidence["contradicted_at"] is None:
+                evidence["closed_at"] = observed_at
+            validate_lifetime(op, self.policy)
         else:
             require(isinstance(response, dict) and response.get("id") == op["provider_job_id"]
                     and response.get("status") in {"IN_QUEUE", "IN_PROGRESS"} | PROVIDER_FINAL,
                     "invalid_serverless_status_response")
+            evidence = op.get("provider_lifetime")
+            if evidence is not None and response["status"] not in PROVIDER_FINAL:
+                observed_at = timestamp(self.clock())
+                require(observed_at >= evidence["anchor_at"], "serverless_lifetime_clock_rollback")
+                if observed_at >= lifetime_bound(evidence) and evidence["contradicted_at"] is None:
+                    # Actual live work after the bound disproves this fallback.
+                    # Only a genuine terminal response can then reconcile it.
+                    evidence["contradicted_at"] = observed_at
+                    op["last_error"] = "serverless_lifetime_contradicted"
             op["provider_status"] = response["status"]
         self.save()
 
@@ -401,21 +486,23 @@ class ServerlessController:
         require(op["disposition"] in (None, disposition), "serverless_disposition_changed")
         if disposition == "expired":
             require(self.clock() >= op["deadline"] and op["receipt"] is None
-                    and op["provider_status"] in PROVIDER_FINAL, "serverless_provider_deadline_not_elapsed")
+                    and provider_resolved(op), "serverless_provider_deadline_not_elapsed")
         else:
             self.verify_receipt(operation_id)
         op.update(status="finished", disposition=disposition)
         self.save()
         # An uploaded proof is independent of Runpod's execution disposition. Keep
         # unknown submissions blocking new spend until their run is identified.
-        if op["provider_status"] not in PROVIDER_FINAL:
+        if not provider_resolved(op):
             return
         self.archive(operation_id)
 
     def archive(self, operation_id):
         op = self.operation(operation_id)
-        require(op["disposition"] in FINAL and op["provider_status"] in PROVIDER_FINAL,
+        require(op["disposition"] in FINAL and provider_resolved(op),
                 "serverless_operation_requires_reconciliation")
+        if op["disposition"] != "expired":
+            self.verify_receipt(operation_id)
         self.store.retain_history("serverless-op-" + operation_id + ".json", op)
         self.store.retain_history("serverless-job-" + hashlib.sha256(op["job"]["job_id"].encode()).hexdigest() + ".json",
             {"backend": BACKEND, "controller_id": self.state["controller_id"], "job_id": op["job"]["job_id"],
@@ -427,11 +514,13 @@ class ServerlessController:
         for operation_id, op in list(self.state["operations"].items()):
             if op["disposition"] in FINAL:
                 self.tick(operation_id)
-                if op["provider_status"] in PROVIDER_FINAL:
+                if provider_resolved(op):
                     self.archive(operation_id)
 
     def bind_completed_run(self, operation_id, run_id):
         op = self.operation(operation_id)
+        require(op.get("provider_lifetime", {}).get("closed_at") is None,
+                "serverless_lifetime_already_closed")
         require(op["provider_job_id"] in (None, run_id), "serverless_run_changed")
         response = self.api.status(self.policy["endpoint_id"], identifier(run_id))
         require(isinstance(response, dict) and response.get("id") == run_id
@@ -454,7 +543,8 @@ class ServerlessController:
         return {"backend": BACKEND, "endpoint_id": self.policy["endpoint_id"],
                 "reserved_usd": self.state["reserved_usd"], "operations": [
                     {"attempt_id": key, **{field: value[field] for field in
-                      ("status", "deadline", "provider_job_id", "provider_status", "disposition", "last_error")}}
+                      ("status", "deadline", "provider_job_id", "provider_status", "disposition", "last_error")},
+                     "provider_lifetime": value.get("provider_lifetime")}
                     for key, value in self.state["operations"].items()]}
 
 

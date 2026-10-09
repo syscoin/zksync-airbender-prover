@@ -132,9 +132,27 @@ The startup allowance must cover the image's 600-second initialization cap;
 another ten seconds cover native cleanup.
 These admission limits use that rate assumption; Runpod controls infrastructure
 startup, teardown and billing. They are not a provider-enforced dollar cap.
-The request TTL includes a separate result-retention allowance (at least 1,800
-seconds) so ordinary failures can be reconciled before Runpod deletes status.
-This does not extend the worker's absolute computation deadline or its lease.
+Runpod retains async results for a fixed 30 minutes after completion, independently
+of request TTL. The legacy-named `result_retention_seconds` policy field (at least
+1,800 seconds) adds TTL padding; it does **not** configure that retention period.
+Neither padding nor reconciliation extends the worker's absolute computation
+deadline or its lease.
+
+For an acknowledged run, the journal retains its exact TTL/execution timeout and
+the response-received time (an upper bound on provider acceptance). A fresh status
+404 may close only the provider side after that anchor plus TTL, execution timeout,
+startup allowance, ten seconds of cleanup, and idle timeout. This deliberately
+conservative wait relies on Runpod's documented lifetime/execution bounds and the
+trusted host clock. It is not new spending or execution authority. The observed
+status remains `ABSENT`, with separate immutable closure evidence; no provider
+completion or proof verification is invented. Observed queued/running work after
+that bound permanently disables the 404 fallback for that operation; a genuine
+terminal response can still reconcile it. The first closure/counterevidence is
+retained across restarts. Older known-ID journals start a fresh observation anchor
+and wait the full maximum policy bounds. Unknown POSTs
+without a run ID remain blocked. Source-lease/submission reconciliation and durable
+proof checks still apply, and lifetime reservations are never refunded.
+See Runpod's [TTL and result-retention documentation](https://docs.runpod.io/serverless/endpoints/send-requests#ttl-vs-execution-timeout).
 
 Each Serverless attempt conditionally creates one durable object-store claim.
 Repeated deliveries and conflicting workers cannot both compute that attempt;

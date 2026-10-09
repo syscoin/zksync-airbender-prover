@@ -885,7 +885,7 @@ class Supervisor:
             op = controller.find_operation(active["id"])
             if op is not None:
                 controller.tick(active["id"])
-                require(op["provider_status"] in serverless.PROVIDER_FINAL,
+                require(serverless.provider_resolved(op),
                         "serverless_operation_requires_reconciliation")
                 require(retiring or op["receipt"] is None, "durable_result_requires_recovery")
             if not retiring:
@@ -934,8 +934,7 @@ class Supervisor:
             if self.uses_serverless(active["stage"]):
                 if not self.finish_serverless(active) and active["kind"] == "external" and self.clock() >= active["deadline"]:
                     with self.fri_provider.lock():
-                        terminal = self.compute_controller("FRI").operation(active["id"])["provider_status"] \
-                            in serverless.PROVIDER_FINAL
+                        terminal = serverless.provider_resolved(self.compute_controller("FRI").operation(active["id"]))
                     if terminal:
                         self.expire_serverless(active)
                 return

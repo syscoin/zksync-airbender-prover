@@ -189,6 +189,215 @@ class ServerlessTests(unittest.TestCase):
             controller.finish(self.operation, "expired")
         self.assertEqual(self.store.load()["reserved_usd"], "2")
 
+    def lifetime(self):
+        return self.controller().operation(self.operation)["provider_lifetime"]
+
+    def test_lifetime_anchors_at_delayed_ack_not_pre_post_intent(self):
+        submit = self.api.submit
+        def delayed(endpoint, value):
+            self.now = 1500
+            return submit(endpoint, value)
+        with patch.object(self.api, "submit", delayed):
+            self.launch()
+        evidence = self.lifetime()
+        self.assertEqual(evidence["anchor_at"], 1500)
+        self.assertEqual(evidence["ttl_ms"], self.posts()[0][2]["policy"]["ttl"])
+        self.assertEqual(evidence["execution_timeout_ms"], self.posts()[0][2]["policy"]["executionTimeout"])
+        self.assertEqual(serverless.lifetime_bound(evidence), 5515)
+        self.assertEqual(self.controller().operation(self.operation)["input"]["deadline_unix"], 1800)
+        self.now, self.api.fail_status = 5015, True
+        self.controller().tick(self.operation)
+        self.assertIsNone(self.lifetime()["closed_at"])
+
+    def test_ack_clock_rollback_retains_known_id_without_poisoning_or_reposting(self):
+        submit = self.api.submit
+        def rollback(endpoint, value):
+            self.now = 999
+            return submit(endpoint, value)
+        with patch.object(self.api, "submit", rollback), self.assertRaisesRegex(runpod.Error, "submission_uncertain"):
+            self.launch()
+        operation = self.controller().operation(self.operation)
+        self.assertEqual(operation["provider_job_id"], "run-test")
+        self.assertNotIn("provider_lifetime", operation)
+        self.now, self.api.fail_status = 2000, True
+        self.assertEqual(self.launch(), self.operation)
+        self.controller().tick(self.operation)
+        self.assertEqual(self.lifetime()["basis"], "legacy_observation")
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_fresh_404_after_bound_reconciles_returned_proof_without_fake_status(self):
+        self.launch()
+        publish_result(self.objects, self.selected, self.operation)
+        controller = self.controller()
+        controller.collect(self.operation)
+        controller.finish(self.operation, "returned")
+        self.now, self.api.fail_status = 3000, True  # Beyond fixed async result retention, not lifetime bound.
+        with self.assertRaisesRegex(runpod.Error, "requires_reconciliation"):
+            self.controller().check_capacity()
+        self.assertIsNone(self.lifetime()["closed_at"])
+        self.now = serverless.lifetime_bound(self.lifetime())
+        self.controller().check_capacity()
+        archived = self.controller().operation(self.operation)
+        self.assertEqual(archived["provider_status"], "ABSENT")
+        self.assertEqual(archived["provider_lifetime"]["closed_at"], self.now)
+        self.assertEqual(archived["disposition"], "returned")
+        self.assertFalse(archived["receipt"]["proof_verified"])
+        self.assertEqual(self.store.load()["operations"], {})
+        self.assertEqual(self.store.load()["reserved_usd"], "2")
+        self.assertTrue(self.controller().has_job("job-a"))
+        self.assertEqual(self.launch(), self.operation)
+        with self.assertRaises(runpod.Error):
+            self.controller().launch(self.selected, "b" * 32, self.now + 600, 60, self.plan)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_cached_404_and_non_404_failures_cannot_close_lifetime(self):
+        self.launch()
+        self.api.fail_status = True
+        self.controller().tick(self.operation)
+        self.now = serverless.lifetime_bound(self.lifetime())
+        with self.assertRaisesRegex(runpod.Error, "deadline_not_elapsed"):
+            self.controller().finish(self.operation, "expired")
+        for error in (runpod.HttpError(401), runpod.HttpError(429), runpod.HttpError(500), runpod.Error("outage")):
+            with self.subTest(error=str(error)), patch.object(self.api, "status", side_effect=error), \
+                    self.assertRaises(runpod.Error):
+                self.controller().tick(self.operation)
+            self.assertIsNone(self.lifetime()["closed_at"])
+        with patch.object(self.api, "status", return_value={"id": "other", "status": "COMPLETED"}), \
+                self.assertRaisesRegex(runpod.Error, "invalid_serverless_status_response"):
+            self.controller().tick(self.operation)
+        self.controller().tick(self.operation)
+        self.controller().finish(self.operation, "expired")
+        self.assertEqual(self.controller().operation(self.operation)["provider_status"], "ABSENT")
+
+    def test_late_active_counterevidence_blocks_404_but_not_genuine_final_status(self):
+        self.launch()
+        self.now = serverless.lifetime_bound(self.lifetime())
+        self.api.result["status"] = "IN_PROGRESS"
+        self.controller().tick(self.operation)
+        first = self.lifetime()["contradicted_at"]
+        self.assertEqual(first, self.now)
+        self.now += 10000
+        self.api.result["status"] = "IN_QUEUE"
+        self.controller().tick(self.operation)
+        self.assertEqual(self.lifetime()["contradicted_at"], first)
+        self.api.fail_status = True
+        self.controller().tick(self.operation)
+        self.assertIsNone(self.lifetime()["closed_at"])
+        with self.assertRaisesRegex(runpod.Error, "deadline_not_elapsed"):
+            self.controller().finish(self.operation, "expired")
+        self.api.fail_status, self.api.result["status"] = False, "TIMED_OUT"
+        self.controller().tick(self.operation)
+        self.controller().finish(self.operation, "expired")
+        self.assertEqual(self.store.load()["operations"], {})
+        self.assertEqual(self.controller().operation(self.operation)["provider_lifetime"]["contradicted_at"], first)
+
+    def test_legacy_known_id_waits_full_policy_bound_from_fresh_observation(self):
+        self.launch()
+        state = self.store.load()
+        del state["operations"][self.operation]["provider_lifetime"]
+        self.store.save(state)
+        self.now, self.api.fail_status = 10000, True
+        self.controller().tick(self.operation)
+        evidence = self.lifetime()
+        self.assertEqual(evidence["basis"], "legacy_observation")
+        self.assertEqual(evidence["anchor_at"], 10000)
+        self.assertEqual(evidence["execution_timeout_ms"], 900000)
+        self.assertEqual(evidence["ttl_ms"], 2700000)
+        self.assertIsNone(evidence["closed_at"])
+        self.now = serverless.lifetime_bound(evidence) - 1
+        self.controller().tick(self.operation)
+        self.assertIsNone(self.lifetime()["closed_at"])
+        self.now += 1
+        self.controller().tick(self.operation)
+        self.controller().finish(self.operation, "expired")
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual(self.store.load()["reserved_usd"], "2")
+
+    def test_unknown_submission_cannot_acquire_a_lifetime_bound(self):
+        self.api.fail_submit = True
+        with self.assertRaises(runpod.Error):
+            self.launch()
+        self.now, self.api.fail_status = 100000, True
+        self.controller().tick(self.operation)
+        operation = self.controller().operation(self.operation)
+        self.assertNotIn("provider_lifetime", operation)
+        self.assertIsNone(operation["provider_job_id"])
+        self.assertFalse(any(call[0] == "status" for call in self.api.calls))
+        with self.assertRaisesRegex(runpod.Error, "deadline_not_elapsed"):
+            self.controller().finish(self.operation, "expired")
+
+    def test_lifetime_metadata_rejects_partial_malformed_or_shortened_evidence(self):
+        self.launch()
+        state = self.store.load()
+        original = state["operations"][self.operation]
+        for field, value in (("basis", "created_at"), ("endpoint_id", "other"), ("provider_job_id", "other"),
+                             ("anchor_at", 999), ("anchor_at", float("nan")), ("anchor_at", True),
+                             ("ttl_ms", 2600001), ("execution_timeout_ms", 799999),
+                             ("cleanup_allowance_seconds", 614), ("closed_at", 2000),
+                             ("closed_at", 5015), ("contradicted_at", 5000)):
+            candidate = copy.deepcopy(original)
+            candidate["provider_lifetime"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(runpod.Error):
+                serverless.validate_operation(candidate, state["controller_id"], state["policy"])
+        for evidence in (None, {}, {"anchor_at": 1000}):
+            candidate = {**original, "provider_lifetime": evidence}
+            with self.subTest(evidence=evidence), self.assertRaises(runpod.Error):
+                serverless.validate_operation(candidate, state["controller_id"], state["policy"])
+        self.now, self.api.fail_status = 999, True
+        with self.assertRaisesRegex(runpod.Error, "clock_rollback"):
+            self.controller().tick(self.operation)
+        self.assertIsNone(self.lifetime()["closed_at"])
+
+    def test_local_closure_is_immutable_through_archive_index_crash(self):
+        self.launch()
+        publish_result(self.objects, self.selected, self.operation)
+        controller = self.controller()
+        controller.collect(self.operation)
+        controller.finish(self.operation, "returned")
+        self.now, self.api.fail_status = serverless.lifetime_bound(self.lifetime()), True
+        retain = self.store.retain_history
+        def fail_index(name, value):
+            if name.startswith("serverless-job-"):
+                raise OSError("simulated index crash")
+            retain(name, value)
+        with patch.object(self.store, "retain_history", fail_index), self.assertRaises(OSError):
+            self.controller().check_capacity()
+        frozen = copy.deepcopy(self.controller().operation(self.operation))
+        calls = len(self.api.calls)
+        self.now += 100
+        self.api.fail_status, self.api.result["status"] = False, "IN_PROGRESS"
+        self.controller().check_capacity()
+        self.assertEqual(self.controller().operation(self.operation), frozen)
+        self.assertEqual(len(self.api.calls), calls)
+        with self.assertRaisesRegex(runpod.Error, "lifetime_already_closed"):
+            self.controller().bind_completed_run(self.operation, "run-test")
+        self.assertEqual(len(self.api.calls), calls)
+
+    def test_missing_or_tampered_finished_proof_blocks_closure_archive(self):
+        self.launch()
+        publish_result(self.objects, self.selected, self.operation)
+        controller = self.controller()
+        controller.collect(self.operation)
+        controller.finish(self.operation, "returned")
+        proof = self.store.root / (self.operation + ".proof")
+        retained = proof.read_bytes()
+        self.now, self.api.fail_status = serverless.lifetime_bound(self.lifetime()), True
+        for bad in (None, b"tampered"):
+            if bad is None:
+                proof.unlink()
+            else:
+                proof.write_bytes(bad)
+                proof.chmod(0o600)
+            with self.subTest(bad=bad), self.assertRaises((runpod.Error, OSError)):
+                self.controller().check_capacity()
+            self.assertIn(self.operation, self.store.load()["operations"])
+            self.assertTrue(self.controller().has_job("job-a"))
+            self.assertIsNone(self.store.history_json("serverless-op-" + self.operation + ".json"))
+        proof.write_bytes(retained)
+        proof.chmod(0o600)
+        self.controller().check_capacity()
+        self.assertEqual(self.store.load()["operations"], {})
+
     def test_tampered_result_and_backend_journals_fail_closed(self):
         self.launch()
         result = publish_result(self.objects, self.selected, self.operation)
