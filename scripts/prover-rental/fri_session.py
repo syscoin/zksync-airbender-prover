@@ -93,10 +93,24 @@ def _guard(lifeline, ready, lifetime, args):
         os.close(ready)
         ready = None
         deadline = time.monotonic() + lifetime
-        while child.poll() is None and time.monotonic() < deadline:
-            readable, _, _ = select.select([lifeline], [], [], min(.1, max(0, deadline - time.monotonic())))
-            if readable and not os.read(lifeline, 1):
-                break
+        # A restored snapshot may retain an old monotonic clock. Absolute time
+        # still bounds the child even while its adapter has no active handler.
+        wall_deadline = float(os.environ.get("ZKSYS_FRI_GUARD_DEADLINE_UNIX", time.time() + lifetime))
+        startup_wall_deadline = float(os.environ.get("ZKSYS_FRI_GUARD_STARTUP_DEADLINE_UNIX", wall_deadline))
+        startup_deadline = time.monotonic() + max(0, startup_wall_deadline - time.time())
+        initialized = False
+        while (child.poll() is None and time.monotonic() < deadline and time.time() < wall_deadline
+               and (initialized or (time.monotonic() < startup_deadline and time.time() < startup_wall_deadline))):
+            remaining = min(deadline - time.monotonic(), wall_deadline - time.time())
+            if not initialized:
+                remaining = min(remaining, startup_deadline - time.monotonic(), startup_wall_deadline - time.time())
+            readable, _, _ = select.select([lifeline], [], [], min(.1, max(0, remaining)))
+            if readable:
+                marker = os.read(lifeline, 1)
+                if not marker:
+                    break
+                if marker == b"R":
+                    initialized = True
     finally:
         if ready is not None:
             os.close(ready)
@@ -118,8 +132,10 @@ class FriSession:
         require(lifetime_seconds > 0, "fri_session_deadline")
         self.lock_fd = lock_fd
         self.deadline = time.monotonic() + lifetime_seconds
+        self.wall_deadline = time.time() + lifetime_seconds
         self.command_factory = command_factory or persistent_command
         self.condition = threading.Condition()
+        self.cleanup_lock = threading.Lock()
         self.current = None
         self.completed = {}
         self.release = None
@@ -128,6 +144,7 @@ class FriSession:
         self.lifeline = None
         self.native_pid = None
         self.endpoint = None
+        self.ready = False
         self.authorization = "Basic " + base64.b64encode(
             ("warm-fri:" + secrets.token_hex(32)).encode()).decode()
 
@@ -169,6 +186,18 @@ class FriSession:
                 try:
                     if route.path == "/prover-jobs/v1/FRI/pick":
                         with session.condition:
+                            query = urllib.parse.parse_qs(route.query)
+                            require(session.release["vk_hash"] in query.get("supported_vk_hashes", [""])[0].split(","),
+                                    "worker_vk_advertisement_mismatch")
+                            require(int(query.get("max_fri_pick_response_bytes", [0])[0]) > 0,
+                                    "worker_response_capacity_too_small")
+                            # Native setup and the application gate finish before
+                            # the first pick. Process creation alone is not ready.
+                            if not session.ready and not session.closed:
+                                if session.lifeline is not None:
+                                    os.write(session.lifeline, b"R")
+                                session.ready = True
+                                session.condition.notify_all()
                             work = session.current
                             if work is None or session.closed:
                                 self.reply(204)
@@ -185,9 +214,6 @@ class FriSession:
                             elif work.picked:
                                 self.reply(204)
                             else:
-                                query = urllib.parse.parse_qs(route.query)
-                                require(work.release["vk_hash"] in query.get("supported_vk_hashes", [""])[0].split(","),
-                                        "worker_vk_advertisement_mismatch")
                                 payload = job.encode({**work.payload, "lease_token": work.token})
                                 require(len(payload) <= int(query.get("max_fri_pick_response_bytes", [0])[0]),
                                         "worker_response_capacity_too_small")
@@ -222,6 +248,11 @@ class FriSession:
         self.thread.start()
 
     def _start(self, release, timeout):
+        with self.cleanup_lock:
+            require(not self.closed, "fri_session_unavailable")
+            self._start_locked(release, timeout)
+
+    def _start_locked(self, release, timeout):
         self.release = release.copy()
         self.temporary = tempfile.TemporaryDirectory(prefix="zksys-warm-fri-")
         directory = Path(self.temporary.name)
@@ -230,6 +261,8 @@ class FriSession:
         env = worker.native_environment()
         credentials = base64.b64decode(self.authorization[6:]).decode()
         env["ZKSYNC_SEQUENCER_URLS"] = self.endpoint.replace("http://", "http://" + credentials + "@", 1)
+        env["ZKSYS_FRI_GUARD_DEADLINE_UNIX"] = str(self.wall_deadline)
+        env["ZKSYS_FRI_GUARD_STARTUP_DEADLINE_UNIX"] = str(min(self.wall_deadline, time.time() + timeout))
         read_fd, self.lifeline = os.pipe()
         ready_read, ready_write = os.pipe()
         inherited = [read_fd, ready_write]
@@ -256,7 +289,38 @@ class FriSession:
         finally:
             os.close(ready_read)
 
-    def run(self, work, release, directory, timeout):
+    def usable(self, minimum_remaining_seconds=0):
+        with self.condition:
+            return (not self.closed and self.current is None and self.process is not None
+                    and self.process.poll() is None and self.ready
+                    and time.monotonic() + minimum_remaining_seconds < self.deadline
+                    and time.time() + minimum_remaining_seconds < self.wall_deadline
+                    and len(self.completed) < MAX_JOBS)
+
+    def prewarm(self, release, timeout):
+        try:
+            with self.condition:
+                require(not self.closed and self.current is None, "fri_session_unavailable")
+                require(release["stage"] == "FRI" and (self.release is None or self.release == release),
+                        "fri_session_release_mismatch")
+            deadline = min(self.deadline, time.monotonic() + timeout)
+            wall_deadline = min(self.wall_deadline, time.time() + timeout)
+            require(time.monotonic() < deadline and time.time() < wall_deadline, "fri_session_deadline")
+            if self.process is None:
+                self._start(release, max(.01, deadline - time.monotonic()))
+            with self.condition:
+                while not self.ready:
+                    require(self.process.poll() is None, "fri_native_exited")
+                    remaining = min(deadline - time.monotonic(), wall_deadline - time.time())
+                    require(remaining > 0, "fri_session_deadline")
+                    self.condition.wait(min(.05, remaining))
+                require(self.process.poll() is None and time.monotonic() < deadline and time.time() < wall_deadline,
+                        "fri_session_deadline")
+        except BaseException:
+            self.close()
+            raise
+
+    def run(self, work, release, directory, timeout, *, deadline_unix=None, require_full_timeout=False):
         del directory  # The native cwd and submission spool belong to the session.
         try:
             with self.condition:
@@ -264,15 +328,25 @@ class FriSession:
                 require(release["stage"] == "FRI" and (self.release is None or self.release == release),
                         "fri_session_release_mismatch")
                 require(len(self.completed) < MAX_JOBS, "fri_session_capacity")
+                if require_full_timeout:
+                    # Admission is the last fence after adapter disk/network I/O:
+                    # never expose work whose guardian would truncate its budget.
+                    require(self.ready and self.process is not None and self.process.poll() is None
+                            and time.monotonic() + timeout < self.deadline
+                            and time.time() + timeout < self.wall_deadline
+                            and (deadline_unix is None or time.time() + timeout < deadline_unix),
+                            "fri_session_insufficient_lifetime")
                 self.current = work
             deadline = min(self.deadline, time.monotonic() + timeout)
-            require(time.monotonic() < deadline, "fri_session_deadline")
+            wall_deadline = min(self.wall_deadline, time.time() + timeout,
+                                deadline_unix if deadline_unix is not None else self.wall_deadline)
+            require(time.monotonic() < deadline and time.time() < wall_deadline, "fri_session_deadline")
             if self.process is None:
                 self._start(release, max(.01, deadline - time.monotonic()))
             with self.condition:
                 while self.current is work:
                     require(self.process.poll() is None, "fri_native_exited")
-                    remaining = deadline - time.monotonic()
+                    remaining = min(deadline - time.monotonic(), wall_deadline - time.time())
                     require(remaining > 0, "fri_session_deadline")
                     self.condition.wait(min(.05, remaining))
                 require(work.result is not None, "native_worker_did_not_return_proof")
@@ -281,6 +355,12 @@ class FriSession:
             raise
 
     def close(self):
+        # Cancellation and the compute thread may both initiate cleanup. They
+        # must observe the same reaped guardian before a new session can start.
+        with self.cleanup_lock:
+            self._close()
+
+    def _close(self):
         with self.condition:
             self.closed = True
             self.condition.notify_all()

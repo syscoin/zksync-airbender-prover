@@ -85,6 +85,18 @@ class S3Storage:
                 plan[f"{part}_{action}_url"] = self.signed_url(key, action + "_object")
         return plan
 
+    def compute_claim_plan(self, identifier):
+        key = self.key("jobs", identifier, "compute-claim.json")
+        try:
+            # The signature binds the conditional header; an ordinary overwrite
+            # capability would allow provider redelivery to pay for duplicate work.
+            put = self.client.generate_presigned_url("put_object",
+                Params={"Bucket": self.config["bucket"], "Key": key, "IfNoneMatch": "*"},
+                ExpiresIn=self.config["url_ttl_seconds"])
+            return {"claim_get_url": self.signed_url(key, "get_object"), "claim_put_url": https_url(put)}
+        except Exception:
+            raise Error("storage_claim_presign_failed") from None
+
     def read_object(self, key, maximum):
         try:
             response = self.client.get_object(Bucket=self.config["bucket"], Key=key)

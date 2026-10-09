@@ -30,6 +30,15 @@ def evidence(name, stage):
             "batches": [{"stored": {"batchNumber": number}, "output": {}} for number in range(12, end + 1)]}
 
 
+def registry_rpc_fixture(case, keeper, fixture):
+    from test_keeper import RegistryRpc
+    rpc = RegistryRpc(fixture["settings"], fixture["subscriptions"])
+    connection = patch.object(keeper, "registry_rpc_for", return_value=rpc)
+    connection.start()
+    case.addCleanup(connection.stop)
+    return rpc
+
+
 class Native:
     def __init__(self):
         self.calls = []
@@ -86,6 +95,8 @@ class PoolTests(unittest.TestCase):
                                  "rental_policy_file": str(policy_path), "service": None}
                 if acquisition == "external" and stage == "SNARK":
                     keeper_config = {"schema_version": 1, "lane": name, "rpc_url": "http://127.0.0.1:8545",
+                        "enrollment": {"registry_rpc_file": str(self.root / (name + "-registry-rpc.json")),
+                                       "block_hash": "0x" + "64" * 32},
                         "settings": {"schema_version": 1, "execution_chain_id": IDENTITIES[name]["chain_id"],
                             "registry_chain_id": IDENTITIES["child"]["chain_id"], "chain_address": IDENTITIES[name]["chain_address"],
                             "settlement_chain_id": IDENTITIES[name]["settlement_chain_id"], "registry": "0x" + "56" * 20,
@@ -94,6 +105,8 @@ class PoolTests(unittest.TestCase):
                         "policy": {"expected_operator": "0x" + "ef" * 20, "gate_code_hash": "0x" + "11" * 32,
                             "coordinator_code_hash": "0x" + "22" * 32, "priority_guard_code_hash": "0x" + "33" * 32,
                             "reserve_seconds": 30, "max_head_age_seconds": 120, "rpc_timeout_seconds": 15}}
+                    job.write_new(Path(keeper_config["enrollment"]["registry_rpc_file"]),
+                                  job.encode({"url": "http://127.0.0.1:8546", "authorization": None}))
                     keeper_path = self.root / (name + "-keeper.json")
                     job.write_new(keeper_path, job.encode(keeper_config))
                     stages[stage]["service"] = {"keeper_config_file": str(keeper_path)}
@@ -670,7 +683,10 @@ class PoolTests(unittest.TestCase):
         config, request, item = setup(f)
         self.service_config, self.service_fixture = config, f
         self.service_rpc = NativeRpc(f, config, item)
+        self.service_registry_rpc = registry_rpc_fixture(self, keeper, f)
         permit = keeper.permit(config, self.service_rpc, request, f["evidence"], f["fri_payload"], self.now, 50)
+        self.assertTrue(self.service_registry_rpc.anchors)
+        self.assertEqual(set(self.service_registry_rpc.anchors), {config["enrollment"]["block_hash"]})
         pool_config = self.config("external")
         lane = pool_config["lanes"]["child"]
         lane["identity"] = {key: f["evidence"][key] for key in IDENTITIES["child"]}
@@ -714,6 +730,13 @@ class PoolTests(unittest.TestCase):
         self.service_rpc.turn -= 1
         self.service_rpc.frozen_override = "0x" + "fe" * 32
         with self.assertRaisesRegex(runpod.Error, "frozen_package_repaired"):
+            instance.launch(operation)
+        self.assertEqual(self.api.calls, [])
+
+    def test_service_ineligible_enrollment_fails_before_paid_compute(self):
+        instance, operation = self.service_job()
+        self.service_registry_rpc.ineligible.add(self.service_fixture["subscription"]["account"])
+        with self.assertRaisesRegex(runpod.Error, "subscription_snapshot_omits_or_adds_eligible_accounts"):
             instance.launch(operation)
         self.assertEqual(self.api.calls, [])
 

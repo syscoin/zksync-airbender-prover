@@ -18,14 +18,16 @@ import job
 import pool
 import runpod
 import sentry
+import serverless
 import supervisor
 import warm_worker
 from test_adapter import (RELEASE_WRITE_FAILURES, interrupted_authority_directory_fsync, interrupted_release_write,
                           payload, release, storage_plan, successful_native)
-from test_pool import IDENTITIES, evidence
+from test_pool import IDENTITIES, evidence, registry_rpc_fixture
 from test_runpod import FakeApi, policy
 from test_storage import config as storage_config
 from test_warm import MailboxStorage, RecordingFriSession
+from test_serverless import Api as ServerlessApi, policy as serverless_policy, publish_result
 
 
 class Objects(MailboxStorage):
@@ -49,6 +51,10 @@ class Objects(MailboxStorage):
 
     def job_transport(self, identifier, plan):
         return self
+
+    def compute_claim_plan(self, identifier):
+        url = "https://storage.example/jobs/" + identifier + "/compute-claim"
+        return {"claim_get_url": url + "?get=SCOPED", "claim_put_url": url + "?put=SCOPED"}
 
     def publish_command(self, identifier, raw):
         self.put("https://storage.example/sessions/" + identifier + "/command", raw)
@@ -483,7 +489,10 @@ class SupervisorTests(unittest.TestCase):
         f = fixture()
         service, request, item = setup(f)
         rpc = NativeRpc(f, service, item)
+        self.service_registry_rpc = registry_rpc_fixture(self, keeper, f)
         permit = keeper.permit(service, rpc, request, f["evidence"], f["fri_payload"], self.now, 50)
+        self.assertTrue(self.service_registry_rpc.anchors)
+        self.assertEqual(set(self.service_registry_rpc.anchors), {service["enrollment"]["block_hash"]})
         for stage, path in self.config["releases"].items():
             runpod.atomic_json(Path(path), {**release(stage), "vk_hash": service["settings"]["vk_hash"]})
         for entry in self.config["sequencers"]:
@@ -1209,6 +1218,456 @@ class SupervisorTests(unittest.TestCase):
                        {**self.config, "mode": "native-compute", "external_pool_dirs": ["/private/pool"]}):
             with self.subTest(mode=config["mode"]), self.assertRaisesRegex(runpod.Error, "requires_"):
                 supervisor.load_config(config)
+
+
+class ServerlessSupervisorTests(unittest.TestCase):
+    advance = SupervisorTests.advance
+    pod = SupervisorTests.pod
+    complete = SupervisorTests.complete
+    count = SupervisorTests.count
+    picks = SupervisorTests.picks
+
+    def setUp(self):
+        SupervisorTests.setUp(self)
+        self.fri_provider = serverless.ServerlessStore.initialize(self.root / "fri-provider", serverless_policy())
+        self.serverless_api = ServerlessApi()
+        self.config["serverless_fri"] = {"state_dir": str(self.fri_provider.root)}
+        self.store = supervisor.initialize(self.root / "flashboot-supervisor", self.config)
+        self.reload()
+
+    def reload(self):
+        self.instance = supervisor.Supervisor(self.store, self.api, self.objects, self.native,
+            clock=lambda: self.now, controller_http=self.objects,
+            serverless_api=getattr(self, "serverless_api", None))
+        return self.instance
+
+    def publish(self):
+        self.native.ready.add(("child", "FRI"))
+        self.instance.tick()
+        active = self.instance.state["active"]
+        self.assertEqual(active["phase"], "published")
+        self.assertEqual(active["stage"], "FRI")
+        return copy.deepcopy(active)
+
+    def result(self, active):
+        controller = self.instance.compute_controller("FRI")
+        return publish_result(self.objects, controller.operation(active["id"])["job"], active["id"])
+
+    def posts(self):
+        return [call for call in self.serverless_api.calls if call[0] == "submit"]
+
+    def external_pool(self):
+        selected = policy()
+        selected["image"] = serverless_policy()["image"]
+        with patch.object(sys.modules[__name__], "policy", return_value=selected):
+            return SupervisorTests.external_pool(self)
+
+    def test_default_when_configured_executes_fri_then_native_verifies_without_pod(self):
+        active = self.publish()
+        self.assertIsNone(self.instance.state["session"])
+        self.assertFalse(any(call[0] == "create" for call in self.api.calls))
+        self.assertEqual(len(self.posts()), 1)
+        self.assertNotIn(b"lease_token", job.encode(self.posts()[0][2]))
+        result = self.result(active)
+        self.serverless_api.result.update(status="COMPLETED", output=result)
+        self.instance.tick()
+        self.assertIsNone(self.instance.state["active"])
+        authority = runpod.read_private_json(self.instance.directory(active) / "authority.json")
+        self.assertEqual(authority["status"], "accepted")
+        submitted = [call for call in self.native.calls if "/submit?" in call[0]]
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(job.decode(submitted[0][2])["lease_token"], "0x" + "f1" * 32)
+        self.assertEqual(self.instance.compact_completed(execute=True)["jobs"], [])
+        self.assertTrue((self.instance.directory(active) / "payload.json").exists())
+
+    def test_uncertain_post_recovery_preserves_exact_attempt_and_original_lease(self):
+        self.serverless_api.fail_submit = True
+        self.native.ready.add(("child", "FRI"))
+        with self.assertRaisesRegex(runpod.Error, "submission_uncertain"):
+            self.instance.tick()
+        active = copy.deepcopy(self.instance.state["active"])
+        deadline = active["serverless_deadline"]
+        picks = len([call for call in self.native.calls if "/pick?" in call[0]])
+        self.now += 10
+        self.reload().tick(acquire=False)
+        self.assertEqual(self.instance.state["active"]["phase"], "published")
+        self.assertEqual(self.instance.state["active"]["serverless_deadline"], deadline)
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual(len([call for call in self.native.calls if "/pick?" in call[0]]), picks)
+        self.now = active["expiry_not_before"] + 1
+        with self.assertRaisesRegex(runpod.Error, "requires_reconciliation"):
+            self.instance.expire_active()
+        self.assertIsNotNone(self.instance.state["active"])
+
+    def test_claim_presign_failure_keeps_preparation_atomic_and_retries_same_lease(self):
+        self.native.ready.add(("child", "FRI"))
+        with patch.object(self.objects, "compute_claim_plan", side_effect=runpod.Error("presign_failed")), \
+                self.assertRaisesRegex(runpod.Error, "presign_failed"):
+            self.instance.tick()
+        retained = runpod.read_private_json(self.store.root / "supervisor.json")["active"]
+        self.assertEqual(retained["phase"], "exported")
+        self.assertNotIn("serverless_deadline", retained)
+        self.assertNotIn("compute_claim_plan", retained)
+        self.assertEqual(self.posts(), [])
+        picks = len(self.picks())
+        self.advance(10)
+        self.reload().tick(acquire=False)
+        self.assertEqual(self.instance.state["active"]["id"], retained["id"])
+        self.assertEqual(self.instance.state["active"]["phase"], "published")
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual(len(self.picks()), picks)
+
+    def test_old_deadline_only_preparation_recovers_without_extending_deadline(self):
+        self.native.ready.add(("child", "FRI"))
+        with patch.object(self.instance, "publish_serverless", side_effect=runpod.Error("old_presign_failure")), \
+                self.assertRaises(runpod.Error):
+            self.instance.tick()
+        active = self.instance.state["active"]
+        active["serverless_deadline"] = self.now + 300
+        self.instance.save()
+        self.advance(10)
+        self.reload().tick(acquire=False)
+        self.assertEqual(self.instance.state["active"]["serverless_deadline"], 1300)
+        self.assertEqual(self.posts()[0][2]["input"]["deadline_unix"], 1300)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_old_expired_partial_deadline_cannot_get_a_fresh_compute_window(self):
+        self.native.ready.add(("child", "FRI"))
+        with patch.object(self.instance, "publish_serverless", side_effect=runpod.Error("old_presign_failure")), \
+                self.assertRaises(runpod.Error):
+            self.instance.tick()
+        active = self.instance.state["active"]
+        active["serverless_deadline"] = self.now + 30
+        self.instance.save()
+        self.advance(31)
+        with self.assertRaisesRegex(runpod.Error, "insufficient_compute_window"):
+            self.reload().tick(acquire=False)
+        self.assertEqual(self.instance.state["active"]["serverless_deadline"], 1030)
+        self.assertEqual(self.posts(), [])
+
+    def test_submitted_backend_recovers_missing_preparation_from_exact_original_input(self):
+        original = self.publish()
+        for missing in (("compute_claim_plan",), ("serverless_deadline",),
+                        ("compute_claim_plan", "serverless_deadline")):
+            with self.subTest(missing=missing):
+                partial = copy.deepcopy(original)
+                partial.update(phase="exported", rental_operation=None)
+                for key in missing:
+                    del partial[key]
+                self.instance.state["active"] = partial
+                self.instance.save()
+                with patch.object(self.objects, "compute_claim_plan", side_effect=AssertionError("no fresh signature")):
+                    self.reload().tick(acquire=False)
+                self.assertEqual(self.instance.state["active"], original)
+                self.assertEqual(len(self.posts()), 1)
+
+    def test_submitted_backend_cannot_repair_conflicting_local_authority(self):
+        original = self.publish()
+        for key, value in (("serverless_deadline", original["serverless_deadline"] + 1),
+                           ("compute_claim_plan", {"claim_get_url": "https://other.example/claim",
+                                                   "claim_put_url": "https://other.example/claim"})):
+            with self.subTest(key=key):
+                partial = {**copy.deepcopy(original), key: value, "phase": "exported", "rental_operation": None}
+                self.instance.state["active"] = partial
+                self.instance.save()
+                with self.assertRaisesRegex(runpod.Error, "serverless_attempt_changed"):
+                    self.reload().tick(acquire=False)
+                self.assertEqual(self.instance.state["active"], partial)
+                self.assertEqual(len(self.posts()), 1)
+
+    def test_ambiguous_native_submission_reuses_exact_proof_and_does_not_hold_worker(self):
+        active = self.publish()
+        result = self.result(active)
+        self.serverless_api.result.update(status="COMPLETED", output=result)
+        self.native.submit_response = (500, {}, b"")
+        with self.assertRaisesRegex(runpod.Error, "submission"):
+            self.instance.tick()
+        first = [call[2] for call in self.native.calls if "/submit?" in call[0]][0]
+        self.native.submit_response = (204, {"x-syscoin-prover-disposition": "accepted"}, b"")
+        self.reload().tick(acquire=False)
+        self.assertIsNone(self.instance.state["active"])
+        self.assertEqual([call[2] for call in self.native.calls if "/submit?" in call[0]], [first, first])
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_endpoint_mismatch_prevents_fri_pick_and_never_counts_as_empty(self):
+        self.serverless_api.config["flashboot"] = "OFF"
+        self.native.ready.add(("child", "FRI"))
+        with self.assertRaisesRegex(runpod.Error, "endpoint_policy_mismatch"):
+            self.instance.tick()
+        self.assertFalse(any("/FRI/pick?" in call[0] for call in self.native.calls))
+        self.assertIsNone(self.instance.state["idle_since"])
+        self.assertEqual(self.posts(), [])
+
+    def test_explicit_opt_out_never_loads_serverless_state_and_uses_pods(self):
+        selected = copy.deepcopy(self.config)
+        selected["serverless_fri"] = {"enabled": False, "state_dir": "/missing/operator/endpoint"}
+        self.store = supervisor.initialize(self.root / "cold-supervisor", selected)
+        self.reload()
+        self.native.ready.add(("child", "FRI"))
+        self.instance.tick()
+        self.assertIsNone(self.instance.fri_provider)
+        self.assertTrue(any(call[0] == "create" for call in self.api.calls))
+        self.assertEqual(self.posts(), [])
+
+    def test_snark_keeps_existing_pod_path_and_separate_frozen_budget(self):
+        self.native.ready.add(("child", "SNARK"))
+        self.instance.tick()
+        self.assertEqual(self.instance.state["active"]["stage"], "SNARK")
+        self.assertIsNotNone(self.instance.state["session"])
+        self.assertTrue(any(call[0] == "create" for call in self.api.calls))
+        self.assertEqual(self.fri_provider.load()["reserved_usd"], "0")
+        self.assertEqual(self.posts(), [])
+        state = self.fri_provider.load()
+        state["policy"]["limits"]["max_hourly_usd"] = "1.5"
+        self.fri_provider.save(state)
+        with self.assertRaisesRegex(runpod.Error, "policy_changed"):
+            self.reload()
+
+    def finish_snark(self):
+        self.native.ready.add(("child", "SNARK"))
+        self.instance.tick()
+        self.complete()
+        self.assertIsNone(self.instance.state["pod_idle_since"])
+
+    def test_idle_snark_pod_stops_and_deletes_while_serverless_fri_stays_pending(self):
+        self.finish_snark()
+        active = self.publish()
+        pod = self.pod()
+        self.assertEqual(self.instance.state["pod_idle_since"], self.now)
+        self.advance(30)
+        self.reload().tick(acquire=False)
+        self.assertTrue(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(pod.tick(), "finished")
+        self.instance.tick(acquire=False)
+        self.assertIsNone(self.instance.state["session"])
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(self.count("delete"), 1)
+        self.assertEqual(len(self.posts()), 1)
+        self.result(active)
+        self.instance.tick(acquire=False)
+        self.assertIsNone(self.instance.state["active"])
+
+    def test_successive_serverless_fri_jobs_do_not_reset_pod_idle_grace(self):
+        self.finish_snark()
+        active = self.publish()
+        since = self.instance.state["pod_idle_since"]
+        for _ in range(2):
+            self.advance(10)
+            result = self.result(active)
+            self.serverless_api.result.update(status="COMPLETED", output=result)
+            self.instance.tick(acquire=False)
+            self.assertEqual(self.instance.state["pod_idle_since"], since)
+            with self.fri_provider.lock():
+                self.instance.compute_controller("FRI").check_capacity()
+            self.serverless_api.result = {"id": "run-test", "status": "IN_QUEUE"}
+            active = self.publish()
+            self.assertEqual(self.instance.state["pod_idle_since"], since)
+        self.advance(10)
+        self.instance.tick(acquire=False)
+        self.assertTrue(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+
+    def test_pod_capacity_failure_is_not_an_empty_observation_during_fri(self):
+        self.finish_snark()
+        original = self.instance.check_acquisition_capacity
+        def failed_snark(stage=None):
+            if stage == "SNARK":
+                raise runpod.Error("pod_capacity_unavailable")
+            return original(stage)
+        with patch.object(self.instance, "check_acquisition_capacity", failed_snark):
+            active = self.publish()
+        self.assertIsNone(self.instance.state["pod_idle_since"])
+        self.advance(31)
+        self.reload().tick(acquire=False)
+        self.assertFalse(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+        self.assertEqual(self.count("delete"), 0)
+
+    def test_serverless_failure_preserves_confirmed_pod_idle_and_does_not_block_stop(self):
+        self.finish_snark()
+        active = self.publish()
+        since = self.instance.state["pod_idle_since"]
+        self.advance(29)
+        with patch.object(self.serverless_api, "status", side_effect=runpod.Error("serverless_outage")):
+            with self.assertRaisesRegex(runpod.Error, "serverless_outage"):
+                self.instance.tick(acquire=False)
+            self.assertEqual(self.instance.state["pod_idle_since"], since)
+            self.advance(1)
+            with self.assertRaisesRegex(runpod.Error, "serverless_outage"):
+                self.instance.tick(acquire=False)
+        self.assertTrue(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+
+    def test_pod_observation_failure_clears_idle_evidence_during_serverless_fri(self):
+        self.finish_snark()
+        active = self.publish()
+        self.advance(29)
+        with patch.object(self.api, "get", side_effect=runpod.Error("pod_provider_outage")), \
+                self.assertRaisesRegex(runpod.Error, "pod_provider_outage"):
+            self.instance.tick(acquire=False)
+        self.assertIsNone(self.instance.state["pod_idle_since"])
+        self.advance(2)
+        self.reload().tick(acquire=False)
+        self.assertFalse(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+
+    def test_pending_snark_authority_still_prevents_idle_stop(self):
+        self.native.ready.add(("child", "SNARK"))
+        self.instance.tick()
+        with self.assertRaisesRegex(runpod.Error, "pending_authority_prevents_idle_stop"):
+            self.instance.stop_session()
+        self.advance(31)
+        self.instance.tick(acquire=False)
+        self.assertFalse(self.instance.state["session"]["stopping"])
+
+    def test_older_journal_defaults_to_no_pod_empty_evidence(self):
+        self.finish_snark()
+        active = self.publish()
+        del self.instance.state["pod_idle_since"]
+        self.instance.save()
+        self.advance(31)
+        self.reload().tick(acquire=False)
+        self.assertIsNone(self.instance.state["pod_idle_since"])
+        self.assertFalse(self.instance.state["session"]["stopping"])
+        self.assertEqual(self.instance.state["active"], active)
+
+    def test_scoped_urls_must_cover_provider_retention_and_startup_recovery(self):
+        selected = copy.deepcopy(self.config)
+        selected["storage"]["url_ttl_seconds"] = 4000
+        state = self.fri_provider.load()
+        state["policy"]["limits"]["result_retention_seconds"] = 3600
+        state["policy"]["limits"]["max_operation_usd"] = "3"
+        self.fri_provider.save(state)
+        with self.assertRaisesRegex(runpod.Error, "cover_serverless_and_recovery"):
+            supervisor.load_config(selected)
+
+    def test_pending_serverless_job_survives_drain_and_known_timeout_can_expire(self):
+        active = self.publish()
+        runpod.atomic_json(self.store.root / "drain.json", {"schema_version": 1, "drain": True})
+        self.instance.tick()
+        self.assertTrue(self.instance.state["draining"])
+        self.assertIsNotNone(self.instance.state["active"])
+        self.serverless_api.result["status"] = "TIMED_OUT"
+        self.now = active["expiry_not_before"] + 1
+        self.assertEqual(self.instance.expire_active(), "expired")
+        self.assertIsNone(self.instance.state["active"])
+        self.assertEqual(self.fri_provider.load()["reserved_usd"], "2")
+
+    def close_provider_lifetime(self, active):
+        op = self.instance.compute_controller("FRI").operation(active["id"])
+        self.now = serverless.lifetime_bound(op["provider_lifetime"])
+        self.serverless_api.fail_status = True
+        with self.fri_provider.lock():
+            self.instance.compute_controller("FRI").tick(active["id"])
+        return self.instance.compute_controller("FRI").operation(active["id"])
+
+    def test_bounded_absent_native_expiry_keeps_separate_source_lease_gate(self):
+        active = self.publish()
+        original_input = copy.deepcopy(self.posts()[0][2]["input"])
+        op = self.close_provider_lifetime(active)
+        self.assertTrue(serverless.provider_resolved(op))
+        # Provider closure alone cannot shorten the independently retained source lease.
+        self.instance.state["active"]["expiry_not_before"] = self.now + 10
+        self.instance.save()
+        with self.assertRaisesRegex(runpod.Error, "native_lease_not_expired"):
+            self.reload().expire_active()
+        self.assertIsNotNone(self.instance.state["active"])
+        self.advance(10)
+        self.assertEqual(self.instance.expire_active(), "expired")
+        self.assertIsNone(self.instance.state["active"])
+        archived = self.instance.compute_controller("FRI").operation(active["id"])
+        self.assertEqual(archived["provider_status"], "ABSENT")
+        self.assertEqual(archived["disposition"], "expired")
+        self.assertEqual(archived["input"], original_input)
+        self.assertEqual(self.fri_provider.load()["reserved_usd"], "2")
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_bounded_absent_native_submission_ambiguity_still_blocks_expiry(self):
+        active = self.publish()
+        self.close_provider_lifetime(active)
+        directory = self.instance.directory(active)
+        runpod.atomic_json(directory / "submission.json", {"schema_version": 1, "unknown": True})
+        with self.assertRaisesRegex(runpod.Error, "origin_reconciliation"):
+            self.reload().expire_active()
+        self.assertIsNotNone(self.instance.state["active"])
+        self.assertIn(active["id"], self.fri_provider.load()["operations"])
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_bounded_absent_external_expiry_preserves_ownership_and_reservation(self):
+        external = self.external_pool()
+        operation = SupervisorTests.enqueue_external_fri(self, external, "dispatcher:absent", 1400)
+        self.instance.tick()
+        active = copy.deepcopy(self.instance.state["active"])
+        before = copy.deepcopy(pool.Pool(external.store).operation(operation))
+        self.close_provider_lifetime(active)
+        self.reload().tick(acquire=False)
+        self.assertIsNone(self.instance.state["active"])
+        retired = pool.Pool(external.store).operation(operation)
+        self.assertEqual(retired["status"], "lease_expired")
+        self.assertEqual(retired["warm_owner"], before["warm_owner"])
+        self.assertEqual(retired["reserved_usd"], before["reserved_usd"])
+        self.assertEqual(retired["deadline"], before["deadline"])
+        self.assertEqual(self.fri_provider.load()["reserved_usd"], "2")
+        self.assertEqual(self.native.calls, [])
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_bounded_absent_external_owner_mismatch_cannot_retire(self):
+        external = self.external_pool()
+        operation = SupervisorTests.enqueue_external_fri(self, external, "dispatcher:changed-owner", 1400)
+        self.instance.tick()
+        active = copy.deepcopy(self.instance.state["active"])
+        self.close_provider_lifetime(active)
+        candidate = pool.Pool(external.store)
+        candidate.operation(operation)["warm_owner"] = "f" * 32
+        candidate.save()
+        with self.assertRaises(runpod.Error):
+            self.reload().expire_active()
+        self.assertEqual(pool.Pool(external.store).operation(operation)["status"], "warm_claimed")
+        self.assertIsNotNone(self.instance.state["active"])
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_external_pool_claim_returns_with_strict_serverless_receipt_factory(self):
+        external = self.external_pool()
+        operation = SupervisorTests.enqueue_external_fri(self, external, "dispatcher:flashboot", 1400)
+        self.instance.tick()
+        active = copy.deepcopy(self.instance.state["active"])
+        self.assertEqual(active["kind"], "external")
+        result = self.result(active)
+        self.serverless_api.result.update(status="COMPLETED", output=result)
+        self.instance.tick()
+        recovered = pool.Pool(external.store, clock=lambda: self.now)
+        self.assertEqual(recovered.operation(operation)["warm_controller_dir"], str(self.fri_provider.root))
+        self.assertEqual(recovered.complete(operation), "returned")
+        self.assertEqual(self.native.calls, [])
+        self.assertFalse(any(call[0] == "create" for call in self.api.calls))
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_external_unknown_submit_cannot_retire_authority_as_unstarted(self):
+        external = self.external_pool()
+        operation = SupervisorTests.enqueue_external_fri(self, external, "dispatcher:unknown", 1400)
+        self.serverless_api.fail_submit = True
+        with self.assertRaisesRegex(runpod.Error, "submission_uncertain"):
+            self.instance.tick()
+        self.assertFalse(self.instance.retire_unstarted_external(self.instance.state["active"],
+                                                                 "external_authorization_window_elapsed"))
+        self.assertEqual(self.instance.state["active"]["phase"], "published")
+        self.assertEqual(pool.Pool(external.store).operation(operation)["status"], "warm_claimed")
+        self.now = 1500
+        with self.assertRaisesRegex(runpod.Error, "requires_reconciliation"):
+            self.instance.expire_active()
+        self.assertEqual(pool.Pool(external.store).operation(operation)["status"], "warm_claimed")
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_external_elapsed_window_retires_without_spending_or_native_pick(self):
+        external = self.external_pool()
+        operation = SupervisorTests.enqueue_external_fri(self, external, "dispatcher:expired", 1050)
+        self.instance.tick()
+        self.assertEqual(pool.Pool(external.store).operation(operation)["status"], "authorization_expired")
+        self.assertIsNone(self.instance.state["active"])
+        self.assertEqual(self.fri_provider.load()["reserved_usd"], "0")
+        self.assertEqual(self.native.calls, [])
+        self.assertEqual(self.posts(), [])
 
 
 if __name__ == "__main__":

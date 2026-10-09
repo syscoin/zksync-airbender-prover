@@ -43,6 +43,7 @@ if mode in ('descendant', 'descendant_exit', 'detached', 'detached_exit'):
     if mode.endswith('_exit'): os._exit(73)
 last = None
 count = 0
+while mode == 'hold_setup' and not (root / 'continue').exists(): time.sleep(.01)
 while True:
     status, raw = request('/prover-jobs/v1/FRI/pick?supported_vk_hashes=' + '0x' + 'a1'*32 + '&max_fri_pick_response_bytes=999999')
     if status == 204:
@@ -209,6 +210,100 @@ fri_session._guard(int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), sys.a
                 self.assertIsNotNone(session.process.returncode)
                 with self.assertRaisesRegex(runpod.Error, "fri_session_unavailable"):
                     session.run(work, release("FRI"), self.root, 1)
+
+    def test_prewarm_waits_for_authenticated_matching_vk_pick_without_leasing_work(self):
+        session = self.session("hold_setup")
+        errors = []
+        def prewarm():
+            try:
+                session.prewarm(release("FRI"), 5)
+            except BaseException as error:
+                errors.append(error)
+        thread = threading.Thread(target=prewarm)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.until(lambda: session.native_pid is not None and self.events())
+        self.assertFalse(session.ready)
+        self.assertTrue(thread.is_alive())
+        route = "/prover-jobs/v1/FRI/pick?supported_vk_hashes=" + "0x" + "a1" * 32 + "&max_fri_pick_response_bytes=999999"
+        for auth, path, status in ((None, route, 401),
+                                   (session.authorization, route.replace("a1", "a2"), 422)):
+            headers = {"Authorization": auth} if auth else {}
+            request = urllib.request.Request(session.endpoint + path, method="POST", headers=headers)
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request)
+            self.assertEqual(caught.exception.code, status)
+            caught.exception.close()
+            self.assertFalse(session.ready)
+        (self.root / "continue").touch()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(session.ready)
+        self.assertTrue(session.usable())
+        self.assertIsNone(session.current)
+        self.assertEqual([event["kind"] for event in self.events()], ["init"])
+        pid = session.native_pid
+        session.run(self.work(), release("FRI"), self.root, 5)
+        self.assertEqual(session.native_pid, pid)
+
+    def test_absolute_deadline_after_restore_refuses_job_and_reaps_native(self):
+        session = self.session()
+        session.prewarm(release("FRI"), 5)
+        self.assertTrue(session.usable())
+        with self.assertRaisesRegex(runpod.Error, "fri_session_deadline"):
+            session.run(self.work(), release("FRI"), self.root, 5, deadline_unix=time.time() - 1)
+        self.assertTrue(session.closed)
+        self.assertIsNotNone(session.process.returncode)
+        self.assertEqual([event["kind"] for event in self.events()], ["init"])
+
+    def test_full_timeout_admission_rejects_short_guardian_before_exposing_work(self):
+        for field, now in (("deadline", time.monotonic), ("wall_deadline", time.time)):
+            with self.subTest(clock=field):
+                session = self.session()
+                session.prewarm(release("FRI"), 5)
+                setattr(session, field, now() + .5)
+                self.assertTrue(session.usable())
+                self.assertFalse(session.usable(1))
+                work = self.work(12 if field == "deadline" else 13)
+                with self.assertRaisesRegex(runpod.Error, "fri_session_insufficient_lifetime"):
+                    session.run(work, release("FRI"), self.root, 1, require_full_timeout=True)
+                self.assertFalse(work.picked)
+                self.assertIsNone(work.result)
+                self.assertTrue(session.closed)
+                self.assertIsNone(session.current)
+
+    def test_full_timeout_admission_proves_through_real_native_http_session(self):
+        session = self.session()
+        session.prewarm(release("FRI"), 5)
+        work = self.work()
+        session.run(work, release("FRI"), self.root, 2, deadline_unix=time.time() + 5,
+                    require_full_timeout=True)
+        self.assertTrue(work.picked)
+        self.assertIsNotNone(work.result)
+        self.assertTrue(session.usable())
+
+    def test_guardian_enforces_absolute_lifetime_without_active_parent_handler(self):
+        session = self.session(lifetime_seconds=20)
+        session.wall_deadline = time.time() + .8
+        session.prewarm(release("FRI"), 5)
+        self.until(lambda: session.process.poll() is not None)
+        self.assertFalse(session.usable())
+        self.assertEqual([event["kind"] for event in self.events()], ["init"])
+
+    def test_guardian_bounds_startup_independently_until_first_native_pick(self):
+        session = self.session("hold_setup", lifetime_seconds=20)
+        session._start(release("FRI"), .8)
+        self.until(lambda: session.process.poll() is not None)
+        self.assertFalse(session.ready)
+        self.assertEqual([event["kind"] for event in self.events()], ["init"])
+
+    def test_first_native_pick_releases_only_startup_bound(self):
+        session = self.session(lifetime_seconds=20)
+        session.prewarm(release("FRI"), .8)
+        time.sleep(1)
+        self.assertTrue(session.usable())
+        self.assertIsNone(session.process.poll())
 
     def test_guardian_enforces_lifetime_while_parent_is_idle(self):
         session = self.session(lifetime_seconds=.8)

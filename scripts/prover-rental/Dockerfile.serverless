@@ -1,0 +1,23 @@
+ARG PROVER_BASE_IMAGE=scratch
+FROM ${PROVER_BASE_IMAGE}
+
+# Use the digest-pinned FRI-only CUDA image built by docker/zksync-os-prover-fri.
+# SDK installation and image validation finish at build time; startup only warms
+# the existing FRI executable and enters the provider's request loop.
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements-serverless.txt /opt/zksys-serverless/requirements.txt
+RUN python3 -m venv /opt/zksys-serverless/venv \
+    && /opt/zksys-serverless/venv/bin/python -m pip install --no-cache-dir --only-binary=:all: \
+       --require-hashes -r /opt/zksys-serverless/requirements.txt \
+    && /opt/zksys-serverless/venv/bin/python -m pip check \
+    && /opt/zksys-serverless/venv/bin/python -c "import runpod; from importlib.metadata import version; assert version('runpod') == '1.12.0'"
+COPY rental_provider.py job.py worker.py warm_protocol.py fri_session.py serverless_worker.py release.json /opt/zksys-rental/
+COPY serverless_runner.py /opt/zksys-serverless/
+RUN python3 /opt/zksys-rental/worker.py --validate-image
+ENV PYTHONUNBUFFERED=1 \
+    RUNPOD_LOG_LEVEL=INFO \
+    RUNPOD_INIT_TIMEOUT=610 \
+    RUNPOD_REALTIME_CONCURRENCY=1
+ENTRYPOINT ["/opt/zksys-serverless/venv/bin/python", "/opt/zksys-serverless/serverless_runner.py"]
