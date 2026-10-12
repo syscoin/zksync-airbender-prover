@@ -49,8 +49,8 @@ WRAPPER_LOCK_SOURCE = (
 WRAPPER_PACKAGES = {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"}
 WRAPPER_FORK = (
     "https://github.com/syscoin/zkos-wrapper.git",
-    "88aa2e1a5bb3778e1b1e07f64d95ab5ac5332da8",
-    "914a0cd1402f289cabccd83cf6cafa1c148385ad",
+    "816a3598c60fac37d02cf1dcd1bc48b2e2c75de1",
+    "a1e9a551b9588b1dfab5c5088554fc69770c0e85",
 )
 AIRBENDER_UPSTREAM = (
     "https://github.com/matter-labs/zksync-airbender",
@@ -59,8 +59,8 @@ AIRBENDER_UPSTREAM = (
 )
 AIRBENDER_FORK = (
     "https://github.com/syscoin/zksync-airbender",
-    "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52",
-    "6693fdafa31c45ebf8acf26e9a1f3dfc3edcffdc",
+    "0d8c852954afcae1f160151a17fe80886f1755b0",
+    "a41a4a18eeb102b405bcb63ad7ca85e9b6b13213",
 )
 WRAPPER_AIRBENDER_ROOTS = (
     "unified_reduced_machine_verifier", "blake2_with_compression_verifier",

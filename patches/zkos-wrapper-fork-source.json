@@ -9,7 +9,7 @@
     "zkos-wrapper": "0.1.0"
   },
   "fork_url": "https://github.com/syscoin/zkos-wrapper.git",
-  "fork_commit": "88aa2e1a5bb3778e1b1e07f64d95ab5ac5332da8",
-  "fork_tree": "914a0cd1402f289cabccd83cf6cafa1c148385ad",
+  "fork_commit": "816a3598c60fac37d02cf1dcd1bc48b2e2c75de1",
+  "fork_tree": "a1e9a551b9588b1dfab5c5088554fc69770c0e85",
   "purpose": "Immutable Syscoin wrapper fork for v32 Security100 compression verification, with reviewed RNG, commitment and verifier policy changes plus the randomized FRI degree lift. Fresh setup, key, deployed verifier, and end-to-end GPU proof qualification remain pending."
 }

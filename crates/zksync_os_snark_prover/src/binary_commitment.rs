@@ -26,9 +26,9 @@ const BUNDLED_ARTIFACT: &str = include_str!("../artifacts/syscoin-v32-security10
 // Airbender's origin revision and effective fork tree, and the wrapper's fork
 // revision/tree, are bound to the reviewed source manifests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
-const WRAPPER_CIRCUIT_REVISION: &str = "88aa2e1a5bb3778e1b1e07f64d95ab5ac5332da8";
-const AIRBENDER_PATCHED_TREE: &str = "6693fdafa31c45ebf8acf26e9a1f3dfc3edcffdc";
-const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "914a0cd1402f289cabccd83cf6cafa1c148385ad";
+const WRAPPER_CIRCUIT_REVISION: &str = "816a3598c60fac37d02cf1dcd1bc48b2e2c75de1";
+const AIRBENDER_PATCHED_TREE: &str = "a41a4a18eeb102b405bcb63ad7ca85e9b6b13213";
+const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "a1e9a551b9588b1dfab5c5088554fc69770c0e85";
 // The unified-verifier half is pinned independently, just as the app-chain half is
 // pinned by protocol_version. Regenerate and review both when the circuit changes.
 const UNIFIED_END_PARAMS: [u32; 8] = [
