@@ -27,6 +27,11 @@ CRYPTO_PINS = HELPER.load_crypto_pins()
 def parent_lock_bytes():
     """Exact lock from parent488f70ac, reconstructed without requiring Git history in CI."""
     raw = (ROOT / "Cargo.lock").read_bytes()
+    fork = HELPER.fork_lock_source(PINS).encode()
+    upstream = PINS["upstream_lock_source"].encode()
+    if raw.count(fork) != 46:
+        raise AssertionError("canonical fork lock fixture changed")
+    raw = raw.replace(fork, upstream)
     for name, removed in (
         ("zksync_os_fri_prover", (b' "sha2 0.10.9",\n',)),
         ("zksync_os_snark_prover", (
@@ -60,7 +65,6 @@ class LockOverlayTests(unittest.TestCase):
         for relative, key in (
             ("Cargo.lock", "canonical_lock_sha256"),
             ("patches/airbender.Cargo.lock", "overlay_lock_sha256"),
-            ("patches/airbender-cuda-device-diagnostics.patch", "patch_sha256"),
         ):
             HELPER.checked_hash(ROOT / relative, PINS[key])
 
@@ -189,8 +193,8 @@ class LockOverlayTests(unittest.TestCase):
     def test_mixed_airbender_pins_rejected(self):
         modified = copy.deepcopy(self.canonical)
         first = next(item for item in modified["package"] if item["name"] == "gpu_prover")
-        first["source"] = first["source"].replace("03454c7", "ffffffff")
-        with self.assertRaisesRegex(ValueError, "mixed Airbender"):
+        first["source"] = first["source"].replace(PINS["fork_commit"], "f" * 40)
+        with self.assertRaisesRegex(ValueError, "mixed or unknown Airbender"):
             HELPER.audit_lock(modified, self.overlay, PINS)
 
     def test_missing_airbender_package_rejected(self):
@@ -379,148 +383,40 @@ class CommonCryptoOverlayTests(unittest.TestCase):
             output.assert_not_called()
 
 
-class DiagnosticsPreservationTests(unittest.TestCase):
-    def test_logger_patch_has_no_proving_changes(self):
-        source = (ROOT / "patches/airbender-cuda-device-diagnostics.patch").read_text()
-        self.assertEqual(source.count("diff --git "), 46)
-        source = next("diff --git " + section for section in source.split("diff --git ")
-                      if section.startswith("a/gpu_prover/src/execution/gpu_worker.rs "))
-        # Diff index IDs and hunk context changed when the cumulative patch was
-        # regenerated. Every ordered added/removed production line is identical
-        # to the historical diagnostics patch, and its full postimage is pinned.
-        edits = "\n".join(line for line in source.splitlines()
-                          if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
-        self.assertEqual(hashlib.sha256(edits.encode()).hexdigest(),
-                         "829c7aeb3aeff7aa135223eb5e38abc15a9f7fb9f2ba81be2cafb19d7b3eaa4a")
-        self.assertEqual(PINS["changed_files"]["gpu_prover/src/execution/gpu_worker.rs"]["postimage_sha256"],
-                         "3a809535fd15cf2b6a456881c0b9a4dddec606ae0d95ce17c928987dd76aca84")
-        additions = "\n".join(line[1:] for line in source.splitlines()
-                              if line.startswith("+") and not line.startswith("+++"))
-        self.assertIn("device_get_attribute(CudaDeviceAttr::MultiProcessorCount, device_id)?", additions)
-        self.assertNotIn("get_device_properties", additions)
-        self.assertNotIn("unsafe", additions)
-        self.assertNotIn("CStr", additions)
-
-
-class StreamedInitTeardownPatchTests(unittest.TestCase):
-    """Static source-integration guards, not CUDA execution or queue-lag tests."""
-
-    def setUp(self):
-        raw = (ROOT / "patches/airbender-cuda-device-diagnostics.patch").read_text()
-        sections = raw.split("diff --git ")[1:]
-        self.sections = {section.splitlines()[0].split()[1][2:]: section for section in sections}
-        self.assertEqual(len(sections), len(self.sections))
-        self.module_path = "gpu_prover/src/execution/empty_inits_and_teardowns.rs"
-        self.module = self.additions(self.module_path) + "\n"
-        self.production = self.module.split("#[cfg(test)]", 1)[0]
-
-    def additions(self, path):
-        return "\n".join(line[1:] for line in self.sections[path].splitlines()
-                         if line.startswith("+") and not line.startswith("+++"))
-
-    def test_exact_closed_overlay_scope_and_existing_postimages_are_preserved(self):
-        expected = {
-            "execution_utils/src/lib.rs": "ef863d1a3e09648348e5ff6daddab7469bcb42fa74bd63172459d3a6337f3049",
-            "execution_utils/src/setup_summaries.rs": "f88bc6142088e6255b1356e70d031d6557445560984debe2d329d70042ab2b02",
-            "execution_utils/src/unrolled_gpu.rs": "13ae69259a2791b8e8a9343da975ba04eb6e0535b4c11143c929a768307a3110",
-            "gpu_prover/src/execution/gpu_worker.rs": "3a809535fd15cf2b6a456881c0b9a4dddec606ae0d95ce17c928987dd76aca84",
-            "gpu_prover/src/execution/cpu_worker.rs": "9d6a3b83f1148f1bf60394a6c98d713e84733a362cfab3e9b97c49d13165dbbd",
-            self.module_path: "412f5d778cef22834c845aa72628e5822ce350fa47fa23816567e3fc88d9003c",
-            "gpu_prover/src/execution/simulation_runner.rs": "1d792692fd0f585753b8865dfba68043ba66690066fad2ac6f23620e9105ebc0",
-            "tools/cli/src/prover_utils.rs": "8aa93a6fb387d298076012989b1b73069c5883b5b2d1dd2e0014fe563a42e2d8",
-        }
-        self.assertEqual(set(self.sections), HELPER.AIRBENDER_CHANGED_PATHS)
-        self.assertEqual(set(PINS["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
-        self.assertEqual(len(self.sections), 46)
-        self.assertTrue(set(expected) < set(self.sections))
-        for path, digest in expected.items():
-            self.assertEqual(PINS["changed_files"][path]["postimage_sha256"], digest)
-        self.assertEqual(PINS["patched_tree"], "f6a8eb9bd6c1e262e294e15b21d479c6f6f5835b")
-        self.assertIsNone(PINS["changed_files"][self.module_path]["preimage_sha256"])
-        self.assertEqual(hashlib.sha256(self.module.encode()).hexdigest(), expected[self.module_path])
-        self.assertEqual(len(self.module.encode()), PINS["changed_files"][self.module_path]["postimage_size"])
-        # The original streaming/diagnostic subset remains byte-identical. The
-        # cumulative overlay now separately carries security and guest updates.
-        self.assertFalse(any(path.startswith(("circuit_defs/", "verifier/", "full_statement_verifier/"))
-                             for path in expected))
-
-    def test_per_word_geometry_conservative_monotone_release_and_fail_closed_finish(self):
-        self.assertIn("max_it_instances: ram_words.div_ceil(cycles_per_circuit)", self.production)
-        self.assertIn("let completed_circuits = cycles_so_far / self.cycles_per_circuit;", self.production)
-        self.assertIn("let frontier = completed_circuits.saturating_sub(self.max_it_instances);", self.production)
-        self.assertIn("self.next_sequence_id = frontier.max(start);", self.production)
-        self.assertIn("start..self.next_sequence_id", self.production)
-        self.assertIn("self.next_sequence_id <= empty_circuits", self.production)
-        self.assertIn("self.next_sequence_id..empty_circuits", self.production)
-        self.assertIn("assert_ne!(cycles_per_circuit, 0);", self.production)
-        self.assertIn("const RAM_WORDS: usize = (1 << 30) / size_of::<u32>();", self.module)
-        self.assertIn("const CYCLES_PER_CIRCUIT: usize = (1 << 23) - 1;", self.module)
-        ram_words, usable_rows = 1 << 28, (1 << 23) - 1
-        self.assertEqual((ram_words + usable_rows - 1) // usable_rows, 33)
-
-    def test_unified_only_activation_and_exact_final_marker_suffix(self):
-        worker = self.sections["gpu_prover/src/execution/cpu_worker.rs"]
-        added = self.additions("gpu_prover/src/execution/cpu_worker.rs")
-        self.assertIn("runner.empty_it_streamer = (!T::IS_SPLIT).then(|| {", added)
-        self.assertIn("memory_holder.memory.len(),", added)
-        self.assertIn("setups::unified_reduced_machine::NUM_CYCLES,", added)
-        self.assertIn("let empty_cycles = total_cycles - count;", worker)
-        self.assertIn("let empty_circuits = empty_cycles / per_circuit_count;", worker)
-        self.assertIn(".finish(empty_circuits);", added)
-        self.assertIn("for sequence_id in remaining_empty {", added)
-        self.assertIn("-            for sequence_id in 0..empty_circuits {", worker)
-        self.assertEqual(added.count("!T::IS_SPLIT"), 1)
-
-    def test_streaming_module_is_wired_before_snapshot_trace_allocation(self):
-        runner = self.sections["gpu_prover/src/execution/simulation_runner.rs"]
-        added = self.additions("gpu_prover/src/execution/simulation_runner.rs")
-        self.assertIn('#[path = "empty_inits_and_teardowns.rs"]', added)
-        self.assertIn("pub(crate) use empty_inits_and_teardowns::EmptyInitsAndTeardownsStreamer;", added)
-        self.assertIn("empty_it_streamer: None,", added)
-        self.assertIn("(self.empty_it_streamer.as_mut(), self.results.as_ref())", added)
-        self.assertIn("((timestamp - INITIAL_TIMESTAMP) / TIMESTAMP_STEP) as usize;", added)
-        self.assertIn("for sequence_id in streamer.release(cycles_so_far) {", added)
-        self.assertIn("inits_and_teardowns: None,", added)
-        self.assertIn(".send(WorkerResult::InitsAndTeardownsData(data))", added)
-        self.assertLess(runner.index("streamer.release(cycles_so_far)"),
-                        runner.index("let trace = self.trace.take().unwrap();"))
-        self.assertLess(runner.index("streamer.release(cycles_so_far)"),
-                        runner.index("let result = WorkerResult::SnapshotProduced;"))
-
-    def test_dependency_free_regression_coverage_is_retained(self):
-        self.assertEqual(self.module.count("#[test]"), 7)
-        for name in (
-            "pinned_per_word_geometry_has_thirty_three_trailing_instances",
-            "partial_circuits_and_repeated_snapshots_do_not_release_early_or_duplicate",
-            "all_final_occupancies_preserve_the_original_exact_prefix",
-            "delegation_bursts_cannot_exceed_the_ram_word_bound",
-            "finite_pool_model_progresses_beyond_forty_six_circuits",
-            "split_mode_none_keeps_all_markers_for_finalization",
-            "finalization_fails_closed_if_a_future_layout_violates_the_bound",
-        ):
-            self.assertIn("fn " + name + "()", self.module)
-        self.assertIn("const POOL: usize = 384;", self.module)
-        self.assertIn("for completed in 1..=160", self.module)
-        self.assertIn("streamed unified init/teardown prefix exceeds the final empty prefix", self.module)
-
-
 class AirbenderPinTests(unittest.TestCase):
+    def test_canonical_cargo_graph_pins_one_fork_source(self):
+        manifest = HELPER.read_toml(ROOT / "Cargo.toml")
+        snark = HELPER.read_toml(ROOT / "crates/zksync_os_snark_prover/Cargo.toml")
+        self.assertEqual(manifest["patch"][PINS["upstream_url"]], {
+            name: {"git": PINS["fork_url"], "rev": PINS["fork_commit"]}
+            for name in HELPER.WRAPPER_AIRBENDER_ROOTS})
+        for dependency in ("zksync_airbender_execution_utils", "zksync_airbender_cli"):
+            self.assertEqual(manifest["workspace"]["dependencies"][dependency]["git"], PINS["fork_url"])
+            self.assertEqual(manifest["workspace"]["dependencies"][dependency]["rev"], PINS["fork_commit"])
+        for dependency in ("riscv_transpiler", "verifier_common"):
+            self.assertEqual(snark["dependencies"][dependency],
+                             {"git": PINS["fork_url"], "rev": PINS["fork_commit"]})
+        lock = HELPER.read_toml(ROOT / "Cargo.lock")
+        self.assertEqual(sum(p.get("source") == HELPER.fork_lock_source(PINS)
+                             for p in lock["package"]), 46)
+        self.assertFalse(any(p.get("source") == PINS["upstream_lock_source"]
+                             for p in lock["package"]))
+
     def fixture(self, directory, pins):
         directory = Path(directory)
         manifest = directory / HELPER.PIN_PATH.name
         manifest.write_text(json.dumps(pins))
-        for filename in (PINS["patch_file"], PINS["overlay_lock_file"]):
+        for filename in (PINS["overlay_lock_file"],):
             (directory / filename).write_bytes((ROOT / "patches" / filename).read_bytes())
         return manifest
 
-    def test_exact_source_closure_and_pure_metadata(self):
+    def test_immutable_fork_source_and_pure_metadata(self):
         with patch.object(HELPER.subprocess, "run") as run, patch.object(HELPER.subprocess, "check_output") as output:
             pins = HELPER.load_airbender_pins()
-            self.assertEqual(set(pins["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
-            self.assertEqual(pins["patched_tree"], HELPER.AIRBENDER_PATCHED_TREE)
-            sections = (ROOT / "patches" / pins["patch_file"]).read_text().split("diff --git ")[1:]
-            self.assertEqual({section.splitlines()[0].split()[1][2:] for section in sections},
-                             HELPER.AIRBENDER_CHANGED_PATHS)
+            self.assertEqual(tuple(pins[key] for key in ("fork_url", "fork_commit", "fork_tree")),
+                             HELPER.AIRBENDER_FORK)
+            self.assertEqual(tuple(pins[key] for key in ("upstream_url", "upstream_commit", "upstream_tree")),
+                             HELPER.AIRBENDER_UPSTREAM)
             run.assert_not_called()
             output.assert_not_called()
 
@@ -534,19 +430,17 @@ class AirbenderPinTests(unittest.TestCase):
         lock = HELPER.read_toml(ROOT / "Cargo.lock")
         revision = PINS["upstream_commit"]
         self.assertEqual(metadata["airbender_revision"], revision)
-        self.assertNotEqual(metadata["airbender_patched_tree"], PINS["patched_tree"])
+        self.assertNotEqual(metadata["airbender_patched_tree"], PINS["fork_tree"])
         self.assertIn(f'const AIRBENDER_REVISION: &str = "{revision}";', loader)
         self.assertIn('const BUNDLED_ARTIFACT_SHA256: &str =\n    "'
                       + HELPER.sha256(artifact_path) + '";', loader)
         for dependency, package in (("zksync_airbender_execution_utils", "execution_utils"),
                                     ("zksync_airbender_cli", "cli")):
-            self.assertEqual(dependencies[dependency]["git"], PINS["upstream_url"])
-            self.assertEqual(PINS["upstream_lock_source"],
-                             f'git+{dependencies[dependency]["git"]}'
-                             f'?tag={dependencies[dependency]["tag"]}#{revision}')
+            self.assertEqual(dependencies[dependency]["git"], PINS["fork_url"])
+            self.assertEqual(dependencies[dependency]["rev"], PINS["fork_commit"])
             locked = [row for row in lock["package"] if row["name"] == package]
             self.assertEqual(len(locked), 1)
-            self.assertEqual(locked[0]["source"], PINS["upstream_lock_source"])
+            self.assertEqual(locked[0]["source"], HELPER.fork_lock_source(PINS))
         self.assertEqual(metadata["security_bits"], 100)
         self.assertEqual(summaries["security_bits"], 100)
         self.assertEqual(metadata["circuit_identity"],
@@ -559,11 +453,8 @@ class AirbenderPinTests(unittest.TestCase):
         self.assertIn(".validate(SecurityLevel::Security100.model(), base_binary)", loader)
         self.assertIn("target: ProofTarget::RecursionUnified", integration)
         self.assertIn("ProgramProver::new_with_setup_summaries_and_program_bytes(", integration)
-        self.assertEqual(set(PINS["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
-        self.assertIn("circuit_defs/unrolled_circuits/unified_reduced_machine/generated/quotient.rs",
-                      PINS["changed_files"])
-        # Upstream revision matching alone does not qualify these old release
-        # artifacts against the new cumulative security overlay and guest bytes.
+        # The base revision still names the rc.2 lineage. The tree names the
+        # actual fork source, so these older summaries remain unqualified.
         for section, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
             self.assertEqual(metadata["app"][section]["sha256"], HELPER.sha256(ROOT / relative))
             self.assertEqual(metadata["app"][section]["size_bytes"], (ROOT / relative).stat().st_size)
@@ -609,18 +500,10 @@ class AirbenderPinTests(unittest.TestCase):
             lambda p: p.update(upstream_tree="f" * 40),
             lambda p: p.update(upstream_lock_source=p["upstream_lock_source"] + "-changed"),
             lambda p: p.update(upstream_package_count=True),
-            lambda p: p.update(patch_file="../escape.patch"),
             lambda p: p.update(overlay_lock_file="../escape.lock"),
-            lambda p: p.update(patch_sha256="0" * 64),
-            lambda p: p.update(patched_tree="f" * 40),
-            lambda p: p["changed_files"].pop("execution_utils/src/lib.rs"),
-            lambda p: p["changed_files"].update({"../unexpected": {}}),
-            lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(preimage_sha256=None),
-            lambda p: p["changed_files"]["execution_utils/src/setup_summaries.rs"].update(preimage_sha256="f" * 64),
-            lambda p: p["changed_files"]["gpu_prover/src/execution/empty_inits_and_teardowns.rs"].update(preimage_sha256="f" * 64),
-            lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(postimage_sha256="0" * 64),
-            lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(postimage_size=True),
-            lambda p: p["changed_files"]["execution_utils/src/lib.rs"].update(extra=1),
+            lambda p: p.update(fork_url="https://example.invalid/airbender"),
+            lambda p: p.update(fork_commit="f" * 40),
+            lambda p: p.update(fork_tree="f" * 40),
             lambda p: p.update(purpose=""),
         ):
             with tempfile.TemporaryDirectory() as temporary:
@@ -632,7 +515,7 @@ class AirbenderPinTests(unittest.TestCase):
     def test_duplicate_manifest_keys_symlinks_and_changed_inputs_fail_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self.fixture(temporary, PINS)
-            manifest.write_text('{"schema_version":2,"schema_version":2}')
+            manifest.write_text('{"schema_version":3,"schema_version":3}')
             with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
                 HELPER.load_airbender_pins(manifest)
             manifest.unlink()
@@ -640,74 +523,28 @@ class AirbenderPinTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 HELPER.load_airbender_pins(manifest)
             manifest.unlink()
-            for name in (PINS["patch_file"], PINS["overlay_lock_file"]):
+            for name in (PINS["overlay_lock_file"],):
                 manifest = self.fixture(temporary, PINS)
                 (manifest.parent / name).write_bytes(b"changed")
                 with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                     HELPER.load_airbender_pins(manifest)
 
-    def test_preimages_check_every_existing_file_and_reject_new_file_collisions(self):
+    def test_reverification_rejects_commit_parent_tree_and_dirty_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with patch.object(HELPER, "checked_hash") as hashes:
-                HELPER.check_airbender_preimages(root, PINS)
-                self.assertEqual(
-                    hashes.call_count,
-                    sum(row["preimage_sha256"] is not None for row in PINS["changed_files"].values()),
-                )
-                for relative, row in PINS["changed_files"].items():
-                    if row["preimage_sha256"] is not None:
-                        hashes.assert_any_call(root / relative, row["preimage_sha256"])
-                for relative in ("execution_utils/src/setup_summaries.rs",
-                                 "gpu_prover/src/execution/empty_inits_and_teardowns.rs"):
-                    with self.subTest(new_file=relative):
-                        new = root / relative
-                        new.parent.mkdir(parents=True, exist_ok=True)
-                        new.symlink_to(root / "missing")
-                        with self.assertRaisesRegex(ValueError, "preimage already exists"):
-                            HELPER.check_airbender_preimages(root, PINS)
-                        new.unlink()
-
-    def test_reverification_rejects_git_state_hash_size_and_symlink_drift(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pins = copy.deepcopy(PINS)
-            for relative, row in pins["changed_files"].items():
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(relative.encode())
-                row["postimage_sha256"] = HELPER.sha256(path)
-                row["postimage_size"] = path.stat().st_size
             values = {
-                ("rev-parse", "HEAD"): pins["upstream_commit"],
-                ("rev-parse", "HEAD^{tree}"): pins["upstream_tree"],
-                ("diff", "--name-only", "HEAD"): "\n".join(sorted(pins["changed_files"])),
-                ("ls-files", "--others", "--exclude-standard"): "",
-                ("diff", "--name-only"): "",
-                ("write-tree",): pins["patched_tree"],
+                ("rev-parse", "HEAD"): PINS["fork_commit"],
+                ("rev-parse", "HEAD^"): PINS["upstream_commit"],
+                ("rev-parse", "HEAD^{tree}"): PINS["fork_tree"],
+                ("status", "--porcelain", "--untracked-files=all"): "",
             }
             with patch.object(HELPER, "run_git", side_effect=lambda repo, *args: values[args]):
-                HELPER.verify_upstream(root, pins)
+                HELPER.verify_airbender_source(root, PINS)
                 for args, original in list(values.items()):
                     values[args] = "unexpected"
                     with self.assertRaises(ValueError):
-                        HELPER.verify_upstream(root, pins)
+                        HELPER.verify_airbender_source(root, PINS)
                     values[args] = original
-                for relative, row in pins["changed_files"].items():
-                    row["postimage_size"] += 1
-                    with self.assertRaisesRegex(ValueError, "size mismatch"):
-                        HELPER.verify_upstream(root, pins)
-                    row["postimage_size"] -= 1
-                    path = root / relative
-                    path.write_bytes(b"changed")
-                    with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
-                        HELPER.verify_upstream(root, pins)
-                    path.unlink()
-                    path.symlink_to(root / "missing")
-                    with self.assertRaisesRegex(ValueError, "not a regular input"):
-                        HELPER.verify_upstream(root, pins)
-                    path.unlink()
-                    path.write_bytes(relative.encode())
 
 
 class WrapperPinTests(unittest.TestCase):
@@ -746,13 +583,19 @@ class WrapperPinTests(unittest.TestCase):
                 revision = pins["upstream_commit"]
                 self.assertEqual(artifact[field], revision)
                 self.assertIn(f'const {constant}: &str = "{revision}";', loader)
-                self.assertEqual(dependencies[dependency]["git"], pins["upstream_url"])
-                self.assertEqual(pins["upstream_lock_source"],
-                                 f'git+{dependencies[dependency]["git"]}'
-                                 f'?tag={dependencies[dependency]["tag"]}#{revision}')
+                if field == "airbender_revision":
+                    self.assertEqual(dependencies[dependency]["git"], pins["fork_url"])
+                    self.assertEqual(dependencies[dependency]["rev"], pins["fork_commit"])
+                    expected_source = HELPER.fork_lock_source(pins)
+                else:
+                    self.assertEqual(dependencies[dependency]["git"], pins["upstream_url"])
+                    self.assertEqual(pins["upstream_lock_source"],
+                                     f'git+{dependencies[dependency]["git"]}'
+                                     f'?tag={dependencies[dependency]["tag"]}#{revision}')
+                    expected_source = pins["upstream_lock_source"]
                 locked = [row for row in lock["package"] if row["name"] == package]
                 self.assertEqual(len(locked), 1)
-                self.assertEqual(locked[0]["source"], pins["upstream_lock_source"])
+                self.assertEqual(locked[0]["source"], expected_source)
         self.assertEqual(artifact["security_bits"], 100)
         self.assertEqual(dependencies["zkos_wrapper"]["features"], ["security_100"])
         self.assertIs(dependencies["zkos_wrapper"]["default-features"], False)
@@ -1056,9 +899,35 @@ class CommandTests(unittest.TestCase):
             checked.assert_not_called()
 
 
+class PreparedBuildGuardTests(unittest.TestCase):
+    def test_proving_build_scripts_require_workspace_bound_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary).resolve() / "prepared/prover"
+            workspace.mkdir(parents=True)
+            marker = workspace / HELPER.PREPARED_SOURCE_MARKER
+            marker.write_bytes(HELPER.prepared_source_marker(
+                workspace, PINS, HELPER.load_wrapper_pins(), HELPER.load_crypto_pins()))
+            for crate in ("zksync_os_fri_prover", "zksync_os_snark_prover"):
+                with self.subTest(crate=crate):
+                    (workspace / "crates" / crate).mkdir(parents=True)
+                    binary = Path(temporary) / (crate + "-build-guard")
+                    subprocess.run(["rustc", "--edition=2021", str(ROOT / "crates" / crate / "build.rs"),
+                                    "-o", str(binary)], check=True, capture_output=True)
+                    environment = os.environ.copy()
+                    environment["CARGO_MANIFEST_DIR"] = str(ROOT / "crates" / crate)
+                    self.assertNotEqual(subprocess.run([binary], env=environment, capture_output=True).returncode, 0)
+                    environment["CARGO_MANIFEST_DIR"] = str(workspace / "crates" / crate)
+                    self.assertEqual(subprocess.run([binary], env=environment, capture_output=True).returncode, 0)
+                    marker.write_bytes(b"stale prepared sources\n")
+                    self.assertNotEqual(subprocess.run([binary], env=environment, capture_output=True).returncode, 0)
+                    marker.write_bytes(HELPER.prepared_source_marker(
+                        workspace, PINS, HELPER.load_wrapper_pins(), HELPER.load_crypto_pins()))
+
+
 class WrapperCpuIntegrationTests(unittest.TestCase):
     def exercise(self, temporary, *, reject_reverification=False, reject_tooling=False,
-                 reject_crypto_reverification=False, reject_crypto_tooling=False, cargo_exit_code=0):
+                 reject_crypto_reverification=False, reject_crypto_tooling=False,
+                 reject_marker=False, cargo_exit_code=0):
         """Test CPU orchestration with real snapshots/records and mocked external tools."""
         source = Path(temporary).resolve()
         (source / "crates/example/src").mkdir(parents=True)
@@ -1066,6 +935,8 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
         (source / "crates/example/Cargo.toml").write_text('[package]\nname = "example"\nversion = "0.1.0"\n')
         for name in HELPER.SOURCE_FILES:
             (source / name).write_bytes((ROOT / name).read_bytes())
+        (source / "Cargo.lock").write_bytes((source / "Cargo.lock").read_bytes().replace(
+            HELPER.fork_lock_source(PINS).encode(), PINS["upstream_lock_source"].encode()))
         (source / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/example"]\n')
         attestation = source / "verified-build.json"
         events = []
@@ -1076,8 +947,6 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
         checked_hash = HELPER.checked_hash
 
         def check_local_or_external(path, digest):
-            if path.name in {Path(name).name for name in PINS["changed_files"]} and "airbender" in path.parts:
-                return
             if reject_tooling and path == HELPER.WRAPPER_PIN_PATH:
                 raise ValueError("tooling changed after Cargo")
             if reject_crypto_tooling and path == HELPER.CRYPTO_PIN_PATH:
@@ -1115,6 +984,9 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
                 self.assertEqual(set(manifest["patch"][pins["upstream_url"]]), set(paths))
                 self.assertEqual(set(manifest["patch"][crypto_pins["upstream_url"]]), set(crypto_paths))
                 self.assertIn("--no-default-features", command)
+                if reject_marker:
+                    Path(command[command.index("--manifest-path") + 1]).parent.joinpath(
+                        HELPER.PREPARED_SOURCE_MARKER).write_text("changed after Cargo\n")
                 return unittest.mock.Mock(returncode=cargo_exit_code)
             self.assertEqual(command[:2], ["git", "clone"])
             return unittest.mock.Mock(returncode=0)
@@ -1126,7 +998,7 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
             for name, kwargs in (
                 ("checked_hash", {"side_effect": check_local_or_external}),
                 ("run_git", {"return_value": PINS["upstream_tree"]}),
-                ("verify_upstream", {}),
+                ("verify_airbender_source", {}),
                 ("package_paths", {"side_effect": lambda root, packages: {p: p for p in packages}}),
                 ("prepare_wrapper", {"side_effect": prepare_wrapper}),
                 ("verify_wrapper", {"side_effect": verify_wrapper}),
@@ -1137,8 +1009,9 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
             stack.enter_context(patch.object(HELPER.subprocess, "run", side_effect=run))
             stack.enter_context(patch.object(HELPER.subprocess, "check_output", return_value="offline-test-version"))
             command = ["--cpu", "test-wrapper", "--", "cargo", "build", "--locked", "--no-default-features"]
-            if reject_reverification or reject_tooling or reject_crypto_reverification or reject_crypto_tooling:
-                with self.assertRaisesRegex(ValueError, "changed after Cargo"):
+            if (reject_reverification or reject_tooling or reject_crypto_reverification
+                    or reject_crypto_tooling or reject_marker):
+                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch" if reject_marker else "changed after Cargo"):
                     HELPER.main(command)
             else:
                 self.assertEqual(HELPER.main(command), cargo_exit_code)
@@ -1164,14 +1037,26 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
                 relative = "patches/zksync-crypto-native-fri-query-count." + suffix
                 self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             self.assertEqual(record, json.loads((build / "build-result.json").read_text()))
-            self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(), (ROOT / "Cargo.lock").read_bytes())
+            self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(),
+                             (ROOT / "Cargo.lock").read_bytes().replace(
+                                 HELPER.fork_lock_source(PINS).encode(),
+                                 PINS["upstream_lock_source"].encode()))
             self.assertEqual((build / "prover/Cargo.lock").read_bytes(),
                              (ROOT / "patches/airbender.Cargo.lock").read_bytes())
+            self.assertEqual(record["prepared_source_marker_sha256"],
+                             HELPER.sha256(build / "prover" / HELPER.PREPARED_SOURCE_MARKER))
 
     def test_cpu_reverification_failure_never_emits_success_attestation(self):
         with tempfile.TemporaryDirectory() as temporary:
             attestation, build, events = self.exercise(temporary, reject_reverification=True)
             self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper"])
+            self.assertFalse(attestation.exists())
+            self.assertFalse((build / "build-result.json").exists())
+
+    def test_cpu_marker_drift_never_emits_success_attestation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            attestation, build, events = self.exercise(temporary, reject_marker=True)
+            self.assertEqual(events, ["prepare-wrapper", "prepare-crypto", "cargo", "reverify-wrapper", "reverify-crypto"])
             self.assertFalse(attestation.exists())
             self.assertFalse((build / "build-result.json").exists())
 
@@ -1283,7 +1168,7 @@ class MaterializationTests(unittest.TestCase):
                 b"03454c7a41053a4b88bb421e97fb9efe893a92f5", b"f" * 40))
             with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \
                     patch.object(HELPER.subprocess, "run") as run:
-                with self.assertRaisesRegex(ValueError, "mixed Airbender"):
+                with self.assertRaisesRegex(ValueError, "mixed or unknown Airbender"):
                     HELPER.main(["incompatible-source", "--", "cargo", "build", "--locked"])
                 run.assert_not_called()
             self.assertFalse((root / "target").exists())

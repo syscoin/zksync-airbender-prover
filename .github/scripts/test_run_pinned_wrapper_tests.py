@@ -63,13 +63,23 @@ class WrapperTests(unittest.TestCase):
         (self.source / "fixture.rs").write_text("// application input\n")
         (self.workspace / "fixture.rs").write_bytes((self.source / "fixture.rs").read_bytes())
         manifest = (self.source / "Cargo.toml").read_text()
-        for group, pins in (("air", self.air), ("wrapper", self.wrapper), ("crypto", self.crypto)):
-            manifest += "\n[patch." + json.dumps(pins["upstream_url"]) + "]\n"
-            for name, route in self.paths[group].items():
-                manifest += json.dumps(name) + " = { path = " + json.dumps(str(self.roots[group] / route)) + " }\n"
+        canonical_patch = BASE.canonical_fork_patch(self.air)
+        self.assertTrue(manifest.endswith(canonical_patch))
+        manifest = manifest[:-len(canonical_patch)]
+        for url, group, names in (
+            (self.air["upstream_url"], "air", BASE.WRAPPER_AIRBENDER_ROOTS),
+            (self.air["fork_url"], "air", self.paths["air"]),
+            (self.wrapper["upstream_url"], "wrapper", self.paths["wrapper"]),
+            (self.crypto["upstream_url"], "crypto", self.paths["crypto"]),
+        ):
+            manifest += "\n[patch." + json.dumps(url) + "]\n"
+            for name in names:
+                manifest += json.dumps(name) + " = { path = " + json.dumps(str(self.roots[group] / self.paths[group][name])) + " }\n"
         (self.workspace / "Cargo.toml").write_text(manifest)
         (self.workspace / "Cargo.lock").write_bytes(self.overlay)
-        tooling = (BASE.PIN_PATH, BASE.PIN_PATH.parent / self.air["patch_file"],
+        (self.workspace / BASE.PREPARED_SOURCE_MARKER).write_bytes(BASE.prepared_source_marker(
+            self.workspace, self.air, self.wrapper, self.crypto))
+        tooling = (BASE.PIN_PATH,
                    BASE.PIN_PATH.parent / self.air["overlay_lock_file"], BASE.WRAPPER_PIN_PATH,
                    BASE.WRAPPER_PIN_PATH.parent / self.wrapper["patch_file"], BASE.CRYPTO_PIN_PATH,
                    BASE.CRYPTO_PIN_PATH.parent / self.crypto["patch_file"],
@@ -84,6 +94,7 @@ class WrapperTests(unittest.TestCase):
             "application_inputs_sha256": {relative: BASE.sha256(self.source / relative)
                 for relative in ("Cargo.toml", "Cargo.lock", "fixture.rs")},
             "workspace_manifest_sha256": BASE.sha256(self.workspace / "Cargo.toml"),
+            "prepared_source_marker_sha256": BASE.sha256(self.workspace / BASE.PREPARED_SOURCE_MARKER),
             "selected_lock": self.selected, "package_paths": self.paths["air"],
             "tooling_sha256": {str(path.relative_to(ROOT)): BASE.sha256(path) for path in tooling},
             "cargo_target_dir": str(self.target)}
@@ -112,7 +123,7 @@ class WrapperTests(unittest.TestCase):
     def authenticated(self):
         stack = ExitStack()
         self.addCleanup(stack.close)
-        for verifier in ("verify_upstream", "verify_wrapper", "verify_crypto"):
+        for verifier in ("verify_airbender_source", "verify_wrapper", "verify_crypto"):
             stack.enter_context(patch.object(BASE, verifier))
         stack.enter_context(patch.object(BASE, "package_paths", side_effect=self.package_paths))
         return stack
@@ -173,6 +184,12 @@ class WrapperTests(unittest.TestCase):
             mutate(record)
             with self.subTest(name=name), self.assertRaises(ValueError):
                 RUNNER.authenticate(record, "ci-test")
+        marker = self.workspace / BASE.PREPARED_SOURCE_MARKER
+        marker.write_bytes(marker.read_bytes() + b"\n")
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            RUNNER.authenticate(self.record, "ci-test")
+        marker.write_bytes(BASE.prepared_source_marker(
+            self.workspace, self.air, self.wrapper, self.crypto))
         (self.workspace / "Cargo.lock").write_bytes(self.overlay + b"\n")
         with self.assertRaisesRegex(ValueError, "SHA-256"):
             RUNNER.authenticate(self.record, "ci-test")
@@ -260,7 +277,7 @@ class WrapperTests(unittest.TestCase):
             self.assertEqual(kwargs["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
         self.assertEqual(BASE.verify_wrapper.call_count, 2)
         self.assertEqual(BASE.verify_crypto.call_count, 2)
-        self.assertEqual(BASE.verify_upstream.call_count, 2)
+        self.assertEqual(BASE.verify_airbender_source.call_count, 2)
 
     def test_cargo_failure_preserved_second_test_skipped_and_inputs_reverified(self):
         for statuses, metadata_status, expected, count in (

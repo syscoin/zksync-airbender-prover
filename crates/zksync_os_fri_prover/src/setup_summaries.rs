@@ -29,7 +29,7 @@ const MAX_ARTIFACT_BYTES: usize = 1024 * 1024;
 // The revision records the upstream origin; the reviewed patched tree binds the
 // effective circuit source, including generated relations and recursive guests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
-const AIRBENDER_PATCHED_TREE: &str = "f6a8eb9bd6c1e262e294e15b21d479c6f6f5835b";
+const AIRBENDER_PATCHED_TREE: &str = "799e018339df40d0e456ba3fa0fc768ce0691853";
 const VK_HASH: &str = "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90";
 const PROGRAM_COMMITMENT: &str =
     "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94";

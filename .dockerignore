@@ -9,8 +9,7 @@
 !scripts/prepare-patched-airbender.py
 !scripts/prepare-patched-gpu-backends.py
 !patches
-!patches/airbender-cuda-device-diagnostics.patch
-!patches/airbender-cuda-device-diagnostics.json
+!patches/airbender-fork-source.json
 !patches/airbender.Cargo.lock
 !patches/zkos-wrapper-buffered-os-rng.json
 !patches/zkos-wrapper-buffered-os-rng.patch

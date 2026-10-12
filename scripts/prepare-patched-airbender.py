@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build with reviewed proving-source patches without altering source checkouts.
+"""Build from immutable Airbender source and reviewed wrapper/crypto patches.
 
 Usage: cargo-with-patched-airbender.sh LABEL -- cargo build|test|run|check|clippy|metadata|tree --locked ...
 PROVER_SOURCE_DIR separates reviewed tooling from application source in release CI.
-AIRBENDER_SOURCE_DIR optionally supplies a local Git clone (never modified).
+AIRBENDER_SOURCE_DIR optionally supplies a local fork Git clone (never modified).
 ZKOS_WRAPPER_SOURCE_DIR optionally supplies the exact pinned wrapper Git clone.
 ZKSYNC_CRYPTO_SOURCE_DIR optionally supplies the exact pinned common crypto Git clone.
 AIRBENDER_BUILD_ATTESTATION names a fresh absolute success-only JSON output.
@@ -31,7 +31,7 @@ except ImportError:  # Ubuntu 22.04: installed by apt, never fetched with pip.
 
 
 TOOLING_ROOT = Path(__file__).resolve().parents[1]
-PIN_PATH = TOOLING_ROOT / "patches/airbender-cuda-device-diagnostics.json"
+PIN_PATH = TOOLING_ROOT / "patches/airbender-fork-source.json"
 WRAPPER_PIN_PATH = TOOLING_ROOT / "patches/zkos-wrapper-buffered-os-rng.json"
 CRYPTO_PIN_PATH = TOOLING_ROOT / "patches/zksync-crypto-native-fri-query-count.json"
 SOURCE_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
@@ -61,53 +61,16 @@ AIRBENDER_UPSTREAM = (
     "03454c7a41053a4b88bb421e97fb9efe893a92f5",
     "3af54eb50c31d8e78575434c3f0ab4386891c131",
 )
-AIRBENDER_CHANGED_PATHS = {
-    "circuit_defs/bigint_with_control/verifier/src/lib.rs",
-    "circuit_defs/blake2_with_compression/verifier/src/lib.rs",
-    "circuit_defs/keccak_special5/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/inits_and_teardowns/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/jump_branch_slt/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/load_store_subword_only/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/load_store_word_only/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/mul_div/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/mul_div_unsigned/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/shift_binary_csr/verifier/src/lib.rs",
-    "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/circuit_layout.rs",
-    "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/layout",
-    "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/quotient.rs",
-    "circuit_defs/unrolled_circuits/unified_reduced_machine/verifier/src/generated/circuit_layout.rs",
-    "circuit_defs/unrolled_circuits/unified_reduced_machine/verifier/src/generated/quotient.rs",
-    "circuit_defs/unrolled_circuits/unified_reduced_machine/verifier/src/lib.rs",
-    "cs/src/machine/machine_configurations/full_isa_no_exceptions/basic_state_transition.rs",
-    "cs/src/machine/machine_configurations/full_isa_no_exceptions/optimized_state_transition.rs",
-    "cs/src/machine/machine_configurations/minimal_no_exceptions/basic_state_transition.rs",
-    "cs/src/machine/machine_configurations/minimal_no_exceptions/optimized_state_transition.rs",
-    "cs/src/machine/ops/common_impls/csr_with_delegation.rs",
-    "cs/src/machine/ops/unrolled/reduced_machine_ops.rs",
-    "execution_utils/src/lib.rs", "execution_utils/src/setup_summaries.rs",
-    "execution_utils/src/unrolled_gpu.rs", "gpu_prover/src/execution/gpu_worker.rs",
-    "gpu_prover/native/stage4.cu",
-    "gpu_prover/src/execution/cpu_worker.rs",
-    "gpu_prover/src/execution/simulation_runner.rs",
-    "gpu_prover/src/execution/empty_inits_and_teardowns.rs",
-    "prover/src/prover_stages/stage4.rs",
-    "prover/src/prover_stages/stage5.rs",
-    "tools/cli/src/prover_utils.rs",
-    "tools/generator/src/unrolled_layouts.rs",
-    "tools/pow_config_generator/src/main.rs",
-    "tools/verifier/recursion_in_unified_layer.bin",
-    "tools/verifier/recursion_in_unified_layer.text",
-    "tools/verifier/recursion_in_unified_layer_security_100_bits.bin",
-    "tools/verifier/recursion_in_unified_layer_security_100_bits.text",
-    "tools/verifier/recursion_in_unrolled_layer_security_100_bits.bin",
-    "tools/verifier/recursion_in_unrolled_layer_security_100_bits.text",
-    "verifier/src/lib.rs",
-    "verifier_common/src/fri_folding.rs",
-    "verifier_common/src/lib.rs",
-    "verifier_common/src/pow_config_worst_constants.rs",
-}
-AIRBENDER_PATCHED_TREE = "f6a8eb9bd6c1e262e294e15b21d479c6f6f5835b"
+AIRBENDER_FORK = (
+    "https://github.com/syscoin/zksync-airbender",
+    "e8f380777b7e90388c7323d6fd80a3b58c589f17",
+    "799e018339df40d0e456ba3fa0fc768ce0691853",
+)
+WRAPPER_AIRBENDER_ROOTS = (
+    "unified_reduced_machine_verifier", "blake2_with_compression_verifier",
+    "execution_utils", "setups", "field", "verifier_generator", "prover",
+)
+PREPARED_SOURCE_MARKER = ".syscoin-proving-sources-prepared"
 CRYPTO_UPSTREAM = (
     "https://github.com/matter-labs/zksync-crypto.git",
     "bf2797e4ca13475bf797aa43e085389cdd6732f9",
@@ -172,43 +135,103 @@ def json_document(path):
 def load_airbender_pins(path=PIN_PATH):
     pins = json_document(path)
     require(isinstance(pins, dict) and set(pins) == {"schema_version", "upstream_url", "upstream_commit", "upstream_tree",
-            "upstream_lock_source", "upstream_package_count", "patch_file", "patch_sha256",
-            "changed_files", "patched_tree", "canonical_lock_sha256", "overlay_lock_file",
-            "overlay_lock_sha256", "purpose"}, "unknown Airbender pin fields")
-    require(type(pins["schema_version"]) is int and pins["schema_version"] == 2,
+            "upstream_lock_source", "upstream_package_count", "fork_url", "fork_commit",
+            "fork_tree", "canonical_lock_sha256", "overlay_lock_file", "overlay_lock_sha256",
+            "purpose"}, "unknown Airbender pin fields")
+    require(type(pins["schema_version"]) is int and pins["schema_version"] == 3,
             "unsupported Airbender pin schema")
     require(tuple(pins[k] for k in ("upstream_url", "upstream_commit", "upstream_tree"))
             == AIRBENDER_UPSTREAM, "unknown Airbender upstream origin")
+    require(tuple(pins[k] for k in ("fork_url", "fork_commit", "fork_tree"))
+            == AIRBENDER_FORK, "unknown Airbender fork source")
     require(pins["upstream_lock_source"] == "git+" + AIRBENDER_UPSTREAM[0]
             + "?tag=v0.6.0-rc.2#" + AIRBENDER_UPSTREAM[1], "unknown Airbender lock source")
     require(type(pins["upstream_package_count"]) is int and pins["upstream_package_count"] == 46,
             "unknown Airbender package graph")
-    require(pins["patch_file"] == "airbender-cuda-device-diagnostics.patch"
-            and pins["overlay_lock_file"] == "airbender.Cargo.lock", "unknown Airbender artifact route")
-    for key in ("patch_sha256", "canonical_lock_sha256", "overlay_lock_sha256"):
+    require(pins["overlay_lock_file"] == "airbender.Cargo.lock", "unknown Airbender lock route")
+    for key in ("canonical_lock_sha256", "overlay_lock_sha256"):
         require(isinstance(pins[key], str) and re.fullmatch(r"[0-9a-f]{64}", pins[key])
                 and pins[key] != "0" * 64, "invalid Airbender digest")
-    checked_hash(path.parent / pins["patch_file"], pins["patch_sha256"])
     checked_hash(path.parent / pins["overlay_lock_file"], pins["overlay_lock_sha256"])
-    require(pins["patched_tree"] == AIRBENDER_PATCHED_TREE, "unknown Airbender patched tree")
-    require(isinstance(pins["changed_files"], dict)
-            and set(pins["changed_files"]) == AIRBENDER_CHANGED_PATHS,
-            "unknown Airbender source closure")
-    for relative, row in pins["changed_files"].items():
-        require(isinstance(row, dict) and set(row) == {"preimage_sha256", "postimage_sha256", "postimage_size"},
-                "unknown Airbender source fields")
-        is_new = relative in {"execution_utils/src/setup_summaries.rs",
-                              "gpu_prover/src/execution/empty_inits_and_teardowns.rs"}
-        require((row["preimage_sha256"] is None) == is_new, "invalid Airbender new-file preimage")
-        for key in ("preimage_sha256", "postimage_sha256"):
-            if key == "preimage_sha256" and is_new:
-                continue
-            require(isinstance(row[key], str) and re.fullmatch(r"[0-9a-f]{64}", row[key])
-                    and row[key] != "0" * 64, "invalid Airbender source digest")
-        require(type(row["postimage_size"]) is int and row["postimage_size"] > 0,
-                "invalid Airbender postimage size")
     require(isinstance(pins["purpose"], str) and pins["purpose"], "missing Airbender purpose")
     return pins
+
+
+def fork_lock_source(pins):
+    return "git+" + pins["fork_url"] + "?rev=" + pins["fork_commit"] + "#" + pins["fork_commit"]
+
+
+def airbender_lock_source(canonical, pins):
+    sources = {package.get("source") for package in canonical["package"]
+               if any(origin in package.get("source", "") for origin in
+                      ("github.com/matter-labs/zksync-airbender", "github.com/syscoin/zksync-airbender"))}
+    require(len(sources) == 1 and next(iter(sources)) in
+            {pins["upstream_lock_source"], fork_lock_source(pins)},
+            "mixed or unknown Airbender source in lock")
+    return next(iter(sources))
+
+
+def canonical_fork_patch(pins):
+    return ('\n[patch.' + json.dumps(pins["upstream_url"]) + ']\n'
+            + ''.join(name + ' = { git = ' + json.dumps(pins["fork_url"])
+                      + ', rev = ' + json.dumps(pins["fork_commit"]) + ' }\n'
+                      for name in WRAPPER_AIRBENDER_ROOTS))
+
+
+def prepare_application_manifest(manifest, snark_manifest, pins, air_source, air_paths,
+                                 wrapper_pins, wrapper_paths, crypto_pins, crypto_paths,
+                                 upstream, wrapper, crypto):
+    application = read_toml(manifest)
+    require("replace" not in application, "application dependency replacement requires review")
+    if air_source == fork_lock_source(pins):
+        expected = {name: {"git": pins["fork_url"], "rev": pins["fork_commit"]}
+                    for name in WRAPPER_AIRBENDER_ROOTS}
+        require(application.get("patch") == {pins["upstream_url"]: expected},
+                "unknown canonical fork redirect")
+        direct = application["workspace"]["dependencies"]
+        snark = read_toml(snark_manifest)["dependencies"]
+        for alias in ("zksync_airbender_execution_utils", "zksync_airbender_cli"):
+            require(all(direct[alias].get(key) == value for key, value in
+                        (("git", pins["fork_url"]), ("rev", pins["fork_commit"])))
+                    and not any(key in direct[alias] for key in ("tag", "branch")),
+                    "unknown direct Airbender fork pin")
+        for alias in ("riscv_transpiler", "verifier_common"):
+            require(snark[alias] == {"git": pins["fork_url"], "rev": pins["fork_commit"]},
+                    "unknown SNARK Airbender fork pin")
+        original = manifest.read_text()
+        block = canonical_fork_patch(pins)
+        require(original.endswith(block), "unknown canonical fork patch layout")
+        manifest.write_text(original[:-len(block)])
+        air_patches = ((pins["upstream_url"], WRAPPER_AIRBENDER_ROOTS),
+                       (pins["fork_url"], tuple(air_paths)))
+    else:
+        require("patch" not in application, "historical application dependency override requires review")
+        air_patches = ((pins["upstream_url"], tuple(air_paths)),)
+    with manifest.open("a", encoding="utf-8") as destination:
+        for url, names in air_patches:
+            destination.write('\n[patch.' + json.dumps(url) + ']\n')
+            for name in names:
+                destination.write(json.dumps(name) + " = { path = "
+                                  + json.dumps(str(upstream / air_paths[name])) + " }\n")
+        for url, root, paths in ((wrapper_pins["upstream_url"], wrapper, wrapper_paths),
+                                 (crypto_pins["upstream_url"], crypto, crypto_paths)):
+            destination.write('\n[patch.' + json.dumps(url) + ']\n')
+            for name, relative in paths.items():
+                destination.write(json.dumps(name) + " = { path = "
+                                  + json.dumps(str(root / relative)) + " }\n")
+
+
+def prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins):
+    return (str(workspace.resolve()) + "\n" + pins["fork_commit"] + "\n"
+            + pins["fork_tree"] + "\n" + wrapper_pins["patched_tree"] + "\n"
+            + crypto_pins["patched_tree"] + "\n").encode()
+
+
+def write_prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins):
+    marker = workspace / PREPARED_SOURCE_MARKER
+    with marker.open("xb") as destination:
+        destination.write(prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins))
+    return sha256(marker)
 
 
 def load_wrapper_pins(path=WRAPPER_PIN_PATH):
@@ -306,13 +329,15 @@ def audit_lock(canonical, overlay, pins, wrapper_pins=None, crypto_pins=None):
     wrapper_pins = wrapper_pins or load_wrapper_pins()
     crypto_pins = crypto_pins or load_crypto_pins()
     expected = copy.deepcopy(canonical)
+    air_source = airbender_lock_source(canonical, pins)
     packages = []
     wrapper_packages = {}
     crypto_packages = {}
     for package in expected["package"]:
         source = package.get("source", "")
-        if "github.com/matter-labs/zksync-airbender" in source:
-            require(source == pins["upstream_lock_source"], "mixed Airbender sources in lock")
+        if any(origin in source for origin in
+               ("github.com/matter-labs/zksync-airbender", "github.com/syscoin/zksync-airbender")):
+            require(source == air_source, "mixed Airbender sources in lock")
             packages.append((package["name"], package["version"]))
             del package["source"]
         elif "github.com/matter-labs/zkos-wrapper" in source:
@@ -353,18 +378,20 @@ def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=Non
     checked_hash(reference_overlay, pins["overlay_lock_sha256"])
     raw = source_lock.read_bytes()
     canonical = tomllib.loads(raw.decode("utf-8"))
+    air_source = airbender_lock_source(canonical, pins)
     reference = read_toml(reference_overlay)
     blocks = re.split(rb"(?m)(?=^\[\[package\]\]\r?$)", raw)
     require(len(blocks) == len(canonical["package"]) + 1, "unexpected lock package layout")
     for index, package in enumerate(canonical["package"], 1):
         source = package.get("source", "")
-        airbender = "github.com/matter-labs/zksync-airbender" in source
+        airbender = any(origin in source for origin in
+                        ("github.com/matter-labs/zksync-airbender", "github.com/syscoin/zksync-airbender"))
         wrapper = "github.com/matter-labs/zkos-wrapper" in source
         crypto = "github.com/matter-labs/zksync-crypto" in source and "zksync-crypto-gpu" not in source
         if not airbender and not wrapper and not crypto:
             continue
         if airbender:
-            require(source == pins["upstream_lock_source"], "mixed Airbender sources in lock")
+            require(source == air_source, "mixed Airbender sources in lock")
         elif wrapper:
             require(source == wrapper_pins["upstream_lock_source"], "mixed wrapper sources in lock")
             require(wrapper_pins["upstream_packages"].get(package["name"]) == package["version"],
@@ -398,6 +425,7 @@ def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=Non
         require(len(matches) == 1, "selected common crypto package differs from tooling reference")
     selection = {
         "schema_version": 3, "derivation": "common-proving-source-identity-only-v3",
+        "airbender_lock_source": air_source,
         "canonical_lock_sha256": hashlib.sha256(raw).hexdigest(),
         "overlay_lock_sha256": hashlib.sha256(overlay_raw).hexdigest(),
         "airbender_packages": packages,
@@ -660,29 +688,15 @@ def package_paths(upstream, expected):
     return dict(sorted(paths.items()))
 
 
-def verify_upstream(upstream, pins):
-    require(run_git(upstream, "rev-parse", "HEAD") == pins["upstream_commit"], "upstream HEAD changed")
-    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"],
-            "upstream tree changed")
-    require(run_git(upstream, "diff", "--name-only", "HEAD").splitlines() == sorted(pins["changed_files"]),
-            "unexpected upstream changed paths")
-    require(not run_git(upstream, "ls-files", "--others", "--exclude-standard"),
-            "unexpected upstream untracked files")
-    require(not run_git(upstream, "diff", "--name-only"), "upstream changed after patch staging")
-    require(run_git(upstream, "write-tree") == pins["patched_tree"], "patched tree mismatch")
-    for relative, row in pins["changed_files"].items():
-        path = upstream / relative
-        checked_hash(path, row["postimage_sha256"])
-        require(path.stat().st_size == row["postimage_size"], "Airbender postimage size mismatch")
-
-
-def check_airbender_preimages(upstream, pins):
-    for relative, row in pins["changed_files"].items():
-        path = upstream / relative
-        if row["preimage_sha256"] is None:
-            require(not path.exists() and not path.is_symlink(), "Airbender new-file preimage already exists")
-        else:
-            checked_hash(path, row["preimage_sha256"])
+def verify_airbender_source(source, pins):
+    require(run_git(source, "rev-parse", "HEAD") == pins["fork_commit"],
+            "Airbender fork HEAD changed")
+    require(run_git(source, "rev-parse", "HEAD^") == pins["upstream_commit"],
+            "Airbender fork base changed")
+    require(run_git(source, "rev-parse", "HEAD^{tree}") == pins["fork_tree"],
+            "Airbender fork tree changed")
+    require(not run_git(source, "status", "--porcelain", "--untracked-files=all"),
+            "Airbender fork source changed")
 
 
 def verify_wrapper(upstream, pins):
@@ -792,15 +806,15 @@ def main(argv):
     # Validate before cloning, copying, or creating any build directory.
     cargo_command(argv[2:], Path("placeholder/Cargo.toml"))
     source = Path(os.environ.get("PROVER_SOURCE_DIR", TOOLING_ROOT)).resolve(strict=True)
+    require(not (source / PREPARED_SOURCE_MARKER).exists(),
+            "application source already contains a prepared-source marker")
     require_airbender_only(source, argv[2:], explicit_cpu)
     pins = load_airbender_pins()
     wrapper_pins = load_wrapper_pins()
     wrapper_inputs = wrapper_pins_metadata()
     crypto_pins = load_crypto_pins()
     crypto_inputs = crypto_pins_metadata()
-    patch = PIN_PATH.parent / pins["patch_file"]
     overlay = PIN_PATH.parent / pins["overlay_lock_file"]
-    checked_hash(patch, pins["patch_sha256"])
     checked_hash(overlay, pins["overlay_lock_sha256"])
     overlay_raw, selected_lock = selected_lock_overlay(
         source / "Cargo.lock", overlay, pins, wrapper_pins, crypto_pins)
@@ -821,42 +835,24 @@ def main(argv):
     source_hashes = copy_application(source, workspace)
     checked_hash(workspace / "Cargo.lock", selected_lock["canonical_lock_sha256"])
     upstream = build / "airbender"
-    clone_source = os.environ.get("AIRBENDER_SOURCE_DIR", pins["upstream_url"])
+    clone_source = os.environ.get("AIRBENDER_SOURCE_DIR", pins["fork_url"])
     if "AIRBENDER_SOURCE_DIR" in os.environ:
         clone_source = str(Path(clone_source).resolve(strict=True))
         require(Path(clone_source).is_dir(), "AIRBENDER_SOURCE_DIR must be a Git directory")
     subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
                     clone_source, str(upstream)], check=True)
-    run_git(upstream, "checkout", "--quiet", "--detach", pins["upstream_commit"])
-    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"], "upstream tree mismatch")
-    check_airbender_preimages(upstream, pins)
-    run_git(upstream, "apply", "--check", str(patch))
-    run_git(upstream, "apply", str(patch))
-    run_git(upstream, "add", "--", *sorted(pins["changed_files"]))
-    verify_upstream(upstream, pins)
+    run_git(upstream, "checkout", "--quiet", "--detach", pins["fork_commit"])
+    verify_airbender_source(upstream, pins)
     paths = package_paths(upstream, expected)
     wrapper, wrapper_clone_source, wrapper_paths = prepare_wrapper(build, wrapper_pins)
     crypto, crypto_clone_source, crypto_paths = prepare_crypto(build, crypto_pins)
     manifest = workspace / "Cargo.toml"
-    application_manifest = read_toml(manifest)
-    require("patch" not in application_manifest and "replace" not in application_manifest,
-            "application already has dependency overrides; review required")
-    # All locked Airbender crates share this path graph. A gpu_prover-only patch
-    # would create incompatible duplicate path/Git types through workspace deps.
-    with manifest.open("a", encoding="utf-8") as destination:
-        destination.write('\n[patch."' + pins["upstream_url"] + '"]\n')
-        for name, relative in paths.items():
-            destination.write(json.dumps(name) + " = { path = "
-                              + json.dumps(str(upstream / relative)) + " }\n")
-        destination.write('\n[patch.' + json.dumps(wrapper_pins["upstream_url"]) + ']\n')
-        for name, relative in wrapper_paths.items():
-            destination.write(json.dumps(name) + " = { path = "
-                              + json.dumps(str(wrapper / relative)) + " }\n")
-        destination.write('\n[patch.' + json.dumps(crypto_pins["upstream_url"]) + ']\n')
-        for name, relative in crypto_paths.items():
-            destination.write(json.dumps(name) + " = { path = "
-                              + json.dumps(str(crypto / relative)) + " }\n")
+    prepare_application_manifest(
+        manifest, workspace / "crates/zksync_os_snark_prover/Cargo.toml", pins,
+        selected_lock["airbender_lock_source"], paths, wrapper_pins, wrapper_paths,
+        crypto_pins, crypto_paths, upstream, wrapper, crypto)
     (workspace / "Cargo.lock").write_bytes(overlay_raw)
+    marker_sha256 = write_prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins)
     record = {
         "schema_version": 1, "label": label, "pins": pins, "selected_lock": selected_lock,
         "zkos_wrapper": {
@@ -876,13 +872,14 @@ def main(argv):
             "package_paths": crypto_paths,
         },
         "tooling_sha256": {str(path.relative_to(TOOLING_ROOT)): sha256(path) for path in
-                           (PIN_PATH, patch, overlay, WRAPPER_PIN_PATH,
+                           (PIN_PATH, overlay, WRAPPER_PIN_PATH,
                             WRAPPER_PIN_PATH.parent / wrapper_pins["patch_file"], CRYPTO_PIN_PATH,
                             CRYPTO_PIN_PATH.parent / crypto_pins["patch_file"], Path(__file__).resolve(),
                             TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")},
         "application_source": str(source), "application_inputs_sha256": source_hashes,
-        "workspace": str(workspace), "upstream_clone_source": clone_source,
+        "workspace": str(workspace), "airbender_clone_source": clone_source,
         "package_paths": paths, "workspace_manifest_sha256": sha256(manifest),
+        "prepared_source_marker_sha256": marker_sha256,
         "cargo_target_dir": str(target), "caller_cwd": os.getcwd(),
         "build_environment": {name: os.environ[name] for name in (
             "RUSTUP_TOOLCHAIN", "RUSTUP_HOME", "CARGO_HOME", "CARGO_BUILD_JOBS",
@@ -905,11 +902,12 @@ def main(argv):
         record["inputs_reverified"] = False
         write_json_exclusive(build / "build-result.json", record)
         return result.returncode
-    verify_upstream(upstream, pins)
+    verify_airbender_source(upstream, pins)
     verify_wrapper(wrapper, wrapper_pins)
     verify_crypto(crypto, crypto_pins)
     checked_hash(workspace / "Cargo.lock", selected_lock["overlay_lock_sha256"])
     checked_hash(manifest, record["workspace_manifest_sha256"])
+    checked_hash(workspace / PREPARED_SOURCE_MARKER, marker_sha256)
     for relative, expected_hash in source_hashes.items():
         if relative not in {"Cargo.toml", "Cargo.lock"}:
             checked_hash(workspace / relative, expected_hash)

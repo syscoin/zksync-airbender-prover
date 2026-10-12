@@ -62,7 +62,7 @@ def authenticate(record, expected_label):
     roots = {"air": directory(workspace.parent / "airbender"),
              "wrapper": directory(workspace.parent / "zkos-wrapper"),
              "crypto": directory(workspace.parent / "zksync-crypto")}
-    BASE.verify_upstream(roots["air"], air)
+    BASE.verify_airbender_source(roots["air"], air)
     BASE.verify_wrapper(roots["wrapper"], wrapper)
     BASE.verify_crypto(roots["crypto"], crypto)
     for relative, digest in record["application_inputs_sha256"].items():
@@ -78,6 +78,8 @@ def authenticate(record, expected_label):
     BASE.require((workspace / "Cargo.lock").read_bytes() == overlay,
                  "application lock overlay differs")
     BASE.checked_hash(workspace / "Cargo.toml", record["workspace_manifest_sha256"])
+    BASE.checked_hash(workspace / BASE.PREPARED_SOURCE_MARKER,
+                      record["prepared_source_marker_sha256"])
     paths = {"air": BASE.package_paths(roots["air"], selected["airbender_packages"]),
              "wrapper": BASE.package_paths(roots["wrapper"], wrapper["upstream_packages"]),
              "crypto": BASE.package_paths(roots["crypto"], crypto["upstream_packages"])}
@@ -87,12 +89,19 @@ def authenticate(record, expected_label):
                  "attested package routes differ")
     patches = {pins["upstream_url"]: {
         name: {"path": str(roots[group] / route)} for name, route in paths[group].items()}
-        for group, pins in (("air", air), ("wrapper", wrapper), ("crypto", crypto))}
+        for group, pins in (("wrapper", wrapper), ("crypto", crypto))}
+    air_names = (BASE.WRAPPER_AIRBENDER_ROOTS if selected["airbender_lock_source"]
+                 == BASE.fork_lock_source(air) else tuple(paths["air"]))
+    patches[air["upstream_url"]] = {
+        name: {"path": str(roots["air"] / paths["air"][name])} for name in air_names}
+    if selected["airbender_lock_source"] == BASE.fork_lock_source(air):
+        patches[air["fork_url"]] = {
+            name: {"path": str(roots["air"] / route)} for name, route in paths["air"].items()}
     manifest = BASE.read_toml(workspace / "Cargo.toml")
     BASE.require(manifest.get("patch") == patches and "replace" not in manifest,
                  "application proving patch graph differs")
     tooling = {str(path.relative_to(ROOT)) for path in (
-        BASE.PIN_PATH, BASE.PIN_PATH.parent / air["patch_file"],
+        BASE.PIN_PATH,
         BASE.PIN_PATH.parent / air["overlay_lock_file"], BASE.WRAPPER_PIN_PATH,
         BASE.WRAPPER_PIN_PATH.parent / wrapper["patch_file"], BASE.CRYPTO_PIN_PATH,
         BASE.CRYPTO_PIN_PATH.parent / crypto["patch_file"],

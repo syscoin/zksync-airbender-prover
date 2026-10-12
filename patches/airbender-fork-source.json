@@ -1,0 +1,15 @@
+{
+  "schema_version": 3,
+  "upstream_url": "https://github.com/matter-labs/zksync-airbender",
+  "upstream_commit": "03454c7a41053a4b88bb421e97fb9efe893a92f5",
+  "upstream_tree": "3af54eb50c31d8e78575434c3f0ab4386891c131",
+  "upstream_lock_source": "git+https://github.com/matter-labs/zksync-airbender?tag=v0.6.0-rc.2#03454c7a41053a4b88bb421e97fb9efe893a92f5",
+  "upstream_package_count": 46,
+  "fork_url": "https://github.com/syscoin/zksync-airbender",
+  "fork_commit": "e8f380777b7e90388c7323d6fd80a3b58c589f17",
+  "fork_tree": "799e018339df40d0e456ba3fa0fc768ce0691853",
+  "canonical_lock_sha256": "d06255a66cb38bab110a41ee20e8f06b80ee26c2f45a6e182ca672ed990c54ab",
+  "overlay_lock_file": "airbender.Cargo.lock",
+  "overlay_lock_sha256": "cf62d057a5c6f393bab785817e65e7055aafa016c50c6c29ac87d29f11ec430d",
+  "purpose": "Immutable Syscoin Airbender source for the v32 Security100 FRI degree lift. The fork commit is a child of the reviewed v0.6.0-rc.2 base and carries the former cumulative overlay plus format-only changes. Recursive guests, setup, verification key, deployed verifier, and end-to-end proof qualification remain pending."
+}

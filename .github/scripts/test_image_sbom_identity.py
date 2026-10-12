@@ -190,7 +190,7 @@ class ImageIdentityTests(unittest.TestCase):
             identity.build_identity({**self.env, "BUILD_RUN_ATTEMPT": "3"})
 
     def test_airbender_pins_bind_exact_manifest_patch_and_overlay(self):
-        manifest = ROOT / "patches/airbender-cuda-device-diagnostics.json"
+        manifest = ROOT / "patches/airbender-fork-source.json"
         result = identity.airbender_build_pins(manifest)
         self.assertEqual(result["manifest_sha256"], hashlib.sha256(manifest.read_bytes()).hexdigest())
         self.assertEqual(result["pins"]["upstream_package_count"], 46)
@@ -213,16 +213,22 @@ class ImageIdentityTests(unittest.TestCase):
         properties = {item["name"]: item["value"] for item in bound["metadata"]["properties"]}
         self.assertEqual(json.loads(properties["io.syscoin.prover.airbender-build.inputs"]), result)
 
-    def test_airbender_changed_patch_or_overlay_fails_closed(self):
-        for filename in ("airbender-cuda-device-diagnostics.patch", "airbender.Cargo.lock"):
+    def test_airbender_changed_lock_or_source_pin_fails_closed(self):
+        for filename in ("airbender-fork-source.json", "airbender.Cargo.lock"):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 for original in (ROOT / "patches").iterdir():
                     if original.is_file():
                         shutil.copyfile(original, directory / original.name)
-                (directory / filename).write_bytes(b"changed input")
-                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
-                    identity.airbender_build_pins(directory / "airbender-cuda-device-diagnostics.json")
+                changed = directory / filename
+                if filename.endswith(".json"):
+                    source = json.loads(changed.read_text())
+                    source["fork_commit"] = "f" * 40
+                    changed.write_text(json.dumps(source))
+                else:
+                    changed.write_bytes(b"changed input")
+                with self.assertRaises(ValueError):
+                    identity.airbender_build_pins(directory / "airbender-fork-source.json")
 
     def test_gpu_backend_pins_and_cli_bind_exact_tested_manifest(self):
         manifest = ROOT / "patches/gpu32-memory.json"
@@ -235,7 +241,7 @@ class ImageIdentityTests(unittest.TestCase):
                          "845905b2aae49215e3d4ad0b71998b4a6b5abebf")
         selected = result["selected_lock"]
         self.assertEqual(selected["derivation"], "common-proving-and-crypto-gpu-source-identity-only-v3")
-        common = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json")
+        common = identity.airbender_build_pins(ROOT / "patches/airbender-fork-source.json")
         self.assertEqual(result["zksync_crypto"], common["zksync_crypto"])
         self.assertEqual(selected["zksync_crypto_packages"], common["zksync_crypto"]["pins"]["upstream_packages"])
         self.assertNotEqual(result["pins"]["crypto"]["upstream_commit"],
@@ -271,7 +277,7 @@ class ImageIdentityTests(unittest.TestCase):
                     manifest["upstream_commit"] = "0" * 40
                     (directory / filename).write_text(json.dumps(manifest))
                 with self.assertRaises(ValueError):
-                    identity.airbender_build_pins(directory / "airbender-cuda-device-diagnostics.json")
+                    identity.airbender_build_pins(directory / "airbender-fork-source.json")
 
     def test_gpu_backend_changed_patch_fails_before_evidence(self):
         for filename in ("crypto-gpu32-memory.patch", "bellman-gpu32-memory.patch"):
@@ -300,10 +306,10 @@ class ImageIdentityTests(unittest.TestCase):
                     pins["upstream_commit"] = "845905b2aae49215e3d4ad0b71998b4a6b5abebf"
                     (directory / filename).write_text(json.dumps(pins))
                 with self.assertRaises(ValueError):
-                    identity.airbender_build_pins(directory / "airbender-cuda-device-diagnostics.json")
+                    identity.airbender_build_pins(directory / "airbender-fork-source.json")
 
     def test_gpu_and_common_sbom_inputs_must_agree_on_common_crypto(self):
-        common = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json")
+        common = identity.airbender_build_pins(ROOT / "patches/airbender-fork-source.json")
         gpu = identity.gpu_backend_build_pins(ROOT / "patches/gpu32-memory.json")
         record = identity.image_record(self.context, "zksync-os-prover-snark",
                                        self.digests["zksync-os-prover-snark"])
@@ -321,13 +327,13 @@ class ImageIdentityTests(unittest.TestCase):
         bom.write_text(json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.6"}))
         component = "zksync-os-prover-snark"
         bound = json.loads(self.cli("bind", component, self.digests[component], str(bom),
-                                   "--airbender-pins", str(ROOT / "patches/airbender-cuda-device-diagnostics.json"),
+                                   "--airbender-pins", str(ROOT / "patches/airbender-fork-source.json"),
                                    "--gpu-backend-pins", str(manifest), "--source-lock", str(ROOT / "Cargo.lock")))
         props = {prop["name"]: prop["value"] for prop in bound["metadata"]["properties"]}
         self.assertEqual(json.loads(props["io.syscoin.prover.gpu-backend-build.inputs"]), gpu)
 
     def test_selected_parent_lock_is_bound_separately_in_cli_and_sbom(self):
-        manifest = ROOT / "patches/airbender-cuda-device-diagnostics.json"
+        manifest = ROOT / "patches/airbender-fork-source.json"
         lock = self.directory / "Cargo.lock"
         lock.write_bytes(LOCK_FIXTURE.parent_lock_bytes())
         selected = identity.airbender_build_pins(manifest, lock)
@@ -356,7 +362,7 @@ class ImageIdentityTests(unittest.TestCase):
         reusable = (ROOT / ".github/workflows/sbom-analysis-reusable.yaml").read_text()
         for workflow in (stage, (ROOT / ".github/workflows/release-bins.yml").read_text()):
             self.assertIn("$airbender.pins.upstream_commit", workflow)
-            self.assertIn("$airbender.pins.patch_sha256", workflow)
+            self.assertIn("$airbender.pins.fork_commit", workflow)
             self.assertIn("$airbender.pins.overlay_lock_sha256", workflow)
             self.assertIn("$airbender.manifest_sha256", workflow)
             self.assertIn("$airbender.zkos_wrapper.pins.upstream_commit", workflow)
@@ -375,7 +381,7 @@ class ImageIdentityTests(unittest.TestCase):
             self.assertIn("$airbender.selected_lock.overlay_lock_sha256", workflow)
             self.assertIn('uri: "syscoin:generated-lock:common-proving-source-identity-only-v3"', workflow)
             self.assertIn('uri: "syscoin:generated-lock:common-proving-and-crypto-gpu-source-identity-only-v3"', workflow)
-        self.assertIn("--airbender-pins .sbom-tooling/patches/airbender-cuda-device-diagnostics.json", reusable)
+        self.assertIn("--airbender-pins .sbom-tooling/patches/airbender-fork-source.json", reusable)
         self.assertIn("--source-lock .sbom-image-source/Cargo.lock", reusable)
         self.assertIn('"$(git -C .sbom-image-source rev-parse HEAD)" == "${SOURCE_SHA}"', reusable)
         self.assertIn("            airbender-build-pins.json", reusable)
@@ -396,7 +402,7 @@ class ImageIdentityTests(unittest.TestCase):
         expression = re.search(r"\n            '\n(.*?)\n            ' <<<", step, re.S).group(1)
         lock = self.directory / "Cargo.lock"
         lock.write_bytes(LOCK_FIXTURE.parent_lock_bytes())
-        pins = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json", lock)
+        pins = identity.airbender_build_pins(ROOT / "patches/airbender-fork-source.json", lock)
         records = {role: {"sha256": str(index) * 64}
                    for index, role in enumerate(("combined", "fri", "snark", "snark-cpu"), 1)}
         gpu = identity.gpu_backend_build_pins(ROOT / "patches/gpu32-memory.json", lock)
@@ -419,7 +425,8 @@ class ImageIdentityTests(unittest.TestCase):
                          {"inputs": gpu, "roles": ["combined", "snark"]})
         digests = [entry["digest"] for entry in definition["resolvedDependencies"]]
         self.assertIn({"gitCommit": pins["pins"]["upstream_commit"]}, digests)
-        for value in (pins["manifest_sha256"], pins["pins"]["patch_sha256"], pins["pins"]["overlay_lock_sha256"]):
+        self.assertIn({"gitCommit": pins["pins"]["fork_commit"]}, digests)
+        for value in (pins["manifest_sha256"], pins["pins"]["overlay_lock_sha256"]):
             self.assertIn({"sha256": value}, digests)
         self.assertIn({"gitCommit": pins["zkos_wrapper"]["pins"]["upstream_commit"]}, digests)
         for value in (pins["zkos_wrapper"]["manifest_sha256"], pins["zkos_wrapper"]["pins"]["patch_sha256"]):
@@ -445,7 +452,7 @@ class ImageIdentityTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
         validation = workflow.split("          for role in combined fri snark snark-cpu; do\n", 1)[1]
         expression = re.search(r"\n              '(.*?)' \\\n", validation, re.S).group(1)
-        pins = identity.airbender_build_pins(ROOT / "patches/airbender-cuda-device-diagnostics.json",
+        pins = identity.airbender_build_pins(ROOT / "patches/airbender-fork-source.json",
                                              ROOT / "Cargo.lock")
         record = {"cargo_exit_code": 0, "inputs_reverified": True, "label": "release-fri",
                   "pins": pins["pins"], "selected_lock": pins["selected_lock"],

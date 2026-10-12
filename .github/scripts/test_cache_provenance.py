@@ -67,7 +67,7 @@ class CacheProvenanceTests(unittest.TestCase):
         cls.fri = FRI_SOURCE.read_text()
         cls.snark = SNARK_SOURCE.read_text()
         cls.airbender = json.loads(
-            (ROOT / "patches/airbender-cuda-device-diagnostics.json").read_text()
+            (ROOT / "patches/airbender-fork-source.json").read_text()
         )
         cls.wrapper = json.loads(
             (ROOT / "patches/zkos-wrapper-buffered-os-rng.json").read_text()
@@ -86,7 +86,7 @@ class CacheProvenanceTests(unittest.TestCase):
         )
 
     def test_effective_airbender_tree_matches_reviewed_manifest_in_both_caches(self):
-        tree = self.airbender["patched_tree"]
+        tree = self.airbender["fork_tree"]
         self.assertRegex(tree, r"^[0-9a-f]{40}$")
         self.assertNotEqual(tree, self.airbender["upstream_tree"])
         for source in (self.fri, self.snark):
@@ -150,11 +150,11 @@ class CacheProvenanceTests(unittest.TestCase):
             ("wrapper_circuit_revision", self.wrapper, "upstream_commit"),
         ):
             self.assertEqual(artifact[field], pins[pin_field])
-        for field, pins in (
-            ("airbender_patched_tree", self.airbender),
-            ("wrapper_circuit_patched_tree", self.wrapper),
+        for field, pins, pin_field in (
+            ("airbender_patched_tree", self.airbender, "fork_tree"),
+            ("wrapper_circuit_patched_tree", self.wrapper, "patched_tree"),
         ):
-            self.assertNotEqual(artifact[field], pins["patched_tree"])
+            self.assertNotEqual(artifact[field], pins[pin_field])
         self.assertIn(
             "fn stale_repository_artifact_is_rejected_after_source_lift()",
             self.fri,
@@ -193,15 +193,11 @@ class CacheProvenanceTests(unittest.TestCase):
 
     def test_retained_guest_identities_require_regeneration(self):
         self.assertNotEqual(
-            self.commitment["airbender_patched_tree"], self.airbender["patched_tree"]
+            self.commitment["airbender_patched_tree"], self.airbender["fork_tree"]
         )
-        for identity, layer in (("recursion_unrolled", "unrolled"), ("recursion_unified", "unified")):
-            for section, suffix in (("bin", "bin"), ("text", "text")):
-                relative = f"tools/verifier/recursion_in_{layer}_layer_security_100_bits.{suffix}"
-                pinned = self.airbender["changed_files"][relative]
+        for identity in ("recursion_unrolled", "recursion_unified"):
+            for section in ("bin", "text"):
                 file_identity = self.commitment[identity][section]
-                self.assertEqual(file_identity["sha256"], pinned["postimage_sha256"])
-                self.assertEqual(file_identity["size_bytes"], pinned["postimage_size"])
                 self.assertIn('"' + file_identity["sha256"] + '"', self.fri)
         for section, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
             raw = (ROOT / relative).read_bytes()

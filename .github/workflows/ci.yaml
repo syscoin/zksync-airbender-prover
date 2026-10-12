@@ -50,7 +50,7 @@ jobs:
       - name: Check role-specific verified CRS downloads
         run: python3 -B .github/scripts/test_verified_crs_roles.py
 
-      - name: Check isolated Airbender source overlay
+      - name: Check pinned Airbender source and selected lock
         run: python3 -B .github/scripts/test_patched_airbender_build.py
 
       - name: Check pinned wrapper test graph

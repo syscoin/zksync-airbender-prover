@@ -27,7 +27,7 @@ const BUNDLED_ARTIFACT: &str = include_str!("../artifacts/syscoin-v32-security10
 // These trees are reviewed in the repository's cumulative source manifests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
 const WRAPPER_CIRCUIT_REVISION: &str = "585595f145cb53a09a130706ca36f80ddcac3961";
-const AIRBENDER_PATCHED_TREE: &str = "f6a8eb9bd6c1e262e294e15b21d479c6f6f5835b";
+const AIRBENDER_PATCHED_TREE: &str = "799e018339df40d0e456ba3fa0fc768ce0691853";
 const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "51ac41a846c976b25056f6857b62f133f347f4ca";
 // The unified-verifier half is pinned independently, just as the app-chain half is
 // pinned by protocol_version. Regenerate and review both when the circuit changes.

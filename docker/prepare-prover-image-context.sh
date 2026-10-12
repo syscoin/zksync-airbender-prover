@@ -32,8 +32,7 @@ readonly tooling_files=(
     scripts/cargo-with-patched-airbender.sh
     scripts/prepare-patched-airbender.py
     scripts/prepare-patched-gpu-backends.py
-    patches/airbender-cuda-device-diagnostics.patch
-    patches/airbender-cuda-device-diagnostics.json
+    patches/airbender-fork-source.json
     patches/airbender.Cargo.lock
     patches/zkos-wrapper-buffered-os-rng.json
     patches/zkos-wrapper-buffered-os-rng.patch
@@ -64,8 +63,7 @@ readonly tooling_data_files=(
     docker/zksync-airbender-prover/Dockerfile
     docker/zksync-os-prover-fri/Dockerfile
     docker/zksync-os-prover-snark/Dockerfile
-    patches/airbender-cuda-device-diagnostics.patch
-    patches/airbender-cuda-device-diagnostics.json
+    patches/airbender-fork-source.json
     patches/airbender.Cargo.lock
     patches/zkos-wrapper-buffered-os-rng.json
     patches/zkos-wrapper-buffered-os-rng.patch

@@ -245,7 +245,7 @@ if mutation == 'curl-failure':
                                    "internalParameters": {}, "resolvedDependencies": []},
                 "runDetails": {"builder": {"id": "offline-test"}}}
         args = ["jq", "-ce", "--argjson", "build_pins", json.dumps(PINS)]
-        manifest = ROOT / "patches/airbender-cuda-device-diagnostics.json"
+        manifest = ROOT / "patches/airbender-fork-source.json"
         spec = importlib.util.spec_from_file_location("gpu_image_identity", ROOT / ".github/scripts/image-sbom-identity.py")
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
