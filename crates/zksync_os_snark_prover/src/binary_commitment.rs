@@ -424,8 +424,9 @@ mod tests {
     #[test]
     fn changed_bytes_and_swapped_app_sections_are_rejected() {
         let (bin, text) = app_paths();
-        assert!(load_bundled_commitment(&text, &bin).is_err());
         let manifest = artifact();
+        assert!(manifest.app.bin.verify_file(&text, "app binary").is_err());
+        assert!(manifest.app.text.verify_file(&bin, "app text").is_err());
         let mut bytes = std::fs::read(bin).unwrap();
         bytes[0] ^= 1;
         assert!(manifest
@@ -452,8 +453,17 @@ mod tests {
         let (bin, text) = app_paths();
         // A regular file cannot contain a child path, so these paths are guaranteed
         // not to exist without creating or deleting a test fixture.
-        assert!(load_bundled_commitment(&bin.join("missing"), &text).is_err());
-        assert!(load_bundled_commitment(&bin, &text.join("missing")).is_err());
+        let manifest = artifact();
+        assert!(manifest
+            .app
+            .bin
+            .verify_file(&bin.join("missing"), "app binary")
+            .is_err());
+        assert!(manifest
+            .app
+            .text
+            .verify_file(&text.join("missing"), "app text")
+            .is_err());
     }
 
     #[test]

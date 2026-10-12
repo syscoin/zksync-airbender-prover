@@ -977,7 +977,7 @@ mod tests {
     }
 
     // Constructor-only CPU regressions: do not derive a setup or prove with the
-    // placeholder compression VK. It only checks that the carried config survives.
+    // placeholder compression VK.
     #[cfg(not(feature = "gpu"))]
     fn cold_policy_test_config(phase_three: bool) -> zkos_wrapper::SnarkWrapperConfig {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -993,13 +993,7 @@ mod tests {
 
     #[cfg(not(feature = "gpu"))]
     #[test]
-    fn bundled_policy_is_preserved_across_startup_all_phases_and_cold_rebuild() {
-        let config = cold_policy_test_config(false);
-        let expected = super::binary_commitment::load_bundled_commitment(
-            config.bin.as_deref().unwrap(),
-            config.text.as_deref().unwrap(),
-        )
-        .unwrap();
+    fn bundled_policy_rejects_stale_commitment_across_all_cold_builds() {
         for (stage, phase_three) in [
             ("pre-lease", false),
             ("phase-one-two", false),
@@ -1007,23 +1001,16 @@ mod tests {
             ("next-job-rebuild", false),
         ] {
             let config = cold_policy_test_config(phase_three);
-            let carried_vk = config.compression_vk.as_ref().map(|vk| format!("{vk:?}"));
-            let mut wrapper = super::create_snark_wrapper_from_config_with_policy(
+            let error = super::create_snark_wrapper_from_config_with_policy(
                 config,
                 super::BinaryCommitmentPolicy::Bundled,
             )
-            .unwrap();
-            // Resolving the bundled commitment must never synthesize recursion setups,
-            // including when only the verified phase-2 VK is carried into phase 3.
-            let commitment = wrapper.resolved_binary_commitment().unwrap();
-            assert_eq!(commitment.end_params, expected.end_params, "{stage}");
-            assert_eq!(commitment.aux_params, expected.aux_params, "{stage}");
-            if let Some(carried_vk) = carried_vk {
-                assert_eq!(
-                    format!("{:?}", wrapper.compression_vk().unwrap()),
-                    carried_vk
-                );
-            }
+            .err()
+            .expect("a stale bundled commitment must fail before wrapper construction");
+            assert!(
+                format!("{error:#}").contains("effective circuit source tree mismatch"),
+                "{stage}: {error:#}"
+            );
         }
     }
 
@@ -1054,22 +1041,6 @@ mod tests {
                     carried_vk
                 );
             }
-        }
-    }
-
-    #[cfg(not(feature = "gpu"))]
-    #[test]
-    fn bundled_rebuilds_reject_changed_app_without_recompute_fallback() {
-        for phase_three in [false, true] {
-            let mut config = cold_policy_test_config(phase_three);
-            std::mem::swap(&mut config.bin, &mut config.text);
-            let error = super::create_snark_wrapper_from_config_with_policy(
-                config,
-                super::BinaryCommitmentPolicy::Bundled,
-            )
-            .err()
-            .expect("a changed app must fail closed in every cold wrapper build");
-            assert!(format!("{error:#}").contains("bundled commitment app binary"));
         }
     }
 
@@ -1110,25 +1081,46 @@ mod tests {
         assert!(message.contains("not registered by any supported protocol version"));
     }
 
-    // SYSCOIN: The validated constructor is the sole WrapperSource construction path, so a
-    // missing setup must fail before a worker can hold an empty cache and begin queue polling.
+    // The default worker must reject the stale circuit before claiming work.
     #[test]
-    fn validated_wrapper_source_rejects_missing_setup_before_polling() {
+    fn validated_wrapper_source_rejects_stale_commitment_before_polling() {
         let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let app_path = crate_dir.join("../../multiblock_batch.bin");
         let missing_setup = crate_dir.join("missing-trusted-setup-for-wrapper-source-test.key");
-        assert!(!missing_setup.exists(), "test setup path must stay absent");
-
         let error = match super::WrapperSource::new_validated(
             missing_setup.to_string_lossy().into_owned(),
             app_path,
             &SupportedProtocolVersions::default(),
         ) {
-            Ok(_) => panic!("missing trusted setup must fail before polling"),
+            Ok(_) => panic!("stale commitment must fail before polling"),
             Err(error) => error,
         };
         let message = format!("{error:#}");
         assert!(message.contains("initialize app-bound SNARK wrapper before queue polling"));
-        assert!(message.contains("trusted setup metadata"));
+        assert!(message.contains("effective circuit source tree mismatch"));
+    }
+
+    // CPU-cold workers bind all inputs before queue polling, so the missing-setup
+    // gate can be checked while the bundled commitment awaits regeneration.
+    #[cfg(all(unix, not(feature = "gpu")))]
+    #[test]
+    fn cpu_cold_wrapper_source_rejects_missing_setup_before_polling() {
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let app_path = crate_dir.join("../../multiblock_batch.bin");
+        let missing_setup = crate_dir.join("missing-trusted-setup-for-wrapper-source-test.key");
+        assert!(!missing_setup.exists(), "test setup path must stay absent");
+
+        let error = match super::WrapperSource::new_validated_with_policy(
+            missing_setup.to_string_lossy().into_owned(),
+            app_path,
+            &SupportedProtocolVersions::default(),
+            super::WrapperCachePolicy::CpuCold,
+        ) {
+            Ok(_) => panic!("missing trusted setup must fail before polling"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("resolve bound input"));
+        assert!(message.contains("missing-trusted-setup-for-wrapper-source-test.key"));
     }
 }
