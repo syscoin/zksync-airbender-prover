@@ -30,6 +30,7 @@ RELEASE_BINS = {
 OVERLAY_FILES = (
     "scripts/cargo-with-patched-airbender.sh",
     "scripts/prepare-patched-airbender.py",
+    "scripts/pinned_source_checkout.py",
     "patches/airbender-fork-source.json",
     "patches/airbender.Cargo.lock",
     "patches/zkos-wrapper-fork-source.json",
@@ -352,6 +353,33 @@ class ProverRoleRecipeTests(unittest.TestCase):
         for path in ("docker/install-build-toolchain.sh", ".github/actions/runner-setup/action.yaml"):
             text = (ROOT / path).read_text()
             self.assertIn("python3 python3-tomli", text)
+
+    def test_pinned_checkout_is_copied_before_each_builder_first_import(self):
+        helper = "scripts/pinned_source_checkout.py"
+        images = [image for _, image, _ in ROLES.values()] + ["zksync-os-prover-rental"]
+        for image in images:
+            source = (ROOT / "docker" / image / "Dockerfile").read_text()
+            source = re.sub(r"\\\r?\n\s*", " ", source)
+            for stage in re.split(r"(?m)^FROM ", source)[1:]:
+                imports = [match.start() for match in re.finditer(
+                    r"(?m)^RUN .*?(?:python3 scripts/prepare-patched-gpu-backends\.py|"
+                    r"bash scripts/cargo-with-patched-airbender\.sh)", stage)]
+                if not imports:
+                    continue
+                with self.subTest(image=image, stage=stage.splitlines()[0]):
+                    copies = [match.start() for match in re.finditer(
+                        r"(?m)^COPY [^\n]*" + re.escape(helper) + r"[^\n]* ./scripts/$", stage)]
+                    self.assertTrue(copies, "pinned checkout helper missing from builder stage")
+                    self.assertLess(min(copies), min(imports))
+
+    def test_pinned_checkout_is_in_context_and_attested_wrapper_tooling(self):
+        helper = "scripts/pinned_source_checkout.py"
+        context = (ROOT / "docker/prepare-prover-image-context.sh").read_text()
+        for name in ("tooling_files", "tooling_executables"):
+            block = re.search(r"readonly " + name + r"=\(\n(.*?)\n\)", context, re.S).group(1)
+            self.assertIn(helper, block.split())
+        wrapper_tests = (ROOT / ".github/scripts/run_pinned_wrapper_tests.py").read_text()
+        self.assertIn('ROOT / "' + helper + '"', wrapper_tests)
 
     @unittest.skipUnless(shutil.which("git") and shutil.which("jq"), "Git and jq are required")
     def test_context_takes_overlay_from_tooling_not_older_application(self):

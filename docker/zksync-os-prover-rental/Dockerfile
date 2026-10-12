@@ -18,7 +18,7 @@ COPY docker/install-build-toolchain.sh /usr/local/bin/install-build-toolchain
 RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 
 # SYSCOIN: Use the same reviewed GPU32 backend as the normal GPU wrapping service.
-COPY scripts/prepare-patched-gpu-backends.py scripts/prepare-patched-airbender.py ./scripts/
+COPY scripts/prepare-patched-gpu-backends.py scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
 COPY patches ./patches
 RUN python3 scripts/prepare-patched-gpu-backends.py --prepare-bellman /opt/bellman-cuda && \
     cmake -B/opt/bellman-cuda/build -S/opt/bellman-cuda \
@@ -31,7 +31,7 @@ RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs gpu-snark
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
-COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py ./scripts/
+COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
 COPY patches ./patches
 
 # Both stage executables share one GPU runtime so a rental can switch roles between jobs.

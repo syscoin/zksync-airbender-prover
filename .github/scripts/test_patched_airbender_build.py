@@ -357,15 +357,17 @@ class CommonCryptoOverlayTests(unittest.TestCase):
             paths = {name: "crates/" + name for name in HELPER.CRYPTO_PACKAGES}
             stack.enter_context(patch.object(HELPER, "package_paths", return_value=paths))
             run = stack.enter_context(patch.object(HELPER.subprocess, "run"))
+            checkout = stack.enter_context(patch.object(HELPER, "checkout_pinned_source"))
             stack.enter_context(patch.dict(HELPER.os.environ, {"ZKSYNC_CRYPTO_SOURCE_DIR": str(local)}, clear=True))
             root, clone, actual = HELPER.prepare_crypto(build, CRYPTO_PINS)
             self.assertEqual(root, build / "zksync-crypto")
             self.assertEqual(clone, str(local.resolve()))
             self.assertEqual(actual, paths)
-            self.assertIn("--no-hardlinks", run.call_args.args[0])
+            checkout.assert_called_once_with(
+                str(local.resolve()), root, CRYPTO_PINS["upstream_commit"], CRYPTO_PINS["upstream_tree"])
+            run.assert_not_called()
             self.assertEqual(list(local.iterdir()), [])
             verify.assert_called_once_with(root, CRYPTO_PINS)
-            git.assert_any_call(root, "checkout", "--quiet", "--detach", CRYPTO_PINS["upstream_commit"])
             for relative, row in CRYPTO_PINS["changed_files"].items():
                 hashes.assert_any_call(root / relative, row["preimage_sha256"])
 
@@ -763,15 +765,17 @@ raise SystemExit(int(os.environ["WRAPPER_HELPER_EXIT_CODE"]))
             stack.enter_context(patch.dict(HELPER.os.environ, {"ZKOS_WRAPPER_SOURCE_DIR": str(local_source)}, clear=True))
             run = stack.enter_context(patch.object(HELPER.subprocess, "run"))
             git = stack.enter_context(patch.object(HELPER, "run_git"))
+            checkout = stack.enter_context(patch.object(HELPER, "checkout_pinned_source"))
             verify = stack.enter_context(patch.object(HELPER, "verify_wrapper"))
             paths = stack.enter_context(patch.object(HELPER, "package_paths", return_value={"zkos-wrapper": "wrapper"}))
             upstream, clone_source, package_paths = HELPER.prepare_wrapper(root, pins)
             self.assertEqual(upstream, root / "zkos-wrapper")
             self.assertEqual(clone_source, str(local_source))
             self.assertEqual(package_paths, {"zkos-wrapper": "wrapper"})
-            run.assert_called_once_with(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
-                                         str(local_source), str(upstream)], check=True)
-            git.assert_called_once_with(upstream, "checkout", "--quiet", "--detach", pins["fork_commit"])
+            checkout.assert_called_once_with(
+                str(local_source), upstream, pins["fork_commit"], pins["fork_tree"])
+            run.assert_not_called()
+            git.assert_not_called()
             verify.assert_called_once_with(upstream, pins)
             paths.assert_called_once_with(upstream, pins["upstream_packages"])
             self.assertEqual(marker.read_bytes(), b"source must remain unchanged")
@@ -913,13 +917,13 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
                     Path(command[command.index("--manifest-path") + 1]).parent.joinpath(
                         HELPER.PREPARED_SOURCE_MARKER).write_text("changed after Cargo\n")
                 return unittest.mock.Mock(returncode=cargo_exit_code)
-            self.assertEqual(command[:2], ["git", "clone"])
-            return unittest.mock.Mock(returncode=0)
+            self.fail(f"unexpected external command: {command}")
 
         with ExitStack() as stack:
             stack.enter_context(patch.dict(HELPER.os.environ, {
                 "PROVER_SOURCE_DIR": str(source), "AIRBENDER_BUILD_ATTESTATION": str(attestation),
             }, clear=True))
+            checkout = stack.enter_context(patch.object(HELPER, "checkout_pinned_source"))
             for name, kwargs in (
                 ("checked_hash", {"side_effect": check_local_or_external}),
                 ("run_git", {"return_value": PINS["upstream_tree"]}),
@@ -942,6 +946,8 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
                 self.assertEqual(HELPER.main(command), cargo_exit_code)
         builds = list((source / "target/patched-airbender").iterdir())
         self.assertEqual(len(builds), 1)
+        checkout.assert_called_once_with(
+            PINS["fork_url"], builds[0] / "airbender", PINS["fork_commit"], PINS["fork_tree"])
         return attestation, builds[0], events
 
     def test_cpu_success_records_wrapper_closure_after_reverification(self):
@@ -957,6 +963,8 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
             self.assertEqual(record["zksync_crypto"]["source"]["patched_tree"], HELPER.CRYPTO_PATCHED_TREE)
             self.assertEqual(set(record["zksync_crypto"]["package_paths"]), set(HELPER.CRYPTO_PACKAGES))
             relative = "patches/zkos-wrapper-fork-source.json"
+            self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+            relative = "scripts/pinned_source_checkout.py"
             self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             for suffix in ("json", "patch"):
                 relative = "patches/zksync-crypto-native-fri-query-count." + suffix
@@ -1073,11 +1081,17 @@ class MaterializationTests(unittest.TestCase):
             (root / "Cargo.lock").write_bytes(parent_lock_bytes())
             before = {name: (root / name).read_bytes() for name in HELPER.SOURCE_FILES}
             with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \
-                    patch.object(HELPER.subprocess, "run", side_effect=CloneBoundary) as run:
+                    patch.object(HELPER, "checkout_pinned_source", side_effect=CloneBoundary) as checkout, \
+                    patch.object(HELPER.subprocess, "run") as run:
                 with self.assertRaises(CloneBoundary):
                     HELPER.main(["parent-source", "--", "cargo", "build", "--locked"])
-                run.assert_called_once()
-                self.assertEqual(run.call_args.args[0][:4], ["git", "clone", "--quiet", "--no-checkout"])
+                checkout.assert_called_once()
+                clone_source, destination, commit, tree = checkout.call_args.args
+                self.assertEqual(clone_source, PINS["fork_url"])
+                self.assertEqual(destination.name, "airbender")
+                self.assertEqual(commit, PINS["fork_commit"])
+                self.assertEqual(tree, PINS["fork_tree"])
+                run.assert_not_called()
             self.assertEqual(before, {name: (root / name).read_bytes() for name in HELPER.SOURCE_FILES})
             snapshots = list((root / "target/patched-airbender").glob("parent-source-*/prover/Cargo.lock"))
             self.assertEqual(len(snapshots), 1)
@@ -1092,10 +1106,12 @@ class MaterializationTests(unittest.TestCase):
             (root / "Cargo.lock").write_bytes(parent_lock_bytes().replace(
                 b"03454c7a41053a4b88bb421e97fb9efe893a92f5", b"f" * 40))
             with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \
-                    patch.object(HELPER.subprocess, "run") as run:
+                    patch.object(HELPER.subprocess, "run") as run, \
+                    patch.object(HELPER, "checkout_pinned_source") as checkout:
                 with self.assertRaisesRegex(ValueError, "mixed or unknown Airbender"):
                     HELPER.main(["incompatible-source", "--", "cargo", "build", "--locked"])
                 run.assert_not_called()
+                checkout.assert_not_called()
             self.assertFalse((root / "target").exists())
 
     def test_success_attestation_never_overwrites_existing_output(self):

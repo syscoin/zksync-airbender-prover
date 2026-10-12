@@ -21,7 +21,7 @@ RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs cpu-snark
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
-COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py ./scripts/
+COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
 COPY patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/
 COPY patches/zkos-wrapper-fork-source.json ./patches/
 COPY patches/zksync-crypto-native-fri-query-count.json patches/zksync-crypto-native-fri-query-count.patch ./patches/
@@ -67,7 +67,7 @@ COPY docker/prover-build-pins.json ./docker/prover-build-pins.json
 COPY docker/install-build-toolchain.sh /usr/local/bin/install-build-toolchain
 RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 
-COPY scripts/prepare-patched-gpu-backends.py scripts/prepare-patched-airbender.py ./scripts/
+COPY scripts/prepare-patched-gpu-backends.py scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
 COPY patches ./patches
 RUN python3 scripts/prepare-patched-gpu-backends.py --prepare-bellman /opt/bellman-cuda && \
     cmake -B/opt/bellman-cuda/build -S/opt/bellman-cuda \
@@ -80,7 +80,7 @@ RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs gpu-snark
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
-COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py ./scripts/
+COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
 COPY patches ./patches
 
 RUN BELLMAN_CUDA_DIR=/opt/bellman-cuda \

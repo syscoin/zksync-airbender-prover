@@ -278,8 +278,7 @@ def prepare_backend(repo, kind, pins, base):
     if variable in os.environ:
         clone = str(Path(clone).resolve(strict=True))
         require(Path(clone).is_dir(), "invalid local GPU clone source")
-    subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks", clone, str(repo)], check=True)
-    base.run_git(repo, "checkout", "--quiet", "--detach", backend["upstream_commit"])
+    base.checkout_pinned_source(clone, repo, backend["upstream_commit"], backend["upstream_tree"])
     require(base.run_git(repo, "rev-parse", "HEAD^{tree}") == backend["upstream_tree"]
             and not base.run_git(repo, "status", "--porcelain"), "dirty/wrong GPU source baseline")
     for relative, row in backend["changed_files"].items():
@@ -394,8 +393,7 @@ def main(argv):
     clone = os.environ.get("AIRBENDER_SOURCE_DIR", air["fork_url"])
     if "AIRBENDER_SOURCE_DIR" in os.environ:
         clone = str(Path(clone).resolve(strict=True))
-    subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks", clone, str(upstream)], check=True)
-    base.run_git(upstream, "checkout", "--quiet", "--detach", air["fork_commit"])
+    base.checkout_pinned_source(clone, upstream, air["fork_commit"], air["fork_tree"])
     base.verify_airbender_source(upstream, air)
     air_paths = base.package_paths(upstream, selected_lock["airbender_packages"])
     wrapper, wrapper_clone, wrapper_paths = base.prepare_wrapper(build, wrapper_pins)
@@ -420,6 +418,7 @@ def main(argv):
                base.WRAPPER_PIN_PATH,
                base.CRYPTO_PIN_PATH, base.CRYPTO_PIN_PATH.parent / common_crypto_pins["patch_file"],
                Path(__file__).resolve(), TOOLING_ROOT / "scripts/prepare-patched-airbender.py",
+               base.CHECKOUT_HELPER_PATH,
                TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")
     record = {
         "schema_version": 1, "label": label, "pins": air, "selected_lock": selected_lock,

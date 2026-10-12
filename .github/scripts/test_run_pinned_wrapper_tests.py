@@ -88,7 +88,8 @@ class WrapperTests(unittest.TestCase):
                    BASE.PIN_PATH.parent / self.air["overlay_lock_file"], BASE.WRAPPER_PIN_PATH,
                    BASE.CRYPTO_PIN_PATH,
                    BASE.CRYPTO_PIN_PATH.parent / self.crypto["patch_file"],
-                   ROOT / "scripts/prepare-patched-airbender.py", ROOT / "scripts/cargo-with-patched-airbender.sh")
+                   ROOT / "scripts/prepare-patched-airbender.py", ROOT / "scripts/cargo-with-patched-airbender.sh",
+                   ROOT / "scripts/pinned_source_checkout.py")
         self.target = self.root / "target cache"
         self.record = {
             "schema_version": 1, "label": "ci-test", "cargo_exit_code": 0, "inputs_reverified": True,

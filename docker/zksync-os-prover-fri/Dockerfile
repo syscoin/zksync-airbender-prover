@@ -18,7 +18,7 @@ RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
-COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py ./scripts/
+COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
 COPY patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/
 COPY patches/zkos-wrapper-fork-source.json ./patches/
 COPY patches/zksync-crypto-native-fri-query-count.json patches/zksync-crypto-native-fri-query-count.patch ./patches/

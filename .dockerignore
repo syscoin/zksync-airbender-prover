@@ -8,6 +8,7 @@
 !scripts/cargo-with-patched-airbender.sh
 !scripts/prepare-patched-airbender.py
 !scripts/prepare-patched-gpu-backends.py
+!scripts/pinned_source_checkout.py
 !patches
 !patches/airbender-fork-source.json
 !patches/airbender.Cargo.lock
