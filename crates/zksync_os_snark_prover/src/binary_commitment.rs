@@ -320,8 +320,8 @@ mod tests {
                 .is_err());
         }
         assert!(!versions.supports_program(&ProgramCommitment([
-            0x08e47e45, 0x31d0dc34, 0x09c5ae1d, 0xb30b45bf, 0xec4b6189, 0x3c8444f4,
-            0x5f80e5c2, 0x54d5bd94,
+            0x08e47e45, 0x31d0dc34, 0x09c5ae1d, 0xb30b45bf, 0xec4b6189, 0x3c8444f4, 0x5f80e5c2,
+            0x54d5bd94,
         ])));
     }
 
