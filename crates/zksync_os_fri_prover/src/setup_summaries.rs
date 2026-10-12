@@ -29,7 +29,7 @@ const MAX_ARTIFACT_BYTES: usize = 1024 * 1024;
 // The revision records the upstream origin; the reviewed patched tree binds the
 // effective circuit source, including generated relations and recursive guests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
-const AIRBENDER_PATCHED_TREE: &str = "98a3e82a726bca322340ec675263a4533857250a";
+const AIRBENDER_PATCHED_TREE: &str = "f6a8eb9bd6c1e262e294e15b21d479c6f6f5835b";
 const VK_HASH: &str = "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90";
 const PROGRAM_COMMITMENT: &str =
     "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94";
@@ -366,7 +366,11 @@ mod tests {
     }
 
     fn artifact() -> Artifact {
-        parse_authenticated(BUNDLED_ARTIFACT).unwrap()
+        let mut artifact = parse_authenticated(BUNDLED_ARTIFACT).unwrap();
+        // Structural mutation tests use the current source identity; the
+        // checked-in artifact itself remains stale until release regeneration.
+        artifact.metadata.airbender_patched_tree = AIRBENDER_PATCHED_TREE.to_owned();
+        artifact
     }
 
     #[test]
@@ -439,14 +443,15 @@ mod tests {
     }
 
     #[test]
-    fn repository_artifact_matches_inputs_and_registered_program_without_deriving() {
+    fn stale_repository_artifact_is_rejected_after_source_lift() {
         let (bin, text) = app_paths();
-        let summaries = load_bundled_setup_summaries(&bin, &text).unwrap();
-        assert_eq!(summaries.security_bits, 100);
-        assert_eq!(summaries.recursion_unified.end_params, UNIFIED_END_PARAMS);
-        assert!(SupportedProtocolVersions::default()
-            .supports_program(&ProgramCommitment(summaries.program_commitment())));
-        verify_derived_release_artifact(&bin, &text, BUNDLED_ARTIFACT).unwrap();
+        let error = load_bundled_setup_summaries(&bin, &text)
+            .err()
+            .expect("stale source tree must reject bundled FRI setup");
+        assert!(error
+            .to_string()
+            .contains("effective Airbender source tree mismatch"));
+        assert!(verify_derived_release_artifact(&bin, &text, BUNDLED_ARTIFACT).is_err());
     }
 
     #[test]

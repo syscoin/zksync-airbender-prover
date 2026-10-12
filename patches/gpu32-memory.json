@@ -62,34 +62,39 @@
   "crypto": {
     "changed_files": {
       "crates/gpu-prover/src/cuda_bindings/context.rs": {
+        "preimage_sha256": "a8702c5ddfe4cafa9636043965ce81a666bcecb539e210180aa9dc46e433db60",
         "postimage_sha256": "3395819a697542e16c954aeddb4d54e029b2ddddec2df1f5732e179785e8d761",
-        "postimage_size": 12002,
-        "preimage_sha256": "a8702c5ddfe4cafa9636043965ce81a666bcecb539e210180aa9dc46e433db60"
+        "postimage_size": 12002
       },
       "crates/gpu-prover/src/proof.rs": {
+        "preimage_sha256": "664dd5aaa3111291df6f2141b8437c55f205e5252db720f8de8a5e55a5c6c0a5",
         "postimage_sha256": "feea55a4c6d6f1c2b43d3ef79b02279dca03b485bb437509c6066ae8d83e0b58",
-        "postimage_size": 4581,
-        "preimage_sha256": "664dd5aaa3111291df6f2141b8437c55f205e5252db720f8de8a5e55a5c6c0a5"
+        "postimage_size": 4581
       },
       "crates/gpu-prover/src/setup_precomputations.rs": {
+        "preimage_sha256": "240a9ed8aa49a911446038e405f512b4772d7ed50f3e2092b90cbb7d2a095e0a",
         "postimage_sha256": "e56e825907979f891721108644fbab981d3ed7475685cedcf53a87ef47fc5f9f",
-        "postimage_size": 23332,
-        "preimage_sha256": "240a9ed8aa49a911446038e405f512b4772d7ed50f3e2092b90cbb7d2a095e0a"
+        "postimage_size": 23332
       },
       "crates/proof-compression/src/proof_system/boojum.rs": {
+        "preimage_sha256": "8b626b89d46f52f0796db700bd83f797f05a833683924607f7997628f7f663ce",
         "postimage_sha256": "c9279876b498f9566fb70dc27ba69a33c56727a18293d5a01fc14fe4cecc3ec9",
-        "postimage_size": 9477,
-        "preimage_sha256": "8b626b89d46f52f0796db700bd83f797f05a833683924607f7997628f7f663ce"
+        "postimage_size": 9477
+      },
+      "crates/shivini/src/prover.rs": {
+        "preimage_sha256": "ee66aa47cdc92035d653804e81f1b9b724b8f00b199349e0bc8ed332513b7078",
+        "postimage_sha256": "cb0317891f376684dc7c34e857db31e90fef5bf943c40bb69b2987c39a9484e4",
+        "postimage_size": 73038
       },
       "crates/shivini/src/synthesis_utils.rs": {
+        "preimage_sha256": "ba2dd148846115572ef1d4fe2b0457fae1240a6207de580deef42926544ba692",
         "postimage_sha256": "4823f5adab7569203b921d561fbee60cb00310ff1d8ab983b11e8db81a23782a",
-        "postimage_size": 26395,
-        "preimage_sha256": "ba2dd148846115572ef1d4fe2b0457fae1240a6207de580deef42926544ba692"
+        "postimage_size": 26395
       }
     },
-    "patched_tree": "1040bbdf8b4afe6d5bd505511196f1705c0e83c7",
+    "patched_tree": "18b15062cf27d371d0301f855eb15d245730d9a6",
     "patch_file": "crypto-gpu32-memory.patch",
-    "patch_sha256": "67fc6c35207bb5144ac039f16c1fac2d131f6b8b0a62d85c40a54ea87972ebb5",
+    "patch_sha256": "96cf41efcd74b4b02a201e4ab7f4eede15491fa628793157620d6d60b894af56",
     "upstream_commit": "845905b2aae49215e3d4ad0b71998b4a6b5abebf",
     "upstream_edge_source": "git+https://github.com/matter-labs/zksync-crypto-gpu.git?branch=oh_for_wrapper",
     "upstream_lock_source": "git+https://github.com/matter-labs/zksync-crypto-gpu.git?branch=oh_for_wrapper#845905b2aae49215e3d4ad0b71998b4a6b5abebf",

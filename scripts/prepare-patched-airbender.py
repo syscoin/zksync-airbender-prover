@@ -49,23 +49,36 @@ WRAPPER_LOCK_SOURCE = (
 WRAPPER_PACKAGES = {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"}
 WRAPPER_CHANGED_PATHS = {
     "wrapper/src/buffered_os_rng.rs", "wrapper/src/gpu/snark.rs", "wrapper/src/lib.rs",
+    "wrapper/src/inner_verifiers/shared/verify_impl.rs",
     "wrapper/src/wrapper/mod.rs",
     "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json",
     "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.rs",
     "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_quotient.rs",
 }
-WRAPPER_PATCHED_TREE = "b2697abcd4038e2c107917f4fd03f9832fa8c435"
+WRAPPER_PATCHED_TREE = "51ac41a846c976b25056f6857b62f133f347f4ca"
 AIRBENDER_UPSTREAM = (
     "https://github.com/matter-labs/zksync-airbender",
     "03454c7a41053a4b88bb421e97fb9efe893a92f5",
     "3af54eb50c31d8e78575434c3f0ab4386891c131",
 )
 AIRBENDER_CHANGED_PATHS = {
+    "circuit_defs/bigint_with_control/verifier/src/lib.rs",
+    "circuit_defs/blake2_with_compression/verifier/src/lib.rs",
+    "circuit_defs/keccak_special5/verifier/src/lib.rs",
+    "circuit_defs/unrolled_circuits/add_sub_lui_auipc_mop/verifier/src/lib.rs",
+    "circuit_defs/unrolled_circuits/inits_and_teardowns/verifier/src/lib.rs",
+    "circuit_defs/unrolled_circuits/jump_branch_slt/verifier/src/lib.rs",
+    "circuit_defs/unrolled_circuits/load_store_subword_only/verifier/src/lib.rs",
+    "circuit_defs/unrolled_circuits/load_store_word_only/verifier/src/lib.rs",
+    "circuit_defs/unrolled_circuits/mul_div/verifier/src/lib.rs",
+    "circuit_defs/unrolled_circuits/mul_div_unsigned/verifier/src/lib.rs",
+    "circuit_defs/unrolled_circuits/shift_binary_csr/verifier/src/lib.rs",
     "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/circuit_layout.rs",
     "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/layout",
     "circuit_defs/unrolled_circuits/unified_reduced_machine/generated/quotient.rs",
     "circuit_defs/unrolled_circuits/unified_reduced_machine/verifier/src/generated/circuit_layout.rs",
     "circuit_defs/unrolled_circuits/unified_reduced_machine/verifier/src/generated/quotient.rs",
+    "circuit_defs/unrolled_circuits/unified_reduced_machine/verifier/src/lib.rs",
     "cs/src/machine/machine_configurations/full_isa_no_exceptions/basic_state_transition.rs",
     "cs/src/machine/machine_configurations/full_isa_no_exceptions/optimized_state_transition.rs",
     "cs/src/machine/machine_configurations/minimal_no_exceptions/basic_state_transition.rs",
@@ -74,9 +87,12 @@ AIRBENDER_CHANGED_PATHS = {
     "cs/src/machine/ops/unrolled/reduced_machine_ops.rs",
     "execution_utils/src/lib.rs", "execution_utils/src/setup_summaries.rs",
     "execution_utils/src/unrolled_gpu.rs", "gpu_prover/src/execution/gpu_worker.rs",
+    "gpu_prover/native/stage4.cu",
     "gpu_prover/src/execution/cpu_worker.rs",
     "gpu_prover/src/execution/simulation_runner.rs",
     "gpu_prover/src/execution/empty_inits_and_teardowns.rs",
+    "prover/src/prover_stages/stage4.rs",
+    "prover/src/prover_stages/stage5.rs",
     "tools/cli/src/prover_utils.rs",
     "tools/generator/src/unrolled_layouts.rs",
     "tools/pow_config_generator/src/main.rs",
@@ -86,10 +102,12 @@ AIRBENDER_CHANGED_PATHS = {
     "tools/verifier/recursion_in_unified_layer_security_100_bits.text",
     "tools/verifier/recursion_in_unrolled_layer_security_100_bits.bin",
     "tools/verifier/recursion_in_unrolled_layer_security_100_bits.text",
+    "verifier/src/lib.rs",
+    "verifier_common/src/fri_folding.rs",
     "verifier_common/src/lib.rs",
     "verifier_common/src/pow_config_worst_constants.rs",
 }
-AIRBENDER_PATCHED_TREE = "98a3e82a726bca322340ec675263a4533857250a"
+AIRBENDER_PATCHED_TREE = "f6a8eb9bd6c1e262e294e15b21d479c6f6f5835b"
 CRYPTO_UPSTREAM = (
     "https://github.com/matter-labs/zksync-crypto.git",
     "bf2797e4ca13475bf797aa43e085389cdd6732f9",
@@ -106,11 +124,13 @@ CRYPTO_PACKAGES = dict.fromkeys((
 CRYPTO_CHANGED_PATHS = {
     "crates/boojum/src/cs/implementations/convenience.rs",
     "crates/boojum/src/cs/implementations/cs.rs",
+    "crates/boojum/src/cs/implementations/prover.rs",
     "crates/boojum/src/cs/implementations/verifier.rs",
     "crates/boojum/src/gadgets/recursion/recursive_verifier.rs",
     "crates/boojum/src/gadgets/sha256/mod.rs",
+    "crates/snark-wrapper/src/verifier/fri.rs",
 }
-CRYPTO_PATCHED_TREE = "9b66bc2fe9179470c74897188f741f6b133c32a1"
+CRYPTO_PATCHED_TREE = "ad6a5ad3c0254b0a15da528d209aacbb68ab0ebf"
 
 
 def require(condition, message):

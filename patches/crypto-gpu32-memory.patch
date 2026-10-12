@@ -1,6 +1,8 @@
+diff --git a/crates/gpu-prover/src/cuda_bindings/context.rs b/crates/gpu-prover/src/cuda_bindings/context.rs
+index 2040651..7beff78 100644
 --- a/crates/gpu-prover/src/cuda_bindings/context.rs
 +++ b/crates/gpu-prover/src/cuda_bindings/context.rs
-@@ -7,8 +7,10 @@
+@@ -7,8 +7,10 @@ static DEVICES_IN_USE: Mutex<Vec<Option<()>>> = Mutex::new(vec![]);
  pub struct GpuContext {
      device_id: usize,
      pub(crate) mem_pool: Option<bc_mem_pool>,
@@ -12,7 +14,7 @@
  
      pub(crate) ff: bool,
      pub(crate) ntt: bool,
-@@ -20,8 +22,16 @@
+@@ -20,8 +22,16 @@ pub struct GpuContext {
      affinity: Vec<usize>,
  }
  
@@ -30,7 +32,7 @@
  
  impl GpuContext {
      pub fn new_full(device_id: usize, bases: &[CompactG1Affine]) -> GpuResult<Self> {
-@@ -70,6 +80,8 @@
+@@ -70,6 +80,8 @@ impl GpuContext {
              mem_pool: None,
              bases: None,
              bases_len: 0,
@@ -39,7 +41,7 @@
              ff: false,
              ntt: false,
              pn: false,
-@@ -112,6 +124,8 @@
+@@ -112,6 +124,8 @@ impl GpuContext {
              mem_pool: None,
              bases: None,
              bases_len: 0,
@@ -48,7 +50,7 @@
              ff: false,
              ntt: false,
              pn: false,
-@@ -124,30 +138,51 @@
+@@ -124,30 +138,51 @@ impl GpuContext {
  
      pub fn set_up_msm(&mut self, bases: &[CompactG1Affine]) -> GpuResult<()> {
          assert!(self.mem_pool.is_none(), "Can't set up msm with mem pool");
@@ -77,6 +79,8 @@
                  return Err(GpuError::CreateContextErr(result));
              }
 -            let result = bc_memcpy(d_bases_ptr, bases.as_ptr() as *const c_void, len);
+-            if result != 0 {
+-                return Err(GpuError::CreateContextErr(result));
 +
 +            // Attach ownership immediately: both copy and setup failure paths
 +            // are then cleaned by Drop with the correct CUDA allocator.
@@ -97,23 +101,18 @@
 +                if result != 0 {
 +                    return Err(GpuError::CreateContextErr(result));
 +                }
-+            }
-+
-+            let result = msm_set_up();
+             }
+ 
+-            self.bases = Some(d_bases_ptr);
+             let result = msm_set_up();
              if result != 0 {
                  return Err(GpuError::CreateContextErr(result));
              }
--
--            self.bases = Some(d_bases_ptr);
--            let result = msm_set_up();
--            if result != 0 {
--                return Err(GpuError::CreateContextErr(result));
--            }
 +            self.msm_initialized = true;
          }
  
          Ok(())
-@@ -283,6 +318,14 @@
+@@ -283,6 +318,14 @@ impl GpuContext {
  
  impl Drop for GpuContext {
      fn drop(&mut self) {
@@ -128,7 +127,7 @@
          self.sync().unwrap();
  
          if let Some(mem_pool) = self.mem_pool {
-@@ -292,12 +335,19 @@
+@@ -292,12 +335,19 @@ impl Drop for GpuContext {
          }
  
          if let Some(bases) = self.bases {
@@ -152,9 +151,11 @@
          }
  
          if self.pn {
+diff --git a/crates/gpu-prover/src/proof.rs b/crates/gpu-prover/src/proof.rs
+index 0db3548..4eeb8a9 100644
 --- a/crates/gpu-prover/src/proof.rs
 +++ b/crates/gpu-prover/src/proof.rs
-@@ -20,7 +20,31 @@
+@@ -20,7 +20,31 @@ pub fn create_proof<
      //     assign_cs_variables(manager, assembly, worker)?;
      // }
  
@@ -187,9 +188,11 @@
  
      let (mut proof, mut transcript, mut constants, input_values) =
          create_initial_variables::<S, C, T, MC>(assembly, transcript_params);
+diff --git a/crates/gpu-prover/src/setup_precomputations.rs b/crates/gpu-prover/src/setup_precomputations.rs
+index 1777310..92fd20c 100644
 --- a/crates/gpu-prover/src/setup_precomputations.rs
 +++ b/crates/gpu-prover/src/setup_precomputations.rs
-@@ -26,6 +26,12 @@
+@@ -26,6 +26,12 @@ pub const GATE_SETUP_LIST: [PolyId; 8] = [
  
  use cfg_if::*;
  
@@ -202,7 +205,7 @@
  cfg_if! {
      if #[cfg(feature = "allocator")]{
          pub struct AsyncSetup<A: Allocator + Default = CudaAllocator> {
-@@ -35,6 +41,8 @@
+@@ -35,6 +41,8 @@ cfg_if! {
              pub lookup_selector_bitvec: BitVec,
              pub lookup_tables_values: [AsyncVec<Fr, A>; NUM_LOOKUP_TABLE_POLYS], // Could have smaller size
              pub lookup_table_type_monomial: AsyncVec<Fr, A>,
@@ -211,7 +214,7 @@
          }
  
          unsafe impl<A: Allocator + Default> Send for AsyncSetup<A> {}
-@@ -47,6 +55,8 @@
+@@ -47,6 +55,8 @@ cfg_if! {
              pub lookup_selector_bitvec: BitVec,
              pub lookup_tables_values: [AsyncVec<Fr>; NUM_LOOKUP_TABLE_POLYS], // Could have smaller size
              pub lookup_table_type_monomial: AsyncVec<Fr>,
@@ -220,7 +223,7 @@
          }
  
          unsafe impl Send for AsyncSetup {}
-@@ -89,10 +99,12 @@
+@@ -89,10 +99,12 @@ impl_async_setup! {
                  lookup_selector_bitvec: BitVec::with_capacity(length),
                  lookup_tables_values: lookup_tables_values.try_into().unwrap(),
                  lookup_table_type_monomial: AsyncVec::allocate_new(length),
@@ -233,7 +236,7 @@
              for poly in self.gate_setup_monomials.iter_mut() {
                  poly.zeroize();
              }
-@@ -138,6 +150,7 @@
+@@ -138,6 +150,7 @@ impl_async_setup! {
              &mut self,
              mut reader: R,
          ) -> GpuResult<()> {
@@ -241,7 +244,7 @@
              for poly in self.gate_setup_monomials.iter_mut() {
                  poly.read(&mut reader)?;
              }
-@@ -167,6 +180,7 @@
+@@ -167,6 +180,7 @@ impl_async_setup! {
              &mut self,
              src: &[u8],
          ) -> GpuResult<()> {
@@ -249,7 +252,7 @@
              let mut start = 0;
              let poly_byte_len = self.gate_setup_monomials[0].len() * FIELD_ELEMENT_LEN;
              let tables_poly_byte_len = self.lookup_tables_values[0].len() * FIELD_ELEMENT_LEN;
-@@ -248,6 +262,7 @@
+@@ -248,6 +262,7 @@ impl_async_setup! {
              assembly: &DefaultAssembly<S>,
              manager: &mut DeviceMemoryManager<Fr, MC>,
          ) -> Result<(), ProvingError> {
@@ -257,11 +260,10 @@
              assert!(assembly.is_finalized);
              assert!(S::PRODUCE_SETUP);
  
-@@ -344,6 +359,22 @@
-             manager.free_host_slot(PolyId::Enumerated(0), PolyForm::Values);
+@@ -345,6 +360,22 @@ impl_async_setup! {
              manager.free_host_slot(PolyId::Enumerated(0), PolyForm::Monomial);
              manager.free_slot(PolyId::Enumerated(0), PolyForm::Monomial);
-+
+ 
 +            if MC::FULL_SLOT_SIZE_LOG == 25 {
 +                // Canonical setup-only Bellman permutation computation. The witness-only
 +                // assembly cannot derive these; retain Values from this same finalized
@@ -277,10 +279,11 @@
 +                    num_aux_gates: assembly.num_aux_gates,
 +                });
 +            }
- 
++
              Ok(())
          }
-@@ -416,9 +447,20 @@
+     }
+@@ -416,9 +447,20 @@ pub fn compute_vk_from_assembly<
  
      let mut msm_handles = vec![];
  
@@ -304,17 +307,236 @@
      }
  
      // GATE SETUP
---- a/crates/shivini/src/synthesis_utils.rs
-+++ b/crates/shivini/src/synthesis_utils.rs
-@@ -151,3 +151,3 @@
-         let verifier = self.get_verifier();
--        verifier.verify::<H, T, NoPow>(transcript_params, vk, proof)
-+        verifier.verify::<H, T, NoPow>(transcript_params, vk, proof, &self.proof_config())
-     }
+diff --git a/crates/proof-compression/src/proof_system/boojum.rs b/crates/proof-compression/src/proof_system/boojum.rs
+index b8a855d..1a3ba80 100644
 --- a/crates/proof-compression/src/proof_system/boojum.rs
 +++ b/crates/proof-compression/src/proof_system/boojum.rs
-@@ -57,3 +57,4 @@
+@@ -56,6 +56,7 @@ where
+             (),
              vk,
              proof,
 +            &CF::proof_config_for_compression_step(),
          )
+     }
+ 
+diff --git a/crates/shivini/src/prover.rs b/crates/shivini/src/prover.rs
+index 62f7a2d..43e89de 100644
+--- a/crates/shivini/src/prover.rs
++++ b/crates/shivini/src/prover.rs
+@@ -1700,5 +1700,203 @@ fn compute_deep_quotiening_over_coset(
+         quotient.add_assign(&quotient_for_row)?;
+     }
+ 
++    // Opening division loses one degree; FRI's degree < N bound must still enforce
++    // degree < N for every source polynomial, including public-input openings.
++    quotient.mul_assign_real(&roots)?;
++
+     Ok(quotient)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use boojum::field::U64Representable;
++    use serial_test::serial;
++
++    #[serial]
++    #[test]
++    #[ignore = "requires CUDA"]
++    fn test_deep_quotient_degree_lift_matches_cpu_on_shifted_cosets() -> CudaResult<()> {
++        const DOMAIN_SIZE: usize = 8;
++        const LDE_DEGREE: usize = 8;
++        let _ctx = ProverContext::create_with_config(
++            ProverContextConfig::default()
++                .with_smallest_supported_domain_size(DOMAIN_SIZE)
++                .with_maximum_device_allocation(1 << 20),
++        )?;
++        let omega = domain_generator_for_size::<F>(DOMAIN_SIZE as u64);
++        let lde_omega = domain_generator_for_size::<F>((DOMAIN_SIZE * LDE_DEGREE) as u64);
++        let z = EF::from_coeff_in_base([F::from_u64_unchecked(2), F::from_u64_unchecked(3)]);
++        let mut z_omega = z;
++        z_omega.mul_assign_by_base(&omega);
++        let extension_coefficient = EF::from_coeff_in_base([F::ONE, F::ONE]);
++        let coefficients_at_z = [
++            EF::ONE,
++            EF::ONE,
++            EF::ONE,
++            EF::ONE,
++            extension_coefficient,
++            extension_coefficient,
++            EF::ONE,
++            extension_coefficient,
++            extension_coefficient,
++            EF::ONE,
++            extension_coefficient,
++        ];
++        let h_challenges: Vec<EF> = materialize_powers_serial(
++            EF::from_coeff_in_base([F::from_u64_unchecked(5), F::from_u64_unchecked(9)]),
++            16,
++        );
++        let mut challenges = svec!(h_challenges.len());
++        challenges.copy_from_slice(&h_challenges)?;
++
++        // Degree N sources must become degree N after the lift, while honest
++        // degree N-1 sources remain within FRI's bound.
++        for degree in [DOMAIN_SIZE - 1, DOMAIN_SIZE] {
++            let h_evaluations_at_z: Vec<_> = coefficients_at_z
++                .iter()
++                .map(|coefficient| {
++                    let mut value = z.pow_u64(degree as u64);
++                    value.mul_assign(coefficient);
++                    value
++                })
++                .collect();
++            let mut evaluations_at_z = svec!(h_evaluations_at_z.len());
++            evaluations_at_z.copy_from_slice(&h_evaluations_at_z)?;
++            let mut h_evaluation_at_z_omega = z_omega.pow_u64(degree as u64);
++            h_evaluation_at_z_omega.mul_assign(&extension_coefficient);
++            let h_evaluations_at_z_omega = [h_evaluation_at_z_omega];
++            let mut evaluations_at_z_omega = svec!(1);
++            evaluations_at_z_omega.copy_from_slice(&h_evaluations_at_z_omega)?;
++            let mut evaluations_at_zero = svec!(2);
++            evaluations_at_zero.copy_from_slice(&[EF::ZERO; 2])?;
++            let evaluations_at_zero = Some(evaluations_at_zero);
++            let public_inputs: Vec<_> = [omega, omega.pow_u64(2)]
++                .into_iter()
++                .map(|point| (point, vec![(0, point.pow_u64(degree as u64))]))
++                .collect();
++
++            for coset_idx in 0..4 {
++                let mut shift = F::multiplicative_generator();
++                shift.mul_assign(
++                    &lde_omega.pow_u64(bitreverse_index(
++                        coset_idx,
++                        LDE_DEGREE.trailing_zeros() as usize,
++                    ) as u64),
++                );
++                let h_roots: Vec<_> = (0..DOMAIN_SIZE)
++                    .map(|index| {
++                        let mut point = omega.pow_u64(bitreverse_index(
++                            index,
++                            DOMAIN_SIZE.trailing_zeros() as usize,
++                        ) as u64);
++                        point.mul_assign(&shift);
++                        point
++                    })
++                    .collect();
++                let h_values: Vec<_> = h_roots
++                    .iter()
++                    .map(|point| point.pow_u64(degree as u64))
++                    .collect();
++                let mut trace_storage = GenericTraceStorage::<CosetEvaluations>::new(
++                    dvec!(3 * DOMAIN_SIZE),
++                    TraceLayout {
++                        num_variable_cols: 1,
++                        num_witness_cols: 1,
++                        num_multiplicity_cols: 1,
++                    },
++                    DOMAIN_SIZE,
++                );
++                let mut setup_storage = GenericSetupStorage::<CosetEvaluations>::new(
++                    dvec!(3 * DOMAIN_SIZE),
++                    SetupLayout {
++                        num_permutation_cols: 1,
++                        num_constant_cols: 1,
++                        num_table_cols: 1,
++                    },
++                    DOMAIN_SIZE,
++                );
++                let mut argument_storage = GenericArgumentsStorage::<CosetEvaluations>::new(
++                    dvec!(8 * DOMAIN_SIZE),
++                    ArgumentsLayout {
++                        num_z_polys: 2,
++                        num_partial_products: 2,
++                        num_lookup_a_polys: 2,
++                        num_lookup_b_polys: 2,
++                    },
++                    DOMAIN_SIZE,
++                );
++                let mut quotient_storage = GenericQuotientStorage::<CosetEvaluations>::new(
++                    dvec!(2 * DOMAIN_SIZE),
++                    QuotientLayout::new(1),
++                    DOMAIN_SIZE,
++                );
++                for storage in [
++                    trace_storage.as_single_slice_mut(),
++                    setup_storage.as_single_slice_mut(),
++                    argument_storage.as_single_slice_mut(),
++                    quotient_storage.as_single_slice_mut(),
++                ] {
++                    for column in storage.chunks_exact_mut(DOMAIN_SIZE) {
++                        mem::h2d(&h_values, column)?;
++                    }
++                }
++                get_h2d_stream().synchronize()?;
++                let roots = compute_omega_values_for_coset(coset_idx, DOMAIN_SIZE, LDE_DEGREE)?;
++                let actual = compute_deep_quotiening_over_coset(
++                    &trace_storage.as_polynomials(),
++                    &setup_storage.as_polynomials(),
++                    &argument_storage.as_polynomials(),
++                    &quotient_storage.as_polynomials(),
++                    roots,
++                    coset_idx,
++                    &evaluations_at_z,
++                    &evaluations_at_z_omega,
++                    &evaluations_at_zero,
++                    &z.into(),
++                    &z_omega.into(),
++                    &public_inputs,
++                    &challenges,
++                )?;
++                let mut actual_values = vec![F::ZERO; 2 * DOMAIN_SIZE];
++                get_stream().synchronize()?;
++                mem::d2h(actual.as_single_slice(), &mut actual_values)?;
++                get_d2h_stream().synchronize()?;
++                for (index, point) in h_roots.into_iter().enumerate() {
++                    let x = EF::from_coeff_in_base([point, F::ZERO]);
++                    let mut expected = EF::ZERO;
++                    let mut openings: Vec<_> = coefficients_at_z
++                        .iter()
++                        .copied()
++                        .map(|coefficient| (z, coefficient))
++                        .collect();
++                    openings.push((z_omega, extension_coefficient));
++                    openings.extend([(EF::ZERO, extension_coefficient); 2]);
++                    openings.extend(
++                        public_inputs
++                            .iter()
++                            .map(|(at, _)| (EF::from_coeff_in_base([*at, F::ZERO]), EF::ONE)),
++                    );
++                    for ((at, coefficient), challenge) in openings.into_iter().zip(&h_challenges) {
++                        let mut opening = EF::ZERO;
++                        for power in 0..degree {
++                            let mut term = x.pow_u64((degree - 1 - power) as u64);
++                            term.mul_assign(&at.pow_u64(power as u64));
++                            opening.add_assign(&term);
++                        }
++                        opening.mul_assign(&coefficient);
++                        opening.mul_assign(challenge);
++                        expected.add_assign(&opening);
++                    }
++                    expected.mul_assign_by_base(&point);
++                    assert_eq!(
++                        [actual_values[index], actual_values[index + DOMAIN_SIZE]],
++                        expected.into_coeffs_in_base(),
++                        "degree {degree}, coset {coset_idx}, index {index}"
++                    );
++                }
++            }
++        }
++        Ok(())
++    }
++}
+diff --git a/crates/shivini/src/synthesis_utils.rs b/crates/shivini/src/synthesis_utils.rs
+index 1099538..3a0b3c2 100644
+--- a/crates/shivini/src/synthesis_utils.rs
++++ b/crates/shivini/src/synthesis_utils.rs
+@@ -149,7 +149,7 @@ impl CircuitWrapper {
+         proof: &ZksyncProof<H>,
+     ) -> bool {
+         let verifier = self.get_verifier();
+-        verifier.verify::<H, T, NoPow>(transcript_params, vk, proof)
++        verifier.verify::<H, T, NoPow>(transcript_params, vk, proof, &self.proof_config())
+     }
+ 
+     pub(crate) fn get_verifier(&self) -> Verifier<F, EXT> {

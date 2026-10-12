@@ -142,16 +142,27 @@ class CacheProvenanceTests(unittest.TestCase):
         self.assertIn('wrong_tree[field] = json!("0".repeat(40));', self.snark)
         self.assertIn("missing_tree.as_object_mut().unwrap().remove(field);", self.snark)
 
-    def test_commitment_artifact_binds_effective_source_trees_and_origins(self):
+    def test_old_commitment_artifact_is_stale_against_effective_source_trees(self):
         artifact = self.commitment
         self.assertEqual(artifact["schema_version"], 2)
         for field, pins, pin_field in (
             ("airbender_revision", self.airbender, "upstream_commit"),
             ("wrapper_circuit_revision", self.wrapper, "upstream_commit"),
-            ("airbender_patched_tree", self.airbender, "patched_tree"),
-            ("wrapper_circuit_patched_tree", self.wrapper, "patched_tree"),
         ):
             self.assertEqual(artifact[field], pins[pin_field])
+        for field, pins in (
+            ("airbender_patched_tree", self.airbender),
+            ("wrapper_circuit_patched_tree", self.wrapper),
+        ):
+            self.assertNotEqual(artifact[field], pins["patched_tree"])
+        self.assertIn(
+            "fn stale_repository_artifact_is_rejected_after_source_lift()",
+            self.fri,
+        )
+        self.assertIn(
+            "fn stale_repository_commitment_is_rejected_after_source_lift()",
+            self.snark,
+        )
 
     def test_active_registry_loaders_and_diagnostic_share_measured_identity(self):
         artifact = self.commitment
@@ -180,7 +191,10 @@ class CacheProvenanceTests(unittest.TestCase):
         for source in (self.fri, self.snark):
             self.assertEqual(words_constant(source, "UNIFIED_END_PARAMS"), artifact["end_params"])
 
-    def test_measured_guest_identities_match_reviewed_recursive_postimages(self):
+    def test_retained_guest_identities_require_regeneration(self):
+        self.assertNotEqual(
+            self.commitment["airbender_patched_tree"], self.airbender["patched_tree"]
+        )
         for identity, layer in (("recursion_unrolled", "unrolled"), ("recursion_unified", "unified")):
             for section, suffix in (("bin", "bin"), ("text", "text")):
                 relative = f"tools/verifier/recursion_in_{layer}_layer_security_100_bits.{suffix}"

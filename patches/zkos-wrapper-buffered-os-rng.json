@@ -9,7 +9,7 @@
     "zkos-wrapper": "0.1.0"
   },
   "patch_file": "zkos-wrapper-buffered-os-rng.patch",
-  "patch_sha256": "b7506adfe197dd51f582f16d7c907476eefa64d2dff48d1fb5486ede96adb9a9",
+  "patch_sha256": "e9fde129e04eed90360cf4f7cf286d6b4beebc935fab9a022015d5b71e3307a8",
   "changed_files": {
     "wrapper/src/buffered_os_rng.rs": {
       "preimage_sha256": null,
@@ -20,6 +20,11 @@
       "preimage_sha256": "229dbf8258c201833421a25371ec5d0a750a2d25619ac7dd2a20f1f71c6cbae9",
       "postimage_sha256": "94d1278e314bf63b50a9bc0d6df0a016d3636b2fb271214bc5caeed4351a6fa5",
       "postimage_size": 9569
+    },
+    "wrapper/src/inner_verifiers/shared/verify_impl.rs": {
+      "preimage_sha256": "9ee5dd07754cf610559246edab8fa2559d051f62c11c689608b30da496961dae",
+      "postimage_sha256": "01dd33e93814628b76270e743d5ee72074de0bfa546f7ae0b46ecea52807a6a9",
+      "postimage_size": 48631
     },
     "wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json": {
       "preimage_sha256": "90eb5cd87411cf0e2a3ede44c94c5b92ef8836dabe67bc72f672c67878df6a02",
@@ -47,6 +52,6 @@
       "postimage_size": 21052
     }
   },
-  "patched_tree": "b2697abcd4038e2c107917f4fd03f9832fa8c435",
-  "purpose": "Cumulative pinned wrapper overlay: preserve the private fail-closed buffered OS entropy and authenticated precomputed commitment APIs byte-for-byte; import the regenerated unified constraint layout and quotient for the outer-execution CSR delegation guard; bind native wrapper and compression verification to their circuit-owned proof configuration. The circuit change requires fresh setup, verification-key, binary commitment, and release qualification; this source manifest does not attest generated setup artifacts, a deployed verifier, or a proof."
+  "patched_tree": "51ac41a846c976b25056f6857b62f133f347f4ca",
+  "purpose": "Cumulative pinned wrapper overlay: retain authenticated entropy, commitment, CSR relation, and verifier-owned proof policy changes; lift the shared recursive wrapper DEEP aggregate by the true evaluation point. Fresh recursive guests, setup, verification key, binary commitment, and proof qualification are pending."
 }

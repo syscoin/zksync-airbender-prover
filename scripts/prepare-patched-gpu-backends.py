@@ -45,11 +45,12 @@ UPSTREAM = {
                 "d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206",
                 "fa1ab78c59f9cdba2fedf4a00813dcf1c4c92d5c"),
 }
-PATCHED_TREES = {"crypto": "1040bbdf8b4afe6d5bd505511196f1705c0e83c7",
+PATCHED_TREES = {"crypto": "18b15062cf27d371d0301f855eb15d245730d9a6",
                  "bellman": "6e403e5a75ed91ca75c0bec533dbc73f82541ce2"}
 CHANGED_PATHS = {
     "crypto": {"crates/gpu-prover/src/cuda_bindings/context.rs",
                "crates/gpu-prover/src/setup_precomputations.rs", "crates/gpu-prover/src/proof.rs",
+               "crates/shivini/src/prover.rs",
                "crates/shivini/src/synthesis_utils.rs",
                "crates/proof-compression/src/proof_system/boojum.rs"},
     "bellman": {"src/ff.cu", "src/ff_kernels.cu", "src/ff_kernels.cuh", "src/msm.cu",

@@ -223,6 +223,21 @@ index 1a47997..055acb7 100644
          proving_assembly.finalize_to_size_log_2_with_randomization(
              finalization_hint.trailing_zeros() as usize,
              NUM_PADDING_TERMS,
+diff --git a/wrapper/src/inner_verifiers/shared/verify_impl.rs b/wrapper/src/inner_verifiers/shared/verify_impl.rs
+index 40c0d15..3b9bf5d 100644
+--- a/wrapper/src/inner_verifiers/shared/verify_impl.rs
++++ b/wrapper/src/inner_verifiers/shared/verify_impl.rs
+@@ -755,6 +755,10 @@ pub fn verify<F: SmallField, CS: ConstraintSystem<F>>(
+                 tau_in_domain_by_half_inversed_power,
+             );
+ 
++            // Restore the degree lost by the opening, using the full queried
++            // coset point before folding changes it.
++            expected_value = expected_value.mul_by_base(cs, &evaluation_point);
++
+             let mut domain_size_log_2 = TRACE_LEN_LOG2;
+             // let mut domain_index = domain_index as usize;
+             // let mut tree_index = tree_index as usize;
 diff --git a/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json b/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json
 index 80e844d..a63adff 100644
 --- a/wrapper/src/inner_verifiers/unified_reduced/imports/circuit_layout.json

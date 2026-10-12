@@ -222,7 +222,7 @@ class CommonCryptoOverlayTests(unittest.TestCase):
             "a/crates/boojum/src/cs/implementations/verifier.rs "))
         added = [line[1:].strip() for line in verifier.splitlines()
                  if line.startswith("+") and not line.startswith("+++")]
-        self.assertEqual(added, [
+        self.assertEqual(added[:9], [
             "use super::prover::ProofConfig;",
             "/// `expected_proof_config` must come from verifier policy, independently of `proof`.",
             "expected_proof_config: &ProofConfig,",
@@ -233,6 +233,10 @@ class CommonCryptoOverlayTests(unittest.TestCase):
             "",
             "return false;",
         ])
+        self.assertIn(
+            "simulated_ext_element.mul_assign_by_base(&domain_element_for_quotiening);",
+            added,
+        )
         for text in ("empty FRI query list must fail", "one missing FRI query must fail",
                      "an extra FRI query must fail", "original proof must still verify"):
             self.assertIn(text, raw)
@@ -378,7 +382,7 @@ class CommonCryptoOverlayTests(unittest.TestCase):
 class DiagnosticsPreservationTests(unittest.TestCase):
     def test_logger_patch_has_no_proving_changes(self):
         source = (ROOT / "patches/airbender-cuda-device-diagnostics.patch").read_text()
-        self.assertEqual(source.count("diff --git "), 29)
+        self.assertEqual(source.count("diff --git "), 46)
         source = next("diff --git " + section for section in source.split("diff --git ")
                       if section.startswith("a/gpu_prover/src/execution/gpu_worker.rs "))
         # Diff index IDs and hunk context changed when the cumulative patch was
@@ -427,11 +431,11 @@ class StreamedInitTeardownPatchTests(unittest.TestCase):
         }
         self.assertEqual(set(self.sections), HELPER.AIRBENDER_CHANGED_PATHS)
         self.assertEqual(set(PINS["changed_files"]), HELPER.AIRBENDER_CHANGED_PATHS)
-        self.assertEqual(len(self.sections), 29)
+        self.assertEqual(len(self.sections), 46)
         self.assertTrue(set(expected) < set(self.sections))
         for path, digest in expected.items():
             self.assertEqual(PINS["changed_files"][path]["postimage_sha256"], digest)
-        self.assertEqual(PINS["patched_tree"], "98a3e82a726bca322340ec675263a4533857250a")
+        self.assertEqual(PINS["patched_tree"], "f6a8eb9bd6c1e262e294e15b21d479c6f6f5835b")
         self.assertIsNone(PINS["changed_files"][self.module_path]["preimage_sha256"])
         self.assertEqual(hashlib.sha256(self.module.encode()).hexdigest(), expected[self.module_path])
         self.assertEqual(len(self.module.encode()), PINS["changed_files"][self.module_path]["postimage_size"])
@@ -520,7 +524,7 @@ class AirbenderPinTests(unittest.TestCase):
             run.assert_not_called()
             output.assert_not_called()
 
-    def test_fri_release_artifact_binds_locked_source_circuits_and_security(self):
+    def test_historical_fri_artifact_is_stale_against_lifted_source(self):
         artifact_path = ROOT / "crates/zksync_os_fri_prover/artifacts/syscoin-v32-security100-fri-setups.json"
         artifact = HELPER.json_document(artifact_path)
         metadata, summaries = artifact["metadata"], artifact["summaries"]
@@ -530,6 +534,7 @@ class AirbenderPinTests(unittest.TestCase):
         lock = HELPER.read_toml(ROOT / "Cargo.lock")
         revision = PINS["upstream_commit"]
         self.assertEqual(metadata["airbender_revision"], revision)
+        self.assertNotEqual(metadata["airbender_patched_tree"], PINS["patched_tree"])
         self.assertIn(f'const AIRBENDER_REVISION: &str = "{revision}";', loader)
         self.assertIn('const BUNDLED_ARTIFACT_SHA256: &str =\n    "'
                       + HELPER.sha256(artifact_path) + '";', loader)
@@ -587,7 +592,7 @@ class AirbenderPinTests(unittest.TestCase):
         loader = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
         self.assertIn("ci-test -- cargo test --locked --no-default-features", workflow)
         self.assertNotIn('cargo test --manifest-path "${airbender}/Cargo.toml"', workflow)
-        for test in ("repository_artifact_matches_inputs_and_registered_program_without_deriving",
+        for test in ("stale_repository_artifact_is_rejected_after_source_lift",
                      "artifact_corruption_truncation_and_unknown_fields_fail_closed",
                      "every_metadata_field_is_release_pinned",
                      "both_sections_of_every_input_are_hash_and_length_bound",
@@ -646,7 +651,10 @@ class AirbenderPinTests(unittest.TestCase):
             root = Path(temporary)
             with patch.object(HELPER, "checked_hash") as hashes:
                 HELPER.check_airbender_preimages(root, PINS)
-                self.assertEqual(hashes.call_count, 27)
+                self.assertEqual(
+                    hashes.call_count,
+                    sum(row["preimage_sha256"] is not None for row in PINS["changed_files"].values()),
+                )
                 for relative, row in PINS["changed_files"].items():
                     if row["preimage_sha256"] is not None:
                         hashes.assert_any_call(root / relative, row["preimage_sha256"])
@@ -977,7 +985,7 @@ raise SystemExit(int(os.environ["WRAPPER_HELPER_EXIT_CODE"]))
             git.assert_any_call(upstream, "apply", "--check", str(ROOT / "patches" / pins["patch_file"]))
             git.assert_any_call(upstream, "apply", str(ROOT / "patches" / pins["patch_file"]))
             git.assert_any_call(upstream, "add", "--", *sorted(pins["changed_files"]))
-            self.assertEqual(hashes.call_count, 6)
+            self.assertEqual(hashes.call_count, len(pins["changed_files"]) - 1)
             verify.assert_called_once_with(upstream, pins)
             paths.assert_called_once_with(upstream, pins["upstream_packages"])
             self.assertEqual(marker.read_bytes(), b"source must remain unchanged")
