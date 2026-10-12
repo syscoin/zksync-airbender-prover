@@ -295,6 +295,13 @@ mod tests {
 
     #[test]
     fn every_metadata_field_is_checked() {
+        // Metadata-only mutation tests need a valid baseline, even though the
+        // checked-in artifact remains stale for release loading.
+        let mut baseline: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
+        baseline["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
+        baseline["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
+        let normalized: Artifact = serde_json::from_value(baseline.clone()).unwrap();
+        normalized.validate_metadata(100).unwrap();
         for (field, wrong) in [
             ("schema_version", json!(1)),
             ("protocol_version", json!(31)),
@@ -311,9 +318,7 @@ mod tests {
             ("vk_hash", json!(format!("0x{}", "0".repeat(64)))),
             ("program_commitment", json!(format!("0x{}", "0".repeat(64)))),
         ] {
-            let mut value: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
-            value["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
-            value["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
+            let mut value = baseline.clone();
             value[field] = wrong;
             let changed: Artifact = serde_json::from_value(value).unwrap();
             assert!(
@@ -321,7 +326,7 @@ mod tests {
                 "accepted changed {field}"
             );
         }
-        assert!(artifact().validate_metadata(80).is_err());
+        assert!(normalized.validate_metadata(80).is_err());
     }
 
     #[test]
@@ -379,6 +384,10 @@ mod tests {
     #[test]
     fn every_binary_length_and_digest_is_checked() {
         let (bin, text) = app_paths();
+        let manifest = artifact();
+        manifest.app.bin.verify_file(&bin, "app binary").unwrap();
+        manifest.app.text.verify_file(&text, "app text").unwrap();
+        manifest.validate_recursion_binaries().unwrap();
         for binary in ["app", "recursion_unrolled", "recursion_unified"] {
             for section in ["bin", "text"] {
                 for (field, wrong) in [("size_bytes", json!(1)), ("sha256", json!("0".repeat(64)))]
@@ -425,6 +434,8 @@ mod tests {
     fn changed_bytes_and_swapped_app_sections_are_rejected() {
         let (bin, text) = app_paths();
         let manifest = artifact();
+        manifest.app.bin.verify_file(&bin, "app binary").unwrap();
+        manifest.app.text.verify_file(&text, "app text").unwrap();
         assert!(manifest.app.bin.verify_file(&text, "app binary").is_err());
         assert!(manifest.app.text.verify_file(&bin, "app text").is_err());
         let mut bytes = std::fs::read(bin).unwrap();

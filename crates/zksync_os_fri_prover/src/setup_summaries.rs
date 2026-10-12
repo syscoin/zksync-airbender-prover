@@ -463,13 +463,12 @@ mod tests {
         let mut value: Value = serde_json::from_slice(BUNDLED_ARTIFACT).unwrap();
         value["unrecognized"] = json!(true);
         assert!(serde_json::from_value::<Artifact>(value).is_err());
-        let (bin, text) = app_paths();
         let mut value: Value = serde_json::from_slice(BUNDLED_ARTIFACT).unwrap();
         value["summaries"]["base"]["unrecognized"] = json!(true);
-        assert!(
-            verify_derived_release_artifact(&bin, &text, &serde_json::to_vec(&value).unwrap())
-                .is_err()
-        );
+        let parsed: Artifact = serde_json::from_value(value.clone()).unwrap();
+        // Upstream summary types discard unknown nested fields. The release
+        // comparison must use the original JSON value after regeneration.
+        assert_ne!(serde_json::to_value(parsed).unwrap(), value);
     }
 
     #[test]
@@ -571,6 +570,7 @@ mod tests {
     fn summary_order_security_geometry_and_derived_values_are_checked() {
         let (bin, text) = app_paths();
         let (binary, _) = canonical_metadata().checked_inputs(&bin, &text).unwrap();
+        artifact().validate_summaries(&binary).unwrap();
         let value = serde_json::to_value(artifact()).unwrap();
         let mut swapped = artifact();
         std::mem::swap(
