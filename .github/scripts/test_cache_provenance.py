@@ -67,14 +67,14 @@ class CacheProvenanceTests(unittest.TestCase):
         cls.fri = FRI_SOURCE.read_text()
         cls.snark = SNARK_SOURCE.read_text()
         cls.airbender = json.loads(
-            (ROOT / "patches/airbender-cuda-device-diagnostics.json").read_text()
+            (ROOT / "patches/airbender-fork-source.json").read_text()
         )
         cls.wrapper = json.loads(
-            (ROOT / "patches/zkos-wrapper-buffered-os-rng.json").read_text()
+            (ROOT / "patches/zkos-wrapper-fork-source.json").read_text()
         )
         cls.commitment = json.loads(COMMITMENT.read_text())
 
-    def test_upstream_revisions_remain_origin_pins(self):
+    def test_revision_fields_bind_effective_sources(self):
         for source in (self.fri, self.snark):
             self.assertEqual(
                 constant(source, "AIRBENDER_REVISION"),
@@ -82,11 +82,11 @@ class CacheProvenanceTests(unittest.TestCase):
             )
         self.assertEqual(
             constant(self.snark, "WRAPPER_CIRCUIT_REVISION"),
-            self.wrapper["upstream_commit"],
+            self.wrapper["fork_commit"],
         )
 
     def test_effective_airbender_tree_matches_reviewed_manifest_in_both_caches(self):
-        tree = self.airbender["patched_tree"]
+        tree = self.airbender["fork_tree"]
         self.assertRegex(tree, r"^[0-9a-f]{40}$")
         self.assertNotEqual(tree, self.airbender["upstream_tree"])
         for source in (self.fri, self.snark):
@@ -97,7 +97,7 @@ class CacheProvenanceTests(unittest.TestCase):
         )
 
     def test_effective_wrapper_tree_matches_reviewed_manifest_in_snark_cache(self):
-        tree = self.wrapper["patched_tree"]
+        tree = self.wrapper["fork_tree"]
         self.assertRegex(tree, r"^[0-9a-f]{40}$")
         self.assertNotEqual(tree, self.wrapper["upstream_tree"])
         self.assertEqual(constant(self.snark, "WRAPPER_CIRCUIT_PATCHED_TREE"), tree)
@@ -142,16 +142,27 @@ class CacheProvenanceTests(unittest.TestCase):
         self.assertIn('wrong_tree[field] = json!("0".repeat(40));', self.snark)
         self.assertIn("missing_tree.as_object_mut().unwrap().remove(field);", self.snark)
 
-    def test_commitment_artifact_binds_effective_source_trees_and_origins(self):
+    def test_old_commitment_artifact_is_stale_against_effective_source_trees(self):
         artifact = self.commitment
         self.assertEqual(artifact["schema_version"], 2)
         for field, pins, pin_field in (
             ("airbender_revision", self.airbender, "upstream_commit"),
             ("wrapper_circuit_revision", self.wrapper, "upstream_commit"),
-            ("airbender_patched_tree", self.airbender, "patched_tree"),
-            ("wrapper_circuit_patched_tree", self.wrapper, "patched_tree"),
         ):
             self.assertEqual(artifact[field], pins[pin_field])
+        for field, pins, pin_field in (
+            ("airbender_patched_tree", self.airbender, "fork_tree"),
+            ("wrapper_circuit_patched_tree", self.wrapper, "fork_tree"),
+        ):
+            self.assertNotEqual(artifact[field], pins[pin_field])
+        self.assertIn(
+            "fn stale_repository_artifact_is_rejected_after_source_lift()",
+            self.fri,
+        )
+        self.assertIn(
+            "fn stale_repository_commitment_is_rejected_after_source_lift()",
+            self.snark,
+        )
 
     def test_active_registry_loaders_and_diagnostic_share_measured_identity(self):
         artifact = self.commitment
@@ -180,14 +191,13 @@ class CacheProvenanceTests(unittest.TestCase):
         for source in (self.fri, self.snark):
             self.assertEqual(words_constant(source, "UNIFIED_END_PARAMS"), artifact["end_params"])
 
-    def test_measured_guest_identities_match_reviewed_recursive_postimages(self):
-        for identity, layer in (("recursion_unrolled", "unrolled"), ("recursion_unified", "unified")):
-            for section, suffix in (("bin", "bin"), ("text", "text")):
-                relative = f"tools/verifier/recursion_in_{layer}_layer_security_100_bits.{suffix}"
-                pinned = self.airbender["changed_files"][relative]
+    def test_retained_guest_identities_require_regeneration(self):
+        self.assertNotEqual(
+            self.commitment["airbender_patched_tree"], self.airbender["fork_tree"]
+        )
+        for identity in ("recursion_unrolled", "recursion_unified"):
+            for section in ("bin", "text"):
                 file_identity = self.commitment[identity][section]
-                self.assertEqual(file_identity["sha256"], pinned["postimage_sha256"])
-                self.assertEqual(file_identity["size_bytes"], pinned["postimage_size"])
                 self.assertIn('"' + file_identity["sha256"] + '"', self.fri)
         for section, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
             raw = (ROOT / relative).read_bytes()

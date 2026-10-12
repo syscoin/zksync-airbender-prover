@@ -41,14 +41,14 @@ def airbender_build_pins(path, source_lock=None):
     """Read the tooling-bound manifests and verify their adjacent immutable inputs."""
     require(path.is_file() and not path.is_symlink(), "invalid Airbender pin manifest")
     raw = path.read_bytes()
-    # SYSCOIN: Both CPU and GPU lanes use the same wrapper and common-crypto overlays.
+    # SYSCOIN: Both CPU and GPU lanes use the same wrapper fork and common-crypto overlay.
     # These are prepared build inputs, not a claim that the FRI-only binary links it.
     wrapper = Path(__file__).resolve().parents[2] / "scripts/prepare-patched-airbender.py"
     spec = importlib.util.spec_from_file_location("selected_airbender_lock", wrapper)
     helper = importlib.util.module_from_spec(spec)
     exec(compile(wrapper.read_bytes(), str(wrapper), "exec"), helper.__dict__)
     pins = helper.load_airbender_pins(path)
-    wrapper_manifest = path.parent / "zkos-wrapper-buffered-os-rng.json"
+    wrapper_manifest = path.parent / "zkos-wrapper-fork-source.json"
     crypto_manifest = path.parent / "zksync-crypto-native-fri-query-count.json"
     result = {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "pins": pins,
               "zkos_wrapper": helper.wrapper_pins_metadata(wrapper_manifest),

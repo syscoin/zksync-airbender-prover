@@ -50,7 +50,7 @@ jobs:
       - name: Check role-specific verified CRS downloads
         run: python3 -B .github/scripts/test_verified_crs_roles.py
 
-      - name: Check isolated Airbender source overlay
+      - name: Check pinned Airbender source and selected lock
         run: python3 -B .github/scripts/test_patched_airbender_build.py
 
       - name: Check pinned wrapper test graph
@@ -82,7 +82,7 @@ jobs:
       # Reuse its verified, pinned sources and target directory in a disposable
       # wrapper-owned workspace so dev-dependencies and all reviewed patches
       # resolve together. Production manifests, locks and policy stay unchanged.
-      - name: Run pinned wrapper RNG and commitment tests
+      - name: Run pinned wrapper source tests
         env:
           RUST_MIN_STACK: "33554432"
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -90,9 +90,8 @@ jobs:
           python3 -B .github/scripts/run_pinned_wrapper_tests.py \
             "${RUNNER_TEMP}/ci-test-airbender-inputs.json"
 
-      # SYSCOIN: Exercise only the bounded 128-row, single-worker, NoPow fixture.
       # The application test command does not run dependency unit tests.
-      - name: Run pinned native Boojum FRI query-count regression
+      - name: Run pinned Boojum FRI and lookup regressions
         timeout-minutes: 20
         env:
           RUST_MIN_STACK: "33554432"
@@ -125,6 +124,17 @@ jobs:
           CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
             --locked -p boojum --lib cs::implementations::cs::test::prove_simple \
             -- --exact --nocapture --test-threads=1 || test_status=$?
+          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
+            --locked -p boojum --lib cs::implementations::cs::test::prove_simple_specialized_with_lookups \
+            -- --exact --test-threads=1 || test_status=$?
+          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
+            --locked -p boojum --lib cs::implementations::prover::degree_lift_tests \
+            -- --test-threads=1 || test_status=$?
+          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
+            --locked -p boojum --lib gadgets::recursion::recursive_verifier::test::test_recursive_verification_of_degree_lifted_proof \
+            -- --exact --test-threads=1 || test_status=$?
+          CARGO_TARGET_DIR="${target}" cargo check --manifest-path "${crypto}/Cargo.toml" \
+            --locked -p snark_wrapper || test_status=$?
           verify_crypto
           exit "${test_status}"
 

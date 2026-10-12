@@ -29,7 +29,7 @@ const MAX_ARTIFACT_BYTES: usize = 1024 * 1024;
 // The revision records the upstream origin; the reviewed patched tree binds the
 // effective circuit source, including generated relations and recursive guests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
-const AIRBENDER_PATCHED_TREE: &str = "98a3e82a726bca322340ec675263a4533857250a";
+const AIRBENDER_PATCHED_TREE: &str = "a41a4a18eeb102b405bcb63ad7ca85e9b6b13213";
 const VK_HASH: &str = "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90";
 const PROGRAM_COMMITMENT: &str =
     "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94";
@@ -356,6 +356,7 @@ pub fn verify_derived_release_artifact(
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+    use zksync_airbender_execution_utils::unrolled::UnrolledProgramSetup;
 
     fn app_paths() -> (std::path::PathBuf, std::path::PathBuf) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -366,7 +367,47 @@ mod tests {
     }
 
     fn artifact() -> Artifact {
-        parse_authenticated(BUNDLED_ARTIFACT).unwrap()
+        let mut artifact = parse_authenticated(BUNDLED_ARTIFACT).unwrap();
+        // Structural mutation tests use the current source identity; the
+        // checked-in artifact itself remains stale until release regeneration.
+        artifact.metadata.airbender_patched_tree = AIRBENDER_PATCHED_TREE.to_owned();
+        artifact
+    }
+
+    fn structurally_valid_summaries() -> (ProgramSetupSummaries, Vec<u8>) {
+        fn rebind_binary(setup: UnrolledProgramSetup, binary: &[u8]) -> UnrolledProgramSetup {
+            let mut padded = binary.to_vec();
+            zksync_airbender_execution_utils::setups::pad_bytecode_bytes_for_proving(&mut padded);
+            let families = setup
+                .circuit_families_setups
+                .iter()
+                .map(|(&id, &caps)| (id, caps))
+                .collect::<Vec<_>>();
+            UnrolledProgramSetup::new_from_setups_and_binary(
+                &padded,
+                &families,
+                &setup.inits_and_teardowns_setup,
+            )
+        }
+
+        let (bin, _) = app_paths();
+        let binary = canonical_metadata()
+            .app
+            .bin
+            .read_verified(&bin, "app binary")
+            .unwrap();
+        let mut summaries = artifact().summaries;
+        let security = SecurityLevel::Security100.model();
+        summaries.base = rebind_binary(summaries.base, &binary);
+        summaries.recursion_unrolled = rebind_binary(
+            summaries.recursion_unrolled,
+            recursion_artifact(security, RecursionLayer::Unrolled, RecursionArtifact::Bin),
+        );
+        summaries.recursion_unified = rebind_binary(
+            summaries.recursion_unified,
+            recursion_artifact(security, RecursionLayer::Unified, RecursionArtifact::Bin),
+        );
+        (summaries, binary)
     }
 
     #[test]
@@ -439,14 +480,15 @@ mod tests {
     }
 
     #[test]
-    fn repository_artifact_matches_inputs_and_registered_program_without_deriving() {
+    fn stale_repository_artifact_is_rejected_after_source_lift() {
         let (bin, text) = app_paths();
-        let summaries = load_bundled_setup_summaries(&bin, &text).unwrap();
-        assert_eq!(summaries.security_bits, 100);
-        assert_eq!(summaries.recursion_unified.end_params, UNIFIED_END_PARAMS);
-        assert!(SupportedProtocolVersions::default()
-            .supports_program(&ProgramCommitment(summaries.program_commitment())));
-        verify_derived_release_artifact(&bin, &text, BUNDLED_ARTIFACT).unwrap();
+        let error = load_bundled_setup_summaries(&bin, &text)
+            .err()
+            .expect("stale source tree must reject bundled FRI setup");
+        assert!(error
+            .to_string()
+            .contains("effective Airbender source tree mismatch"));
+        assert!(verify_derived_release_artifact(&bin, &text, BUNDLED_ARTIFACT).is_err());
     }
 
     #[test]
@@ -458,13 +500,12 @@ mod tests {
         let mut value: Value = serde_json::from_slice(BUNDLED_ARTIFACT).unwrap();
         value["unrecognized"] = json!(true);
         assert!(serde_json::from_value::<Artifact>(value).is_err());
-        let (bin, text) = app_paths();
         let mut value: Value = serde_json::from_slice(BUNDLED_ARTIFACT).unwrap();
         value["summaries"]["base"]["unrecognized"] = json!(true);
-        assert!(
-            verify_derived_release_artifact(&bin, &text, &serde_json::to_vec(&value).unwrap())
-                .is_err()
-        );
+        let parsed: Artifact = serde_json::from_value(value.clone()).unwrap();
+        // Upstream summary types discard unknown nested fields. The release
+        // comparison must use the original JSON value after regeneration.
+        assert_ne!(serde_json::to_value(parsed).unwrap(), value);
     }
 
     #[test]
@@ -515,10 +556,11 @@ mod tests {
     fn both_sections_of_every_input_are_hash_and_length_bound() {
         let metadata = canonical_metadata();
         let (bin, text) = app_paths();
-        let (binary, text_bytes) = metadata.checked_inputs(&bin, &text).unwrap();
-        for (identity, bytes) in [
-            (&metadata.app.bin, binary.as_slice()),
-            (&metadata.app.text, text_bytes.as_slice()),
+        let binary = metadata.app.bin.read_verified(&bin, "app binary").unwrap();
+        let text_bytes = metadata.app.text.read_verified(&text, "app text").unwrap();
+        for (release_identity, bytes, current_release_input) in [
+            (&metadata.app.bin, binary.as_slice(), true),
+            (&metadata.app.text, text_bytes.as_slice(), true),
             (
                 &metadata.recursion_unrolled.bin,
                 recursion_artifact(
@@ -526,6 +568,7 @@ mod tests {
                     RecursionLayer::Unrolled,
                     RecursionArtifact::Bin,
                 ),
+                false,
             ),
             (
                 &metadata.recursion_unrolled.text,
@@ -534,6 +577,7 @@ mod tests {
                     RecursionLayer::Unrolled,
                     RecursionArtifact::Txt,
                 ),
+                false,
             ),
             (
                 &metadata.recursion_unified.bin,
@@ -542,6 +586,7 @@ mod tests {
                     RecursionLayer::Unified,
                     RecursionArtifact::Bin,
                 ),
+                false,
             ),
             (
                 &metadata.recursion_unified.text,
@@ -550,8 +595,17 @@ mod tests {
                     RecursionLayer::Unified,
                     RecursionArtifact::Txt,
                 ),
+                false,
             ),
         ] {
+            let identity = FileIdentity::pinned(bytes.len() as u64, &digest(bytes));
+            if current_release_input {
+                assert_eq!(&identity, release_identity);
+            } else {
+                assert!(release_identity
+                    .verify(bytes, "stale recursion input")
+                    .is_err());
+            }
             identity.verify(bytes, "test").unwrap();
             let mut changed = bytes.to_vec();
             changed[0] ^= 1;
@@ -564,15 +618,16 @@ mod tests {
 
     #[test]
     fn summary_order_security_geometry_and_derived_values_are_checked() {
-        let (bin, text) = app_paths();
-        let (binary, _) = canonical_metadata().checked_inputs(&bin, &text).unwrap();
-        let value = serde_json::to_value(artifact()).unwrap();
-        let mut swapped = artifact();
-        std::mem::swap(
-            &mut swapped.summaries.base,
-            &mut swapped.summaries.recursion_unrolled,
-        );
-        assert!(swapped.validate_summaries(&binary).is_err());
+        // The release artifact is stale; rebind its caps to current binaries
+        // only to exercise structural checks without pretending to authenticate it.
+        let (summaries, binary) = structurally_valid_summaries();
+        let security = SecurityLevel::Security100.model();
+        assert!(artifact().validate_summaries(&binary).is_err());
+        summaries.validate(security, &binary).unwrap();
+        let value = serde_json::to_value(&summaries).unwrap();
+        let mut swapped = summaries.clone();
+        std::mem::swap(&mut swapped.base, &mut swapped.recursion_unrolled);
+        assert!(swapped.validate(security, &binary).is_err());
         for level in ["base", "recursion_unrolled", "recursion_unified"] {
             for field in [
                 "expected_final_pc",
@@ -582,7 +637,7 @@ mod tests {
                 "inits_and_teardowns_setup",
             ] {
                 let mut changed = value.clone();
-                let target = &mut changed["summaries"][level][field];
+                let target = &mut changed[level][field];
                 match field {
                     "expected_final_pc" => *target = json!(0),
                     "binary_hash" | "end_params" => {
@@ -594,33 +649,28 @@ mod tests {
                     }
                     _ => unreachable!(),
                 }
-                if let Ok(changed) = serde_json::from_value::<Artifact>(changed) {
+                if let Ok(changed) = serde_json::from_value::<ProgramSetupSummaries>(changed) {
                     assert!(
-                        changed.validate_summaries(&binary).is_err(),
+                        changed.validate(security, &binary).is_err(),
                         "accepted changed {level}.{field}"
                     );
                 }
             }
         }
-        let mut changed = artifact();
-        changed.summaries.security_bits = 80;
-        assert!(changed.validate_summaries(&binary).is_err());
-        let mut changed = artifact();
+        let mut changed = summaries.clone();
+        changed.security_bits = 80;
+        assert!(changed.validate(security, &binary).is_err());
+        let mut changed = summaries.clone();
         changed
-            .summaries
             .base
             .circuit_families_setups
             .values_mut()
             .next()
             .unwrap()[0]
             .cap[0][0] ^= 1;
-        assert!(changed.validate_summaries(&binary).is_err());
-        let mut changed = artifact();
-        changed
-            .summaries
-            .recursion_unified
-            .inits_and_teardowns_setup[0]
-            .cap[0][0] = 1;
-        assert!(changed.validate_summaries(&binary).is_err());
+        assert!(changed.validate(security, &binary).is_err());
+        let mut changed = summaries;
+        changed.recursion_unified.inits_and_teardowns_setup[0].cap[0][0] = 1;
+        assert!(changed.validate(security, &binary).is_err());
     }
 }

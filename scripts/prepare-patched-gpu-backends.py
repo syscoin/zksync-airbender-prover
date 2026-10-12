@@ -45,11 +45,12 @@ UPSTREAM = {
                 "d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206",
                 "fa1ab78c59f9cdba2fedf4a00813dcf1c4c92d5c"),
 }
-PATCHED_TREES = {"crypto": "1040bbdf8b4afe6d5bd505511196f1705c0e83c7",
+PATCHED_TREES = {"crypto": "ca46bf0221a15de458f2d05fcac9c528c8142f06",
                  "bellman": "6e403e5a75ed91ca75c0bec533dbc73f82541ce2"}
 CHANGED_PATHS = {
     "crypto": {"crates/gpu-prover/src/cuda_bindings/context.rs",
                "crates/gpu-prover/src/setup_precomputations.rs", "crates/gpu-prover/src/proof.rs",
+               "crates/shivini/src/prover.rs",
                "crates/shivini/src/synthesis_utils.rs",
                "crates/proof-compression/src/proof_system/boojum.rs"},
     "bellman": {"src/ff.cu", "src/ff_kernels.cu", "src/ff_kernels.cuh", "src/msm.cu",
@@ -356,13 +357,13 @@ def main(argv):
     require(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", label), "invalid build label")
     base.cargo_command(argv[2:], Path("placeholder/Cargo.toml"))
     source = Path(os.environ.get("PROVER_SOURCE_DIR", TOOLING_ROOT)).resolve(strict=True)
+    require(not (source / base.PREPARED_SOURCE_MARKER).exists(),
+            "application source already contains a prepared-source marker")
     air = base.load_airbender_pins()
     wrapper_pins = base.load_wrapper_pins()
     wrapper_inputs = base.wrapper_pins_metadata()
     common_crypto_pins = base.load_crypto_pins()
     common_crypto_inputs = base.crypto_pins_metadata()
-    patch = base.PIN_PATH.parent / air["patch_file"]
-    base.checked_hash(patch, air["patch_sha256"])
     overlay_raw, selected_lock = base.selected_lock_overlay(
         source / "Cargo.lock", base.PIN_PATH.parent / air["overlay_lock_file"], air,
         wrapper_pins, common_crypto_pins)
@@ -390,17 +391,12 @@ def main(argv):
     source_hashes = base.copy_application(source, workspace)
     base.checked_hash(workspace / "Cargo.lock", selected_lock["canonical_lock_sha256"])
     upstream = build / "airbender"
-    clone = os.environ.get("AIRBENDER_SOURCE_DIR", air["upstream_url"])
+    clone = os.environ.get("AIRBENDER_SOURCE_DIR", air["fork_url"])
     if "AIRBENDER_SOURCE_DIR" in os.environ:
         clone = str(Path(clone).resolve(strict=True))
     subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks", clone, str(upstream)], check=True)
-    base.run_git(upstream, "checkout", "--quiet", "--detach", air["upstream_commit"])
-    require(base.run_git(upstream, "rev-parse", "HEAD^{tree}") == air["upstream_tree"], "Airbender tree mismatch")
-    base.check_airbender_preimages(upstream, air)
-    base.run_git(upstream, "apply", "--check", str(patch))
-    base.run_git(upstream, "apply", str(patch))
-    base.run_git(upstream, "add", "--", *sorted(air["changed_files"]))
-    base.verify_upstream(upstream, air)
+    base.run_git(upstream, "checkout", "--quiet", "--detach", air["fork_commit"])
+    base.verify_airbender_source(upstream, air)
     air_paths = base.package_paths(upstream, selected_lock["airbender_packages"])
     wrapper, wrapper_clone, wrapper_paths = base.prepare_wrapper(build, wrapper_pins)
     common_crypto, common_crypto_clone, common_crypto_paths = base.prepare_crypto(build, common_crypto_pins)
@@ -408,22 +404,20 @@ def main(argv):
     crypto_record = prepare_backend(crypto, "crypto", pins, base)
     crypto_paths = base.package_paths(crypto, CRYPTO_PACKAGES)
     manifest = workspace / "Cargo.toml"
-    application_manifest = base.read_toml(manifest)
-    require("patch" not in application_manifest and "replace" not in application_manifest,
-            "application dependency overrides need review")
+    base.prepare_application_manifest(
+        manifest, workspace / "crates/zksync_os_snark_prover/Cargo.toml", air,
+        selected_lock["airbender_lock_source"], air_paths, wrapper_pins, wrapper_paths,
+        common_crypto_pins, common_crypto_paths, upstream, wrapper, common_crypto)
     with manifest.open("a", encoding="utf-8") as destination:
-        for url, root, paths in ((air["upstream_url"], upstream, air_paths),
-                                 (wrapper_pins["upstream_url"], wrapper, wrapper_paths),
-                                 (common_crypto_pins["upstream_url"], common_crypto, common_crypto_paths),
-                                 (pins["crypto"]["upstream_url"], crypto, crypto_paths)):
-            destination.write('\n[patch.' + json.dumps(url) + ']\n')
-            for name, relative in paths.items():
-                destination.write(json.dumps(name) + " = { path = " + json.dumps(str(root / relative)) + " }\n")
+        destination.write('\n[patch.' + json.dumps(pins["crypto"]["upstream_url"]) + ']\n')
+        for name, relative in crypto_paths.items():
+            destination.write(json.dumps(name) + " = { path = "
+                              + json.dumps(str(crypto / relative)) + " }\n")
     (workspace / "Cargo.lock").write_bytes(combined)
+    marker_sha256 = base.write_prepared_source_marker(workspace, air, wrapper_pins, common_crypto_pins)
     tooling = (PIN_PATH, *(PIN_PATH.parent / pins[k]["patch_file"] for k in ("crypto", "bellman")),
-               base.PIN_PATH, patch, base.PIN_PATH.parent / air["overlay_lock_file"],
+               base.PIN_PATH, base.PIN_PATH.parent / air["overlay_lock_file"],
                base.WRAPPER_PIN_PATH,
-               base.WRAPPER_PIN_PATH.parent / wrapper_pins["patch_file"],
                base.CRYPTO_PIN_PATH, base.CRYPTO_PIN_PATH.parent / common_crypto_pins["patch_file"],
                Path(__file__).resolve(), TOOLING_ROOT / "scripts/prepare-patched-airbender.py",
                TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")
@@ -432,9 +426,8 @@ def main(argv):
         "zkos_wrapper": {
             "inputs": wrapper_inputs,
             "source": {"clone_source": wrapper_clone,
-                       "upstream_commit": wrapper_pins["upstream_commit"],
-                       "upstream_tree": wrapper_pins["upstream_tree"],
-                       "patched_tree": wrapper_pins["patched_tree"]},
+                       "fork_commit": wrapper_pins["fork_commit"],
+                       "fork_tree": wrapper_pins["fork_tree"]},
             "package_paths": wrapper_paths,
         },
         "zksync_crypto": {
@@ -450,6 +443,7 @@ def main(argv):
         "application_source": str(source), "application_inputs_sha256": source_hashes,
         "workspace": str(workspace), "upstream_clone_source": clone, "package_paths": air_paths,
         "crypto_package_paths": crypto_paths, "workspace_manifest_sha256": sha256(manifest),
+        "prepared_source_marker_sha256": marker_sha256,
         "cargo_target_dir": str(target), "caller_cwd": os.getcwd(),
         "build_environment": {name: os.environ[name] for name in (
             "RUSTUP_TOOLCHAIN", "RUSTUP_HOME", "CARGO_HOME", "CARGO_BUILD_JOBS", "CARGO_INCREMENTAL",
@@ -471,13 +465,14 @@ def main(argv):
         record["inputs_reverified"] = False
         base.write_json_exclusive(build / "build-result.json", record)
         return result.returncode
-    base.verify_upstream(upstream, air)
+    base.verify_airbender_source(upstream, air)
     base.verify_wrapper(wrapper, wrapper_pins)
     base.verify_crypto(common_crypto, common_crypto_pins)
     verify_backend(crypto, "crypto", pins, base, crypto_record["tracked_inventory"], record_allowed=True)
     require(bellman_library(native_root, pins, base) == native, "Bellman native/source closure changed")
     base.checked_hash(workspace / "Cargo.lock", metadata["selected_lock"]["combined_overlay_lock_sha256"])
     base.checked_hash(manifest, record["workspace_manifest_sha256"])
+    base.checked_hash(workspace / base.PREPARED_SOURCE_MARKER, marker_sha256)
     for relative, digest in source_hashes.items():
         if relative not in {"Cargo.toml", "Cargo.lock"}:
             base.checked_hash(workspace / relative, digest)

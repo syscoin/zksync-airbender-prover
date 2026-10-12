@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "upstream_url": "https://github.com/matter-labs/zkos-wrapper.git",
+  "upstream_commit": "585595f145cb53a09a130706ca36f80ddcac3961",
+  "upstream_tree": "8c6e6a2ac3fa86708864c740d582ca30afe6851f",
+  "upstream_lock_source": "git+https://github.com/matter-labs/zkos-wrapper.git?tag=v0.6.0-rc.2#585595f145cb53a09a130706ca36f80ddcac3961",
+  "upstream_packages": {
+    "circuit_mersenne_field": "0.1.0",
+    "zkos-wrapper": "0.1.0"
+  },
+  "fork_url": "https://github.com/syscoin/zkos-wrapper.git",
+  "fork_commit": "816a3598c60fac37d02cf1dcd1bc48b2e2c75de1",
+  "fork_tree": "a1e9a551b9588b1dfab5c5088554fc69770c0e85",
+  "purpose": "Immutable Syscoin wrapper fork for v32 Security100 compression verification, with reviewed RNG, commitment and verifier policy changes plus the randomized FRI degree lift. Fresh setup, key, deployed verifier, and end-to-end GPU proof qualification remain pending."
+}

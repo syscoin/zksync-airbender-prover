@@ -223,12 +223,12 @@ jobs:
           fi
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py bind \
             "${COMPONENT}" "${IMAGE_DIGEST}" "bom-${COMPONENT}-image.cdx.json" \
-            --airbender-pins .sbom-tooling/patches/airbender-cuda-device-diagnostics.json \
+            --airbender-pins .sbom-tooling/patches/airbender-fork-source.json \
             --source-lock .sbom-image-source/Cargo.lock \
             "${gpu_args[@]}" \
             > "bom-${COMPONENT}-image.bound.cdx.json"
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
-            .sbom-tooling/patches/airbender-cuda-device-diagnostics.json \
+            .sbom-tooling/patches/airbender-fork-source.json \
             --source-lock .sbom-image-source/Cargo.lock > airbender-build-pins.json
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py record \
             "${COMPONENT}" "${IMAGE_DIGEST}" > "image-identity.json"

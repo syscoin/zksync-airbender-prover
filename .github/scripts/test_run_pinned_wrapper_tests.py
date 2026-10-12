@@ -54,8 +54,12 @@ class WrapperTests(unittest.TestCase):
         wrapper_source = self.roots["wrapper"] / "wrapper/src"
         wrapper_source.mkdir()
         (wrapper_source / "lib.rs").write_text("// pinned wrapper source fixture\n")
+        dependencies = "".join(f'{alias} = {{ git = "{self.air["fork_url"]}", rev = "{self.air["fork_commit"]}" }}\n'
+                               for alias in ("unified_reduced_machine_verifier", "blake_verifier", "execution_utils",
+                                             "setups", "mersenne_field", "zkos_verifier_generator", "prover"))
         (self.roots["wrapper"] / "Cargo.toml").write_text(
-            '[workspace]\nresolver = "2"\nmembers = ["wrapper", "circuit_mersenne_field", "wrapper_generator"]\n')
+            '[workspace]\nresolver = "2"\nmembers = ["wrapper", "circuit_mersenne_field", "wrapper_generator"]\n'
+            '[workspace.dependencies]\n' + dependencies)
         self.raw = self.canonical_wrapper_lock()
         (self.roots["wrapper"] / "Cargo.lock").write_bytes(self.raw)
         for relative in ("Cargo.toml", "Cargo.lock"):
@@ -63,15 +67,26 @@ class WrapperTests(unittest.TestCase):
         (self.source / "fixture.rs").write_text("// application input\n")
         (self.workspace / "fixture.rs").write_bytes((self.source / "fixture.rs").read_bytes())
         manifest = (self.source / "Cargo.toml").read_text()
-        for group, pins in (("air", self.air), ("wrapper", self.wrapper), ("crypto", self.crypto)):
-            manifest += "\n[patch." + json.dumps(pins["upstream_url"]) + "]\n"
-            for name, route in self.paths[group].items():
-                manifest += json.dumps(name) + " = { path = " + json.dumps(str(self.roots[group] / route)) + " }\n"
+        canonical_patch = BASE.canonical_fork_patch(self.air)
+        self.assertTrue(manifest.endswith(canonical_patch))
+        manifest = manifest[:-len(canonical_patch)]
+        for url, group, names in (
+            (self.air["upstream_url"], "air", BASE.WRAPPER_AIRBENDER_ROOTS),
+            (self.air["fork_url"], "air", self.paths["air"]),
+            (self.wrapper["upstream_url"], "wrapper", self.paths["wrapper"]),
+            (self.wrapper["fork_url"], "wrapper", self.paths["wrapper"]),
+            (self.crypto["upstream_url"], "crypto", self.paths["crypto"]),
+        ):
+            manifest += "\n[patch." + json.dumps(url) + "]\n"
+            for name in names:
+                manifest += json.dumps(name) + " = { path = " + json.dumps(str(self.roots[group] / self.paths[group][name])) + " }\n"
         (self.workspace / "Cargo.toml").write_text(manifest)
         (self.workspace / "Cargo.lock").write_bytes(self.overlay)
-        tooling = (BASE.PIN_PATH, BASE.PIN_PATH.parent / self.air["patch_file"],
+        (self.workspace / BASE.PREPARED_SOURCE_MARKER).write_bytes(BASE.prepared_source_marker(
+            self.workspace, self.air, self.wrapper, self.crypto))
+        tooling = (BASE.PIN_PATH,
                    BASE.PIN_PATH.parent / self.air["overlay_lock_file"], BASE.WRAPPER_PIN_PATH,
-                   BASE.WRAPPER_PIN_PATH.parent / self.wrapper["patch_file"], BASE.CRYPTO_PIN_PATH,
+                   BASE.CRYPTO_PIN_PATH,
                    BASE.CRYPTO_PIN_PATH.parent / self.crypto["patch_file"],
                    ROOT / "scripts/prepare-patched-airbender.py", ROOT / "scripts/cargo-with-patched-airbender.sh")
         self.target = self.root / "target cache"
@@ -84,6 +99,7 @@ class WrapperTests(unittest.TestCase):
             "application_inputs_sha256": {relative: BASE.sha256(self.source / relative)
                 for relative in ("Cargo.toml", "Cargo.lock", "fixture.rs")},
             "workspace_manifest_sha256": BASE.sha256(self.workspace / "Cargo.toml"),
+            "prepared_source_marker_sha256": BASE.sha256(self.workspace / BASE.PREPARED_SOURCE_MARKER),
             "selected_lock": self.selected, "package_paths": self.paths["air"],
             "tooling_sha256": {str(path.relative_to(ROOT)): BASE.sha256(path) for path in tooling},
             "cargo_target_dir": str(self.target)}
@@ -95,7 +111,8 @@ class WrapperTests(unittest.TestCase):
         for group, pins in (("air", self.air), ("crypto", self.crypto)):
             for name, version in sorted(self.groups[group].items()):
                 raw += '\n[[package]]\nname = ' + json.dumps(name) + '\nversion = ' + json.dumps(version)
-                raw += '\nsource = ' + json.dumps(pins["upstream_lock_source"]) + '\n'
+                source = BASE.fork_lock_source(pins) if group == "air" else pins["upstream_lock_source"]
+                raw += '\nsource = ' + json.dumps(source) + '\n'
         for name, version in sorted(RUNNER.WRAPPER_WORKSPACE_PACKAGES.items()):
             raw += f'\n[[package]]\nname = "{name}"\nversion = "{version}"\n'
             if name == "zkos-wrapper":
@@ -112,7 +129,7 @@ class WrapperTests(unittest.TestCase):
     def authenticated(self):
         stack = ExitStack()
         self.addCleanup(stack.close)
-        for verifier in ("verify_upstream", "verify_wrapper", "verify_crypto"):
+        for verifier in ("verify_airbender_source", "verify_wrapper", "verify_crypto"):
             stack.enter_context(patch.object(BASE, verifier))
         stack.enter_context(patch.object(BASE, "package_paths", side_effect=self.package_paths))
         return stack
@@ -135,8 +152,8 @@ class WrapperTests(unittest.TestCase):
     def test_overlay_changes_only_exact_proving_source_assignments(self):
         overlay, groups = RUNNER.lock_overlay(self.raw, self.selected, self.air, self.crypto)
         expected = self.raw
-        for pins in (self.air, self.crypto):
-            expected = expected.replace(('source = ' + json.dumps(pins["upstream_lock_source"]) + '\n').encode(), b"")
+        for source in (BASE.fork_lock_source(self.air), self.crypto["upstream_lock_source"]):
+            expected = expected.replace(('source = ' + json.dumps(source) + '\n').encode(), b"")
         self.assertEqual(overlay, expected)
         self.assertEqual(groups, self.groups)
         original = BASE.tomllib.loads(self.raw.decode())
@@ -145,10 +162,10 @@ class WrapperTests(unittest.TestCase):
 
     def test_mixed_unknown_partial_unpatched_and_qualified_graphs_rejected(self):
         first = next(iter(sorted(self.groups["air"])))
-        air_line = ('source = ' + json.dumps(self.air["upstream_lock_source"]) + '\n').encode()
+        air_line = ('source = ' + json.dumps(BASE.fork_lock_source(self.air)) + '\n').encode()
         source_block = f'\n[[package]]\nname = "{first}"\nversion = "0.1.0"\n'.encode() + air_line
         cases = {
-            "mixed": self.raw.replace(self.air["upstream_commit"].encode(), b"f" * 40, 1),
+            "mixed": self.raw.replace(self.air["fork_commit"].encode(), b"f" * 40, 1),
             "unknown": self.raw.replace(('name = "' + first + '"').encode(), b'name = "unknown-air"', 1),
             "partial": self.raw.replace(source_block, b"", 1),
             "unpatched": self.raw.replace(air_line, b"", 1),
@@ -173,6 +190,12 @@ class WrapperTests(unittest.TestCase):
             mutate(record)
             with self.subTest(name=name), self.assertRaises(ValueError):
                 RUNNER.authenticate(record, "ci-test")
+        marker = self.workspace / BASE.PREPARED_SOURCE_MARKER
+        marker.write_bytes(marker.read_bytes() + b"\n")
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            RUNNER.authenticate(self.record, "ci-test")
+        marker.write_bytes(BASE.prepared_source_marker(
+            self.workspace, self.air, self.wrapper, self.crypto))
         (self.workspace / "Cargo.lock").write_bytes(self.overlay + b"\n")
         with self.assertRaisesRegex(ValueError, "SHA-256"):
             RUNNER.authenticate(self.record, "ci-test")
@@ -211,7 +234,7 @@ class WrapperTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RUNNER.metadata_graph(metadata, workspace, self.roots, self.paths, self.groups)
 
-    def execute(self, statuses=(0, 0), drift=None, metadata_status=0):
+    def execute(self, statuses=(0, 0, 0), drift=None, metadata_status=0):
         self.authenticated()
         calls = []
         tracked = sorted(str(path.relative_to(self.roots["wrapper"]))
@@ -239,7 +262,7 @@ class WrapperTests(unittest.TestCase):
     def test_run_uses_owning_copy_locked_graph_paths_with_spaces_and_shared_target(self):
         status, calls = self.execute()
         self.assertEqual(status, 0)
-        self.assertEqual([argv[1] for argv, _ in calls], ["metadata", "test", "test"])
+        self.assertEqual([argv[1] for argv, _ in calls], ["metadata", "test", "test", "test"])
         self.assertEqual([argv[-1] for argv, _ in calls[1:]], list(RUNNER.TEST_FILTERS))
         manifest = Path(calls[0][0][calls[0][0].index("--manifest-path") + 1])
         self.assertNotEqual(manifest.parent, self.roots["wrapper"])
@@ -249,7 +272,7 @@ class WrapperTests(unittest.TestCase):
         derived, _ = RUNNER.lock_overlay(self.raw, self.selected, self.air, self.crypto)
         self.assertEqual((manifest.parent / "Cargo.lock").read_bytes(), derived)
         patches = BASE.read_toml(manifest)["patch"]
-        self.assertEqual(set(patches[self.air["upstream_url"]]), set(self.groups["air"]))
+        self.assertEqual(set(patches[self.air["fork_url"]]), set(self.groups["air"]))
         self.assertEqual(set(patches[self.crypto["upstream_url"]]), set(self.groups["crypto"]))
         for argv, kwargs in calls:
             self.assertIn("--locked", argv)
@@ -260,11 +283,11 @@ class WrapperTests(unittest.TestCase):
             self.assertEqual(kwargs["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
         self.assertEqual(BASE.verify_wrapper.call_count, 2)
         self.assertEqual(BASE.verify_crypto.call_count, 2)
-        self.assertEqual(BASE.verify_upstream.call_count, 2)
+        self.assertEqual(BASE.verify_airbender_source.call_count, 2)
 
     def test_cargo_failure_preserved_second_test_skipped_and_inputs_reverified(self):
         for statuses, metadata_status, expected, count in (
-            ((7, 0), 0, 7, 2), ((0, 9), 0, 9, 3), ((0, 0), 11, 11, 1)):
+            ((7, 0, 0), 0, 7, 2), ((0, 9, 0), 0, 9, 3), ((0, 0, 0), 11, 11, 1)):
             with self.subTest(statuses=statuses, metadata_status=metadata_status):
                 status, calls = self.execute(statuses, metadata_status=metadata_status)
                 self.assertEqual(status, expected)

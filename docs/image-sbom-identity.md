@@ -21,11 +21,11 @@ remains the release label; use the SBOM identity or retained workflow artifact t
 distinguish multiple builds of that label. Existing image attestations continue to
 bind the source, tooling, guest artifacts, toolchain, and CRS inputs.
 
-The image SBOM also preserves the verified Airbender overlay manifest under
+The image SBOM also preserves the Airbender source manifest under
 `io.syscoin.prover.airbender-build.inputs`, including its manifest SHA-256. The
-manifest binds the upstream commit/tree, diagnostic patch, patched tree, and both
-Cargo locks; its adjacent patch and overlay lock are hash-checked before SBOM
-publication. `airbender-build-pins.json` is retained beside the SBOM. The exact
+manifest binds the immutable Syscoin fork commit/tree, its rc.2 parent, and the
+selected Cargo lock derivation; the reference overlay lock is hash-checked before
+SBOM publication. `airbender-build-pins.json` is retained beside the SBOM. The exact
 image additionally contains `/usr/share/syscoin-prover/airbender-build-inputs.json`,
 the role's success-only source/command/compiler record. See the
 [build overlay documentation](airbender-build-overlay.md) for the proof boundary.
@@ -34,7 +34,7 @@ Default standalone SNARK and combined images additionally preserve the exact GPU
 both checked patch hashes, and their separately derived combined lock under
 `io.syscoin.prover.gpu-backend-build.inputs`. The same pure metadata check supplies image and
 release provenance; `gpu-backend-build-pins.json` is retained for those GPU images. The FRI-only
-image cannot acquire this property. Its original Airbender identity and architecture selection
+image cannot acquire this property. Its pinned Airbender identity and architecture selection
 remain separate. The success-only in-image build record also binds the actual native CUDA
 library and physical patched source inventories; static manifest evidence is not a claimed
 service proof or a newly built library identity.
