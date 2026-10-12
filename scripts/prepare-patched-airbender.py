@@ -216,7 +216,8 @@ def prepare_application_manifest(manifest, snark_manifest, pins, air_source, air
                        (pins["fork_url"], tuple(air_paths)))
     else:
         require("patch" not in application, "historical application dependency override requires review")
-        air_patches = ((pins["upstream_url"], tuple(air_paths)),)
+        air_patches = ((pins["upstream_url"], tuple(air_paths)),
+                       (pins["fork_url"], tuple(air_paths)))
     with manifest.open("a", encoding="utf-8") as destination:
         for url, names in air_patches:
             destination.write('\n[patch.' + json.dumps(url) + ']\n')

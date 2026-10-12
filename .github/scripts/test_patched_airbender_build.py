@@ -114,6 +114,37 @@ class LockOverlayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "more than common proving"):
                 HELPER.audit_lock(old, self.overlay, PINS)
 
+    def test_historical_source_redirects_wrappers_fork_dependencies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            manifest = source / "Cargo.toml"
+            manifest.write_text('''[workspace]
+members = []
+[workspace.dependencies]
+zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/matter-labs/zksync-airbender", tag = "v0.6.0-rc.2" }
+zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/matter-labs/zkos-wrapper.git", tag = "v0.6.0-rc.2" }
+''')
+            lock = source / "Cargo.lock"
+            lock.write_bytes(parent_lock_bytes())
+            _, selected = HELPER.selected_lock_overlay(
+                lock, ROOT / "patches/airbender.Cargo.lock", PINS)
+            self.assertEqual(selected["airbender_lock_source"], PINS["upstream_lock_source"])
+            paths = {name: "crates/" + name for name in selected["airbender_packages"]}
+            wrapper = HELPER.load_wrapper_pins()
+            crypto = HELPER.load_crypto_pins()
+            HELPER.prepare_application_manifest(
+                manifest, source / "unused-snark.toml", PINS,
+                selected["airbender_lock_source"], paths, wrapper,
+                {name: name for name in wrapper["upstream_packages"]}, crypto,
+                {name: name for name in crypto["upstream_packages"]},
+                source / "airbender", source / "wrapper", source / "crypto")
+            patches = HELPER.read_toml(manifest)["patch"]
+            expected = {name: {"path": str(source / "airbender" / path)}
+                        for name, path in paths.items()}
+            self.assertEqual(patches[PINS["upstream_url"]], expected)
+            self.assertEqual(patches[PINS["fork_url"]], expected)
+            self.assertTrue(set(HELPER.WRAPPER_AIRBENDER_ROOTS) <= set(expected))
+
     def test_parent_lock_fixture_preserves_exact_historical_bytes(self):
         raw = parent_lock_bytes()
         self.assertEqual(hashlib.sha256(raw).hexdigest(),
