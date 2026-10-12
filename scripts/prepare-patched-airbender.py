@@ -35,7 +35,8 @@ TOOLING_ROOT = Path(__file__).resolve().parents[1]
 CHECKOUT_HELPER_PATH = TOOLING_ROOT / "scripts/pinned_source_checkout.py"
 _checkout_spec = importlib.util.spec_from_file_location("pinned_source_checkout", CHECKOUT_HELPER_PATH)
 _checkout_helper = importlib.util.module_from_spec(_checkout_spec)
-_checkout_spec.loader.exec_module(_checkout_helper)
+# Match the GPU base loader: importing verified tooling must not dirty its tree.
+exec(compile(CHECKOUT_HELPER_PATH.read_bytes(), str(CHECKOUT_HELPER_PATH), "exec"), _checkout_helper.__dict__)
 checkout_pinned_source = _checkout_helper.checkout_pinned_source
 PIN_PATH = TOOLING_ROOT / "patches/airbender-fork-source.json"
 WRAPPER_PIN_PATH = TOOLING_ROOT / "patches/zkos-wrapper-fork-source.json"
