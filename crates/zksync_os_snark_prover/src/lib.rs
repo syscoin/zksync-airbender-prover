@@ -1008,7 +1008,7 @@ mod tests {
             .err()
             .expect("a stale bundled commitment must fail before wrapper construction");
             assert!(
-                format!("{error:#}").contains("effective circuit source tree mismatch"),
+                format!("{error:#}").contains("bundled commitment circuit revision mismatch"),
                 "{stage}: {error:#}"
             );
         }
@@ -1097,7 +1097,7 @@ mod tests {
         };
         let message = format!("{error:#}");
         assert!(message.contains("initialize app-bound SNARK wrapper before queue polling"));
-        assert!(message.contains("effective circuit source tree mismatch"));
+        assert!(message.contains("bundled commitment circuit revision mismatch"));
     }
 
     // CPU-cold workers bind all inputs before queue polling, so the missing-setup
