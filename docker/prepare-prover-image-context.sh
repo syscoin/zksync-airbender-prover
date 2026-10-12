@@ -34,8 +34,7 @@ readonly tooling_files=(
     scripts/prepare-patched-gpu-backends.py
     patches/airbender-fork-source.json
     patches/airbender.Cargo.lock
-    patches/zkos-wrapper-buffered-os-rng.json
-    patches/zkos-wrapper-buffered-os-rng.patch
+    patches/zkos-wrapper-fork-source.json
     patches/zksync-crypto-native-fri-query-count.json
     patches/zksync-crypto-native-fri-query-count.patch
     patches/gpu32-memory.json
@@ -65,8 +64,7 @@ readonly tooling_data_files=(
     docker/zksync-os-prover-snark/Dockerfile
     patches/airbender-fork-source.json
     patches/airbender.Cargo.lock
-    patches/zkos-wrapper-buffered-os-rng.json
-    patches/zkos-wrapper-buffered-os-rng.patch
+    patches/zkos-wrapper-fork-source.json
     patches/zksync-crypto-native-fri-query-count.json
     patches/zksync-crypto-native-fri-query-count.patch
     patches/gpu32-memory.json

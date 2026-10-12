@@ -36,7 +36,7 @@ zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksy
 # `BinaryCommitment::aux_params`). Its Airbender refs are redirected below.
 # Level stated explicitly, not inherited from the wrapper's default, so it can't drift out
 # of lockstep with `PROVING_SECURITY_LEVEL`.
-zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/matter-labs/zkos-wrapper.git", tag = "v0.6.0-rc.2", default-features = false, features = ["security_100"] }
+zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zkos-wrapper.git", rev = "88aa2e1a5bb3778e1b1e07f64d95ab5ac5332da8", default-features = false, features = ["security_100"] }
 
 # zksync-crypto dependencies
 # NOTE: must use the same source spec as zkos-wrapper so cargo unifies the git deps

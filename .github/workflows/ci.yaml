@@ -82,7 +82,7 @@ jobs:
       # Reuse its verified, pinned sources and target directory in a disposable
       # wrapper-owned workspace so dev-dependencies and all reviewed patches
       # resolve together. Production manifests, locks and policy stay unchanged.
-      - name: Run pinned wrapper RNG and commitment tests
+      - name: Run pinned wrapper source tests
         env:
           RUST_MIN_STACK: "33554432"
           CARGO_PROFILE_DEV_DEBUG: "0"

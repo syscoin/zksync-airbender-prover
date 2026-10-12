@@ -112,14 +112,14 @@ class GpuLockTests(unittest.TestCase):
         self.assertEqual(set(actual), expected_names)
         for name, original in originals.items():
             expected = copy.deepcopy(original)
-            self.assertEqual(expected.pop("source"), BASE.WRAPPER_LOCK_SOURCE if name in BASE.WRAPPER_PACKAGES
+            self.assertEqual(expected.pop("source"), BASE.fork_wrapper_lock_source(BASE.load_wrapper_pins()) if name in BASE.WRAPPER_PACKAGES
                              else BASE.CRYPTO_LOCK_SOURCE)
             self.assertEqual(actual[name], expected)
 
     def test_gpu_metadata_rejects_incompatible_wrapper_source_or_version(self):
         raw = (ROOT / "Cargo.lock").read_bytes()
         for invalid in (
-            raw.replace(BASE.WRAPPER_UPSTREAM[1].encode(), b"f" * 40),
+            raw.replace(BASE.WRAPPER_FORK[1].encode(), b"f" * 40),
             raw.replace(b'name = "zkos-wrapper"\nversion = "0.1.0"',
                         b'name = "zkos-wrapper"\nversion = "0.2.0"'),
             raw.replace(b'name = "circuit_mersenne_field"', b'name = "unknown-wrapper-package"'),
@@ -162,7 +162,7 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
         def prepare_wrapper(build, pins):
             self.assertEqual(pins, wrapper_pins)
             events.append("prepare-wrapper")
-            return build / "zkos-wrapper", pins["upstream_url"], wrapper_paths
+            return build / "zkos-wrapper", pins["fork_url"], wrapper_paths
 
         def verify_wrapper(root, pins):
             self.assertEqual(root.name, "zkos-wrapper")
@@ -187,7 +187,7 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
             if command[0] == "cargo":
                 events.append("cargo")
                 manifest = BASE.read_toml(Path(command[command.index("--manifest-path") + 1]))
-                self.assertEqual(set(manifest["patch"][wrapper_pins["upstream_url"]]), set(wrapper_paths))
+                self.assertEqual(set(manifest["patch"][wrapper_pins["fork_url"]]), set(wrapper_paths))
                 self.assertEqual(set(manifest["patch"][crypto_pins["upstream_url"]]), set(crypto_paths))
                 if reject_marker:
                     Path(command[command.index("--manifest-path") + 1]).parent.joinpath(
@@ -237,16 +237,16 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
             record = json.loads(attestation.read_text())
             self.assertIs(record["inputs_reverified"], True)
             self.assertEqual(record["zkos_wrapper"]["inputs"], BASE.wrapper_pins_metadata())
-            self.assertEqual(record["zkos_wrapper"]["source"]["patched_tree"], BASE.WRAPPER_PATCHED_TREE)
+            self.assertEqual(record["zkos_wrapper"]["source"]["fork_tree"], BASE.WRAPPER_FORK[2])
             self.assertEqual(set(record["zkos_wrapper"]["package_paths"]), set(BASE.WRAPPER_PACKAGES))
             self.assertEqual(record["zksync_crypto"]["inputs"], BASE.crypto_pins_metadata())
             self.assertEqual(record["zksync_crypto"]["source"]["patched_tree"], BASE.CRYPTO_PATCHED_TREE)
             self.assertEqual(set(record["zksync_crypto"]["package_paths"]), set(BASE.CRYPTO_PACKAGES))
             self.assertEqual(record["prepared_source_marker_sha256"],
                              BASE.sha256(build / "prover" / BASE.PREPARED_SOURCE_MARKER))
+            relative = "patches/zkos-wrapper-fork-source.json"
+            self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             for suffix in ("json", "patch"):
-                relative = "patches/zkos-wrapper-buffered-os-rng." + suffix
-                self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
                 relative = "patches/zksync-crypto-native-fri-query-count." + suffix
                 self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             self.assertEqual(record, json.loads((build / "build-result.json").read_text()))

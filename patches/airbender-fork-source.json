@@ -8,7 +8,7 @@
   "fork_url": "https://github.com/syscoin/zksync-airbender",
   "fork_commit": "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52",
   "fork_tree": "6693fdafa31c45ebf8acf26e9a1f3dfc3edcffdc",
-  "canonical_lock_sha256": "36580542ba4822aef792c7bf180794754fe15d3b2f51716c5e8c53f05df833b8",
+  "canonical_lock_sha256": "a14b807de3fd7fdfbf9c6c05eb57dacc1e092221b55202f334d92318a3dbe691",
   "overlay_lock_file": "airbender.Cargo.lock",
   "overlay_lock_sha256": "cf62d057a5c6f393bab785817e65e7055aafa016c50c6c29ac87d29f11ec430d",
   "purpose": "Immutable Syscoin Airbender source for the v32 Security100 FRI degree lift. The fork descends from the reviewed v0.6.0-rc.2 base and carries the former cumulative overlay plus randomized FRI degree-lift hardening and rebuilt recursion verifier binaries. Setup summaries, verification key, deployed verifier, and end-to-end proof qualification remain pending."

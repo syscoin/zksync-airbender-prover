@@ -23,12 +23,12 @@ use zksync_airbender_execution_utils::verifier_binaries::recursion_artifact;
 use zksync_airbender_execution_utils::{RecursionArtifact, RecursionLayer};
 
 const BUNDLED_ARTIFACT: &str = include_str!("../artifacts/syscoin-v32-security100-commitment.json");
-// Upstream revisions are origins, not effective patched circuit identities.
-// These trees are reviewed in the repository's cumulative source manifests.
+// Airbender's origin revision and effective fork tree, and the wrapper's fork
+// revision/tree, are bound to the reviewed source manifests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
-const WRAPPER_CIRCUIT_REVISION: &str = "585595f145cb53a09a130706ca36f80ddcac3961";
+const WRAPPER_CIRCUIT_REVISION: &str = "88aa2e1a5bb3778e1b1e07f64d95ab5ac5332da8";
 const AIRBENDER_PATCHED_TREE: &str = "6693fdafa31c45ebf8acf26e9a1f3dfc3edcffdc";
-const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "51ac41a846c976b25056f6857b62f133f347f4ca";
+const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "914a0cd1402f289cabccd83cf6cafa1c148385ad";
 // The unified-verifier half is pinned independently, just as the app-chain half is
 // pinned by protocol_version. Regenerate and review both when the circuit changes.
 const UNIFIED_END_PARAMS: [u32; 8] = [
@@ -263,6 +263,16 @@ mod tests {
         )
     }
 
+    fn current_recursion_identity(layer: RecursionLayer) -> Value {
+        fn file(bytes: &[u8]) -> Value {
+            json!({"size_bytes": bytes.len(), "sha256": format!("{:x}", Sha256::digest(bytes))})
+        }
+        json!({
+            "bin": file(recursion_artifact(SecurityModel::Security100, layer, RecursionArtifact::Bin)),
+            "text": file(recursion_artifact(SecurityModel::Security100, layer, RecursionArtifact::Txt)),
+        })
+    }
+
     #[test]
     fn bundled_is_default_and_cli_names_are_explicit() {
         assert_eq!(
@@ -287,10 +297,8 @@ mod tests {
         let (bin, text) = app_paths();
         let error = load_bundled_commitment(&bin, &text)
             .err()
-            .expect("stale source tree must reject bundled commitment");
-        assert!(error
-            .to_string()
-            .contains("effective circuit source tree mismatch"));
+            .expect("stale wrapper source must reject bundled commitment");
+        assert!(error.to_string().contains("circuit revision mismatch"));
     }
 
     #[test]
@@ -298,6 +306,7 @@ mod tests {
         // Metadata-only mutation tests need a valid baseline, even though the
         // checked-in artifact remains stale for release loading.
         let mut baseline: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
+        baseline["wrapper_circuit_revision"] = json!(WRAPPER_CIRCUIT_REVISION);
         baseline["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
         baseline["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
         let normalized: Artifact = serde_json::from_value(baseline.clone()).unwrap();
@@ -335,6 +344,7 @@ mod tests {
         // bytes. The full bundle tests require regenerated release artifacts.
         let mut canonical: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
         canonical["schema_version"] = json!(2);
+        canonical["wrapper_circuit_revision"] = json!(WRAPPER_CIRCUIT_REVISION);
         canonical["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
         canonical["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
         serde_json::from_value::<Artifact>(canonical.clone())
@@ -368,6 +378,7 @@ mod tests {
         for field in ["end_params", "aux_params"] {
             for index in 0..8 {
                 let mut value: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
+                value["wrapper_circuit_revision"] = json!(WRAPPER_CIRCUIT_REVISION);
                 value["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
                 value["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
                 let old = value[field][index].as_u64().unwrap();
@@ -384,7 +395,11 @@ mod tests {
     #[test]
     fn every_binary_length_and_digest_is_checked() {
         let (bin, text) = app_paths();
-        let manifest = artifact();
+        assert!(artifact().validate_recursion_binaries().is_err());
+        let mut current: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
+        current["recursion_unrolled"] = current_recursion_identity(RecursionLayer::Unrolled);
+        current["recursion_unified"] = current_recursion_identity(RecursionLayer::Unified);
+        let manifest: Artifact = serde_json::from_value(current.clone()).unwrap();
         manifest.app.bin.verify_file(&bin, "app binary").unwrap();
         manifest.app.text.verify_file(&text, "app text").unwrap();
         manifest.validate_recursion_binaries().unwrap();
@@ -392,7 +407,7 @@ mod tests {
             for section in ["bin", "text"] {
                 for (field, wrong) in [("size_bytes", json!(1)), ("sha256", json!("0".repeat(64)))]
                 {
-                    let mut value: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
+                    let mut value = current.clone();
                     value[binary][section][field] = wrong;
                     let changed: Artifact = serde_json::from_value(value).unwrap();
                     let result = if binary == "app" {

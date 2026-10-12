@@ -3,7 +3,7 @@
 set -euo pipefail
 tooling_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly tooling_root
-# SYSCOIN: Every lane prepares exact Airbender and zkos-wrapper sources. GPU
+# SYSCOIN: Every lane prepares exact Airbender and zkos-wrapper fork sources. GPU
 # wrapping additionally requires the reviewed crypto/CUDA memory overlay.
 preparer=prepare-patched-airbender.py
 if [[ "${1:-}" == "--gpu32" ]]; then

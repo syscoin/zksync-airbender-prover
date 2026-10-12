@@ -23,7 +23,7 @@ COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
 COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py ./scripts/
 COPY patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/
-COPY patches/zkos-wrapper-buffered-os-rng.json patches/zkos-wrapper-buffered-os-rng.patch ./patches/
+COPY patches/zkos-wrapper-fork-source.json ./patches/
 COPY patches/zksync-crypto-native-fri-query-count.json patches/zksync-crypto-native-fri-query-count.patch ./patches/
 
 # SYSCOIN: Match the hardened release topology: CPU-only wrapping, without the GPU feature.

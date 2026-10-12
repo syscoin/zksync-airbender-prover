@@ -26,7 +26,8 @@ SPEC = importlib.util.spec_from_file_location(
     "patched_airbender", ROOT / "scripts/prepare-patched-airbender.py")
 BASE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BASE)
-TEST_FILTERS = ("buffered_os_rng::tests", "wrapper::tests::precomputed_commitment")
+TEST_FILTERS = ("buffered_os_rng::tests", "wrapper::tests::precomputed_commitment",
+                "degree_lift_")
 WRAPPER_WORKSPACE_PACKAGES = {**BASE.WRAPPER_PACKAGES, "wrapper_generator": "0.1.0"}
 
 
@@ -87,9 +88,11 @@ def authenticate(record, expected_label):
                  and paths["wrapper"] == record["zkos_wrapper"]["package_paths"]
                  and paths["crypto"] == record["zksync_crypto"]["package_paths"],
                  "attested package routes differ")
-    patches = {pins["upstream_url"]: {
+    patches = {url: {
         name: {"path": str(roots[group] / route)} for name, route in paths[group].items()}
-        for group, pins in (("wrapper", wrapper), ("crypto", crypto))}
+        for group, url in (("wrapper", wrapper["upstream_url"]),
+                           ("wrapper", wrapper["fork_url"]),
+                           ("crypto", crypto["upstream_url"]))}
     air_names = (BASE.WRAPPER_AIRBENDER_ROOTS if selected["airbender_lock_source"]
                  == BASE.fork_lock_source(air) else tuple(paths["air"]))
     patches[air["upstream_url"]] = {
@@ -103,7 +106,7 @@ def authenticate(record, expected_label):
     tooling = {str(path.relative_to(ROOT)) for path in (
         BASE.PIN_PATH,
         BASE.PIN_PATH.parent / air["overlay_lock_file"], BASE.WRAPPER_PIN_PATH,
-        BASE.WRAPPER_PIN_PATH.parent / wrapper["patch_file"], BASE.CRYPTO_PIN_PATH,
+        BASE.CRYPTO_PIN_PATH,
         BASE.CRYPTO_PIN_PATH.parent / crypto["patch_file"],
         ROOT / "scripts/prepare-patched-airbender.py", ROOT / "scripts/cargo-with-patched-airbender.sh")}
     BASE.require(set(record["tooling_sha256"]) == tooling, "incomplete attested tooling")
@@ -124,7 +127,7 @@ def lock_overlay(raw, selected, air, crypto):
                        if name != "zksync_solidity_vk_codegen"}
     BASE.require(len(air_packages) == 44 and len(crypto_packages) == 10,
                  "unknown wrapper proving package closure")
-    groups = ((air["upstream_lock_source"], air_packages),
+    groups = ((BASE.fork_lock_source(air), air_packages),
               (crypto["upstream_lock_source"], crypto_packages))
     reviewed = {name: (source, version) for source, packages in groups
                 for name, version in packages.items()}
@@ -150,7 +153,8 @@ def lock_overlay(raw, selected, air, crypto):
             del package["source"]
         else:
             BASE.require(not any(origin in source for origin in (
-                "github.com/matter-labs/zksync-airbender", "github.com/matter-labs/zkos-wrapper",
+                "github.com/matter-labs/zksync-airbender", "github.com/syscoin/zksync-airbender",
+                "github.com/matter-labs/zkos-wrapper", "github.com/syscoin/zkos-wrapper",
                 "github.com/matter-labs/zksync-crypto.git")), "unknown wrapper proving source")
         if not source:
             BASE.require(name not in local, "duplicate wrapper workspace package")
@@ -209,7 +213,8 @@ def metadata_graph(metadata, workspace, roots, paths, groups):
             found[name] = package["id"]
         else:
             BASE.require(not any(origin in (package.get("source") or "") for origin in (
-                "github.com/matter-labs/zksync-airbender", "github.com/matter-labs/zkos-wrapper",
+                "github.com/matter-labs/zksync-airbender", "github.com/syscoin/zksync-airbender",
+                "github.com/matter-labs/zkos-wrapper", "github.com/syscoin/zkos-wrapper",
                 "github.com/matter-labs/zksync-crypto.git")), "Cargo resolved an unknown proving package")
     # Cargo omits the inactive GPU-only fflonk package from CPU metadata. Its
     # pinned path patch and exact lock identity remain mandatory in the owning
@@ -229,6 +234,14 @@ def run(record_path, expected_label="ci-test"):
     record_hash = BASE.sha256(record_path)
     record = BASE.json_document(record_path)
     workspace, roots, paths, selected, air, crypto, target = authenticate(record, expected_label)
+    wrapper_manifest = BASE.read_toml(roots["wrapper"] / "Cargo.toml")
+    wrapper_deps = wrapper_manifest["workspace"]["dependencies"]
+    for alias in ("unified_reduced_machine_verifier", "blake_verifier", "execution_utils",
+                  "setups", "mersenne_field", "zkos_verifier_generator", "prover"):
+        spec = wrapper_deps[alias]
+        BASE.require(spec.get("git") == air["fork_url"] and spec.get("rev") == air["fork_commit"]
+                     and not any(key in spec for key in ("tag", "branch")),
+                     "wrapper direct Airbender source differs from reviewed fork")
     raw = (roots["wrapper"] / "Cargo.lock").read_bytes()
     overlay, groups = lock_overlay(raw, selected, air, crypto)
     build = Path(tempfile.mkdtemp(prefix="wrapper-unit-tests-", dir=workspace.parent))
@@ -239,8 +252,9 @@ def run(record_path, expected_label="ci-test"):
     BASE.require(not any(key in BASE.read_toml(manifest) for key in ("patch", "replace")),
                  "wrapper already has dependency overrides")
     with manifest.open("a", encoding="utf-8") as output:
-        for group, pins in (("air", air), ("crypto", crypto)):
-            output.write("\n[patch." + json.dumps(pins["upstream_url"]) + "]\n")
+        for group, url in (("air", air["fork_url"]),
+                           ("crypto", crypto["upstream_url"])):
+            output.write("\n[patch." + json.dumps(url) + "]\n")
             for name in sorted(groups[group]):
                 output.write(json.dumps(name) + " = { path = "
                              + json.dumps(str(roots[group] / paths[group][name])) + " }\n")

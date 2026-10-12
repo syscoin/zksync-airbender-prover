@@ -70,11 +70,11 @@ class CacheProvenanceTests(unittest.TestCase):
             (ROOT / "patches/airbender-fork-source.json").read_text()
         )
         cls.wrapper = json.loads(
-            (ROOT / "patches/zkos-wrapper-buffered-os-rng.json").read_text()
+            (ROOT / "patches/zkos-wrapper-fork-source.json").read_text()
         )
         cls.commitment = json.loads(COMMITMENT.read_text())
 
-    def test_upstream_revisions_remain_origin_pins(self):
+    def test_revision_fields_bind_effective_sources(self):
         for source in (self.fri, self.snark):
             self.assertEqual(
                 constant(source, "AIRBENDER_REVISION"),
@@ -82,7 +82,7 @@ class CacheProvenanceTests(unittest.TestCase):
             )
         self.assertEqual(
             constant(self.snark, "WRAPPER_CIRCUIT_REVISION"),
-            self.wrapper["upstream_commit"],
+            self.wrapper["fork_commit"],
         )
 
     def test_effective_airbender_tree_matches_reviewed_manifest_in_both_caches(self):
@@ -97,7 +97,7 @@ class CacheProvenanceTests(unittest.TestCase):
         )
 
     def test_effective_wrapper_tree_matches_reviewed_manifest_in_snark_cache(self):
-        tree = self.wrapper["patched_tree"]
+        tree = self.wrapper["fork_tree"]
         self.assertRegex(tree, r"^[0-9a-f]{40}$")
         self.assertNotEqual(tree, self.wrapper["upstream_tree"])
         self.assertEqual(constant(self.snark, "WRAPPER_CIRCUIT_PATCHED_TREE"), tree)
@@ -152,7 +152,7 @@ class CacheProvenanceTests(unittest.TestCase):
             self.assertEqual(artifact[field], pins[pin_field])
         for field, pins, pin_field in (
             ("airbender_patched_tree", self.airbender, "fork_tree"),
-            ("wrapper_circuit_patched_tree", self.wrapper, "patched_tree"),
+            ("wrapper_circuit_patched_tree", self.wrapper, "fork_tree"),
         ):
             self.assertNotEqual(artifact[field], pins[pin_field])
         self.assertIn(

@@ -32,8 +32,7 @@ OVERLAY_FILES = (
     "scripts/prepare-patched-airbender.py",
     "patches/airbender-fork-source.json",
     "patches/airbender.Cargo.lock",
-    "patches/zkos-wrapper-buffered-os-rng.json",
-    "patches/zkos-wrapper-buffered-os-rng.patch",
+    "patches/zkos-wrapper-fork-source.json",
     "patches/zksync-crypto-native-fri-query-count.json",
     "patches/zksync-crypto-native-fri-query-count.patch",
 )
@@ -248,7 +247,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
     def test_fri_recipe_only_adds_required_common_overlay_inputs(self):
         path = "docker/zksync-os-prover-fri/Dockerfile"
         # FRI needs the fork source and common proving inputs, but no SNARK CUDA backend.
-        copy = b"COPY patches/zkos-wrapper-buffered-os-rng.json patches/zkos-wrapper-buffered-os-rng.patch ./patches/\n"
+        copy = b"COPY patches/zkos-wrapper-fork-source.json ./patches/\n"
         crypto_copy = b"COPY patches/zksync-crypto-native-fri-query-count.json patches/zksync-crypto-native-fri-query-count.patch ./patches/\n"
         raw = (ROOT / path).read_bytes()
         self.assertEqual(raw.count(copy), 1)

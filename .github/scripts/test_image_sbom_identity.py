@@ -194,7 +194,7 @@ class ImageIdentityTests(unittest.TestCase):
         result = identity.airbender_build_pins(manifest)
         self.assertEqual(result["manifest_sha256"], hashlib.sha256(manifest.read_bytes()).hexdigest())
         self.assertEqual(result["pins"]["upstream_package_count"], 46)
-        wrapper_manifest = ROOT / "patches/zkos-wrapper-buffered-os-rng.json"
+        wrapper_manifest = ROOT / "patches/zkos-wrapper-fork-source.json"
         self.assertEqual(result["zkos_wrapper"]["manifest_sha256"],
                          hashlib.sha256(wrapper_manifest.read_bytes()).hexdigest())
         self.assertEqual(result["zkos_wrapper"]["pins"]["upstream_packages"],
@@ -264,18 +264,15 @@ class ImageIdentityTests(unittest.TestCase):
             identity.bind_sbom({"bomFormat": "CycloneDX", "specVersion": "1.6"}, fri, gpu_backend=result)
 
     def test_wrapper_input_tampering_fails_before_sbom_evidence(self):
-        for filename in ("zkos-wrapper-buffered-os-rng.patch", "zkos-wrapper-buffered-os-rng.json"):
+        for filename in ("zkos-wrapper-fork-source.json",):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 for original in (ROOT / "patches").iterdir():
                     if original.is_file():
                         shutil.copyfile(original, directory / original.name)
-                if filename.endswith(".patch"):
-                    (directory / filename).write_bytes(b"changed wrapper source input")
-                else:
-                    manifest = json.loads((directory / filename).read_text())
-                    manifest["upstream_commit"] = "0" * 40
-                    (directory / filename).write_text(json.dumps(manifest))
+                manifest = json.loads((directory / filename).read_text())
+                manifest["fork_commit"] = "f" * 40
+                (directory / filename).write_text(json.dumps(manifest))
                 with self.assertRaises(ValueError):
                     identity.airbender_build_pins(directory / "airbender-fork-source.json")
 
@@ -340,8 +337,8 @@ class ImageIdentityTests(unittest.TestCase):
         reference = identity.airbender_build_pins(manifest)
         self.assertEqual(selected["pins"], reference["pins"])
         self.assertEqual(selected["manifest_sha256"], reference["manifest_sha256"])
-        self.assertEqual(selected["selected_lock"]["schema_version"], 3)
-        self.assertEqual(selected["selected_lock"]["derivation"], "common-proving-source-identity-only-v3")
+        self.assertEqual(selected["selected_lock"]["schema_version"], 4)
+        self.assertEqual(selected["selected_lock"]["derivation"], "common-proving-source-identity-only-v4")
         self.assertEqual(selected["selected_lock"]["zksync_crypto_packages"],
                          reference["zksync_crypto"]["pins"]["upstream_packages"])
         self.assertEqual(selected["selected_lock"]["canonical_lock_sha256"],
@@ -366,7 +363,7 @@ class ImageIdentityTests(unittest.TestCase):
             self.assertIn("$airbender.pins.overlay_lock_sha256", workflow)
             self.assertIn("$airbender.manifest_sha256", workflow)
             self.assertIn("$airbender.zkos_wrapper.pins.upstream_commit", workflow)
-            self.assertIn("$airbender.zkos_wrapper.pins.patch_sha256", workflow)
+            self.assertIn("$airbender.zkos_wrapper.pins.fork_commit", workflow)
             self.assertIn("$airbender.zkos_wrapper.manifest_sha256", workflow)
             self.assertIn("$airbender.zksync_crypto.pins.upstream_commit", workflow)
             self.assertIn("$airbender.zksync_crypto.pins.patch_sha256", workflow)
@@ -379,7 +376,7 @@ class ImageIdentityTests(unittest.TestCase):
         for workflow in (stage, (ROOT / ".github/workflows/release-bins.yml").read_text()):
             self.assertIn("$airbender.selected_lock.canonical_lock_sha256", workflow)
             self.assertIn("$airbender.selected_lock.overlay_lock_sha256", workflow)
-            self.assertIn('uri: "syscoin:generated-lock:common-proving-source-identity-only-v3"', workflow)
+            self.assertIn('uri: "syscoin:generated-lock:common-proving-source-identity-only-v4"', workflow)
             self.assertIn('uri: "syscoin:generated-lock:common-proving-and-crypto-gpu-source-identity-only-v3"', workflow)
         self.assertIn("--airbender-pins .sbom-tooling/patches/airbender-fork-source.json", reusable)
         self.assertIn("--source-lock .sbom-image-source/Cargo.lock", reusable)
@@ -429,15 +426,15 @@ class ImageIdentityTests(unittest.TestCase):
         for value in (pins["manifest_sha256"], pins["pins"]["overlay_lock_sha256"]):
             self.assertIn({"sha256": value}, digests)
         self.assertIn({"gitCommit": pins["zkos_wrapper"]["pins"]["upstream_commit"]}, digests)
-        for value in (pins["zkos_wrapper"]["manifest_sha256"], pins["zkos_wrapper"]["pins"]["patch_sha256"]):
-            self.assertIn({"sha256": value}, digests)
+        self.assertIn({"gitCommit": pins["zkos_wrapper"]["pins"]["fork_commit"]}, digests)
+        self.assertIn({"sha256": pins["zkos_wrapper"]["manifest_sha256"]}, digests)
         self.assertIn({"gitCommit": pins["zksync_crypto"]["pins"]["upstream_commit"]}, digests)
         for value in (pins["zksync_crypto"]["manifest_sha256"], pins["zksync_crypto"]["pins"]["patch_sha256"]):
             self.assertIn({"sha256": value}, digests)
         for key in ("canonical_lock_sha256", "overlay_lock_sha256"):
             self.assertIn({"sha256": pins["selected_lock"][key]}, digests)
         generated = next(item for item in definition["resolvedDependencies"]
-                         if item["uri"] == "syscoin:generated-lock:common-proving-source-identity-only-v3")
+                         if item["uri"] == "syscoin:generated-lock:common-proving-source-identity-only-v4")
         self.assertEqual(generated["digest"], {"sha256": pins["selected_lock"]["overlay_lock_sha256"]})
         for value in (gpu["manifest_sha256"], gpu["pins"]["crypto"]["patch_sha256"],
                       gpu["pins"]["bellman"]["patch_sha256"], gpu["selected_lock"]["combined_overlay_lock_sha256"]):
