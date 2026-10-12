@@ -156,7 +156,7 @@ index 6023624..9636b9f 100644
  
          assert!(is_valid);
 diff --git a/crates/boojum/src/cs/implementations/prover.rs b/crates/boojum/src/cs/implementations/prover.rs
-index 3b0f4ab..3fd97c5 100644
+index 3b0f4ab..c693faf 100644
 --- a/crates/boojum/src/cs/implementations/prover.rs
 +++ b/crates/boojum/src/cs/implementations/prover.rs
 @@ -2063,6 +2063,14 @@ impl<
@@ -174,7 +174,7 @@ index 3b0f4ab..3fd97c5 100644
          // for simplicity we transform c0 and c1 into ArcGenericPoly
  
          let c0_as_poly = GenericLdeStorage {
-@@ -2543,6 +2551,48 @@ fn quotening_operation<
+@@ -2543,6 +2551,54 @@ fn quotening_operation<
      }
  }
  
@@ -190,8 +190,9 @@ index 3b0f4ab..3fd97c5 100644
 +    worker: &Worker,
 +    ctx: &mut P::Context,
 +) {
-+    // Openings of degree < N sources have degree < N - 1. Multiplying the
-+    // complete batch by X removes the spare degree in FRI's unchanged < N bound.
++    // Openings of degree < N sources have degree < N - 1. The lift must
++    // remain nonzero at lookup's fixed opening point 0, or a false lookup
++    // opening would lose its pole and pass FRI's unchanged < N bound.
 +    assert_eq!(destination_c0.len(), destination_c1.len());
 +    assert_eq!(destination_c0.len(), precomputed_cosets.outer_len());
 +
@@ -210,9 +211,14 @@ index 3b0f4ab..3fd97c5 100644
 +            {
 +                let mut ctx = *ctx;
 +                scope.spawn(move |_| {
++                    let mut two_base = F::ONE;
++                    two_base.double();
++                    let two = P::constant(two_base, &mut ctx);
 +                    for ((c0, c1), x) in c0.iter_mut().zip(c1.iter_mut()).zip(roots.iter()) {
-+                        c0.mul_assign(x, &mut ctx);
-+                        c1.mul_assign(x, &mut ctx);
++                        let mut lift = *x;
++                        lift.add_assign(&two, &mut ctx);
++                        c0.mul_assign(&lift, &mut ctx);
++                        c1.mul_assign(&lift, &mut ctx);
 +                    }
 +                });
 +            }
@@ -223,7 +229,7 @@ index 3b0f4ab..3fd97c5 100644
  fn quotening_operation_in_extension<
      F: SmallField,
      EXT: FieldExtension<2, BaseField = F>,
-@@ -2937,3 +2987,199 @@ pub fn compute_selector_subpath<
+@@ -2937,3 +2993,234 @@ pub fn compute_selector_subpath<
      let existing = buffer.insert(path, subset);
      debug_assert!(existing.is_none());
  }
@@ -292,6 +298,7 @@ index 3b0f4ab..3fd97c5 100644
 +
 +    fn opening_batch(
 +        degree: usize,
++        false_zero_claim: bool,
 +        worker: &Worker,
 +    ) -> (
 +        Vec<Vec<F>>,
@@ -322,11 +329,15 @@ index 3b0f4ab..3fd97c5 100644
 +        let mut c0 = vec![vec![F::ZERO; N]; LDE_FACTOR];
 +        let mut c1 = c0.clone();
 +        for (at, challenge) in opening_points_and_challenges() {
++            let mut claimed_value = source_value(at, degree);
++            if false_zero_claim && at == E::ZERO {
++                claimed_value.add_assign(&E::ONE);
++            }
 +            quotening_operation_in_extension(
 +                &mut c0,
 +                &mut c1,
 +                vec![sources.clone()],
-+                vec![source_value(at, degree)],
++                vec![claimed_value],
 +                &roots,
 +                at,
 +                &[challenge],
@@ -379,7 +390,7 @@ index 3b0f4ab..3fd97c5 100644
 +    #[test]
 +    fn fri_degree_lift_accepts_maximum_honest_source_degree() {
 +        let worker = Worker::new_with_num_threads(2);
-+        let (mut c0, mut c1, roots) = opening_batch(N - 1, &worker);
++        let (mut c0, mut c1, roots) = opening_batch(N - 1, false, &worker);
 +        degree_lift_fri_opening(&mut c0, &mut c1, &roots, &worker, &mut ());
 +        assert_exact_degree(&c0, &c1, N - 1);
 +
@@ -396,7 +407,11 @@ index 3b0f4ab..3fd97c5 100644
 +                    numerator.mul_assign(&E::from_coeff_in_base([a, b]));
 +                    expected.add_assign(&numerator);
 +                }
-+                expected.mul_assign_by_base(x);
++                let mut lift = *x;
++                let mut two = F::ONE;
++                two.double();
++                lift.add_assign(&two);
++                expected.mul_assign_by_base(&lift);
 +                assert_eq!(c0[outer][inner], expected.coeffs[0]);
 +                assert_eq!(c1[outer][inner], expected.coeffs[1]);
 +            }
@@ -409,7 +424,7 @@ index 3b0f4ab..3fd97c5 100644
 +    #[test]
 +    fn fri_degree_lift_rejects_degree_n_source() {
 +        let worker = Worker::new_with_num_threads(2);
-+        let (mut c0, mut c1, roots) = opening_batch(N, &worker);
++        let (mut c0, mut c1, roots) = opening_batch(N, false, &worker);
 +        // This source uses the spare degree before the lift, reproducing the
 +        // boundary failure under the very same FRI coefficient limit.
 +        run_fri(c0.clone(), c1.clone(), &worker);
@@ -422,9 +437,35 @@ index 3b0f4ab..3fd97c5 100644
 +            "the lifted degree-N source must exceed the FRI bound"
 +        );
 +    }
++
++    #[test]
++    fn fri_degree_lift_rejects_false_lookup_opening_at_zero() {
++        let worker = Worker::new_with_num_threads(2);
++        let (mut c0, mut c1, roots) = opening_batch(N - 1, true, &worker);
++
++        // With the old X lift the false zero claim becomes polynomial and
++        // satisfies FRI's degree bound, even though its numerator is wrong.
++        let mut old_c0 = c0.clone();
++        let mut old_c1 = c1.clone();
++        for (coset_idx, coset) in roots.storage.iter().enumerate() {
++            for (idx, x) in coset.storage.iter().enumerate() {
++                old_c0[coset_idx][idx].mul_assign(x);
++                old_c1[coset_idx][idx].mul_assign(x);
++            }
++        }
++        run_fri(old_c0, old_c1, &worker);
++
++        degree_lift_fri_opening(&mut c0, &mut c1, &roots, &worker, &mut ());
++        let rejected =
++            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_fri(c0, c1, &worker)));
++        assert!(
++            rejected.is_err(),
++            "a false lookup opening at zero must fail FRI"
++        );
++    }
 +}
 diff --git a/crates/boojum/src/cs/implementations/verifier.rs b/crates/boojum/src/cs/implementations/verifier.rs
-index 3539c1c..4a81c46 100644
+index 3539c1c..bd4e02f 100644
 --- a/crates/boojum/src/cs/implementations/verifier.rs
 +++ b/crates/boojum/src/cs/implementations/verifier.rs
 @@ -1,4 +1,5 @@
@@ -463,33 +504,40 @@ index 3539c1c..4a81c46 100644
          }
  
          let base_oracle_depth = vk.fixed_parameters.base_oracles_depth();
-@@ -2383,6 +2392,10 @@ impl<F: SmallField, EXT: FieldExtension<2, BaseField = F>> Verifier<F, EXT> {
+@@ -2383,6 +2392,13 @@ impl<F: SmallField, EXT: FieldExtension<2, BaseField = F>> Verifier<F, EXT> {
  
              assert_eq!(challenge_offset, challenges_for_fri_quotiening.len());
  
-+            // Match the producer's X lift after every opening has contributed,
-+            // so FRI's < N bound also excludes degree-N source polynomials.
-+            simulated_ext_element.mul_assign_by_base(&domain_element_for_quotiening);
++            // Lift by X + 2 so a false lookup opening at 0 retains its pole.
++            let mut lift = domain_element_for_quotiening;
++            let mut two = F::ONE;
++            two.double();
++            lift.add_assign(&two);
++            simulated_ext_element.mul_assign_by_base(&lift);
 +
              let mut current_folded_value = simulated_ext_element;
              let mut subidx = base_tree_idx;
              let mut coset_inverse = base_coset_inverse;
 diff --git a/crates/boojum/src/gadgets/recursion/recursive_verifier.rs b/crates/boojum/src/gadgets/recursion/recursive_verifier.rs
-index aefc987..0f34c58 100644
+index aefc987..32daaae 100644
 --- a/crates/boojum/src/gadgets/recursion/recursive_verifier.rs
 +++ b/crates/boojum/src/gadgets/recursion/recursive_verifier.rs
-@@ -1888,6 +1888,10 @@ impl<F: SmallField, EXT: FieldExtension<2, BaseField = F>, CS: ConstraintSystem<
+@@ -1888,6 +1888,14 @@ impl<F: SmallField, EXT: FieldExtension<2, BaseField = F>, CS: ConstraintSystem<
  
              assert_eq!(challenge_offset, challenges_for_fri_quotiening.len());
  
-+            // Match the producer's X lift after every opening has contributed,
-+            // so FRI's < N bound also excludes degree-N source polynomials.
-+            simulated_ext_element.mul_assign_by_base(&domain_element_for_quotiening, cs);
++            // Lift by X + 2 so a false lookup opening at 0 retains its pole.
++            let mut lift = domain_element_for_quotiening;
++            let mut two_base = F::ONE;
++            two_base.double();
++            let two = NumAsFieldWrapper::constant(two_base, cs);
++            lift.add_assign(&two, cs);
++            simulated_ext_element.mul_assign_by_base(&lift, cs);
 +
              let mut current_folded_value = simulated_ext_element;
              let mut subidx = base_tree_idx;
              let mut coset_inverse = base_coset_inverse;
-@@ -2215,6 +2219,161 @@ mod test {
+@@ -2215,6 +2223,161 @@ mod test {
      use crate::gadgets::traits::witnessable::WitnessHookable;
      use crate::implementations::poseidon2::Poseidon2Goldilocks;
  
@@ -651,7 +699,7 @@ index aefc987..0f34c58 100644
      #[test]
      fn test_recursive_verification() {
          type F = GoldilocksField;
-@@ -2369,7 +2528,15 @@ mod test {
+@@ -2369,7 +2532,15 @@ mod test {
  
          let verifier = builder.build(());
  
@@ -691,16 +739,20 @@ index 6156855..87142aa 100644
          assert!(is_valid);
      }
 diff --git a/crates/snark-wrapper/src/verifier/fri.rs b/crates/snark-wrapper/src/verifier/fri.rs
-index fe303fb..126319f 100644
+index fe303fb..194688f 100644
 --- a/crates/snark-wrapper/src/verifier/fri.rs
 +++ b/crates/snark-wrapper/src/verifier/fri.rs
-@@ -163,6 +163,10 @@ pub(crate) fn verify_fri_part<
+@@ -163,6 +163,14 @@ pub(crate) fn verify_fri_part<
              constants,
          )?;
  
-+        // The prover lifts the complete opening batch by X before FRI. Keep
-+        // this wrapper verifier on the same degree-bound relation.
-+        simulated_ext_element.mul_assign_by_base(cs, &domain_element_for_quotiening)?;
++        // Keep the lift nonzero at lookup's fixed opening point 0.
++        let mut lift = domain_element_for_quotiening;
++        let mut two_base = GL::ONE;
++        BoojumField::double(&mut two_base);
++        let two = GoldilocksAsFieldWrapper::constant(two_base, cs);
++        lift.add_assign(&two, cs);
++        simulated_ext_element.mul_assign_by_base(cs, &lift)?;
 +
          let base_coset_inverse = BoojumPrimeField::inverse(&GL::multiplicative_generator()).unwrap();
  

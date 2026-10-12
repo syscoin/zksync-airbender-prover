@@ -18,7 +18,7 @@
     "zksync_solidity_vk_codegen": "0.32.10"
   },
   "patch_file": "zksync-crypto-native-fri-query-count.patch",
-  "patch_sha256": "360a5688c07c0f1541c6babb05ded1bd4ebb9389809fa7f4f1ad31255c1f778b",
+  "patch_sha256": "740f9385a603f50ffd1d27a42aea63f311daed518024670eb17b804d0db16f95",
   "changed_files": {
     "crates/boojum/src/cs/implementations/convenience.rs": {
       "preimage_sha256": "0492295bec1d8bf0bc969d00fc5faacd22e1971bc662d63efab2f72530b1c8aa",
@@ -32,18 +32,18 @@
     },
     "crates/boojum/src/cs/implementations/prover.rs": {
       "preimage_sha256": "7ac378129350e51e69e70cca0414efb457d5006fec3f4ba322c42f38898fa8ff",
-      "postimage_sha256": "c108989b3a0bd216f4b11b8db88d780ef3366c6f3e700a5a345601655113714a",
-      "postimage_size": 130061
+      "postimage_sha256": "789fe52e9fb80aa0532fb67e628067de4297982716801089e727853b3fb0f676",
+      "postimage_size": 131800
     },
     "crates/boojum/src/cs/implementations/verifier.rs": {
       "preimage_sha256": "3a80fd53c5498f38286cdfc7789394e6c8292b299f3dd626da2b3b2f56ac2b8a",
-      "postimage_sha256": "043d935a851651ef61b93bc522065b868e5396b708eaa6e21c6ebdd966747bc3",
-      "postimage_size": 105654
+      "postimage_sha256": "b946a9f79045dc529b1e92a7066944555ef22c0fc0dae6365aaaca737cec20b0",
+      "postimage_size": 105703
     },
     "crates/boojum/src/gadgets/recursion/recursive_verifier.rs": {
       "preimage_sha256": "28cb08b0c1bbf43542b0da06a539559e03ddfd3ee11162a5ce9cd3e3e12bf2e4",
-      "postimage_sha256": "fdcb5edff83d789b083b4696f055f182c33c8de06c27017338380563b02bbed6",
-      "postimage_size": 110334
+      "postimage_sha256": "71a0e00f9697058ffff6890ab3522fc1952488a70bf0fec0bd25dde3b92de318",
+      "postimage_size": 110462
     },
     "crates/boojum/src/gadgets/sha256/mod.rs": {
       "preimage_sha256": "886af32ba3f07b47aab5ff1d83cf1b5f09a943eef33194cf1aaf14446a9b0e82",
@@ -52,10 +52,10 @@
     },
     "crates/snark-wrapper/src/verifier/fri.rs": {
       "preimage_sha256": "46577fe14f6d3e090eaa197e4c27fd43ea79cb1e8cac8667f10911206e0ef7cf",
-      "postimage_sha256": "84b5efd7a3217a6a699b74dbc966cf9d8013e42e9e94ec899dae2718220c5a8f",
-      "postimage_size": 26518
+      "postimage_sha256": "45b85aba57648fc88c68d82656fd9d41600209a8f7b2f3425ac61b9cea178a4f",
+      "postimage_size": 26653
     }
   },
-  "patched_tree": "ad6a5ad3c0254b0a15da528d209aacbb68ab0ebf",
-  "purpose": "Cumulative pinned common crypto overlay: retain native FRI query-count and verifier-owned proof-policy fixes; lift the Goldilocks DEEP aggregate by the true evaluation point in the CPU prover, native verifier, recursive verifier, and active SNARK-wrapper verifier. Fresh compression and SNARK setup and proof qualification are pending."
+  "patched_tree": "6de22a5ab1c4fa8b903ae7719280f3d90380524f",
+  "purpose": "Cumulative pinned common crypto overlay: retain native FRI query-count and verifier-owned proof-policy fixes; lift the Goldilocks DEEP aggregate by X + 2 in the CPU prover, native verifier, recursive verifier, and active SNARK-wrapper verifier, preserving the lookup opening at zero. Fresh compression and SNARK setup and proof qualification are pending."
 }

@@ -320,16 +320,20 @@ index b8a855d..1a3ba80 100644
      }
  
 diff --git a/crates/shivini/src/prover.rs b/crates/shivini/src/prover.rs
-index 62f7a2d..43e89de 100644
+index 62f7a2d..12bfde3 100644
 --- a/crates/shivini/src/prover.rs
 +++ b/crates/shivini/src/prover.rs
-@@ -1700,5 +1700,203 @@ fn compute_deep_quotiening_over_coset(
+@@ -1700,5 +1700,211 @@ fn compute_deep_quotiening_over_coset(
          quotient.add_assign(&quotient_for_row)?;
      }
  
-+    // Opening division loses one degree; FRI's degree < N bound must still enforce
-+    // degree < N for every source polynomial, including public-input openings.
-+    quotient.mul_assign_real(&roots)?;
++    // Keep the lift nonzero at lookup's fixed opening point 0 so false
++    // lookup openings retain their pole while degree-N sources exceed FRI's bound.
++    let mut lift = roots;
++    let mut two = F::ONE;
++    two.double();
++    lift.add_constant(&DF::from_host_value(&two)?)?;
++    quotient.mul_assign_real(&lift)?;
 +
      Ok(quotient)
  }
@@ -515,7 +519,11 @@ index 62f7a2d..43e89de 100644
 +                        opening.mul_assign(challenge);
 +                        expected.add_assign(&opening);
 +                    }
-+                    expected.mul_assign_by_base(&point);
++                    let mut lift = point;
++                    let mut two = F::ONE;
++                    two.double();
++                    lift.add_assign(&two);
++                    expected.mul_assign_by_base(&lift);
 +                    assert_eq!(
 +                        [actual_values[index], actual_values[index + DOMAIN_SIZE]],
 +                        expected.into_coeffs_in_base(),

@@ -238,7 +238,7 @@ class CommonCryptoOverlayTests(unittest.TestCase):
             "return false;",
         ])
         self.assertIn(
-            "simulated_ext_element.mul_assign_by_base(&domain_element_for_quotiening);",
+            "simulated_ext_element.mul_assign_by_base(&lift);",
             added,
         )
         for text in ("empty FRI query list must fail", "one missing FRI query must fail",

@@ -342,7 +342,7 @@ class ManifestTests(unittest.TestCase):
             "postimage_size": 26395,
         })
         self.assertIn(relative, HELPER.CHANGED_PATHS["crypto"])
-        self.assertEqual(PINS["crypto"]["patched_tree"], "18b15062cf27d371d0301f855eb15d245730d9a6")
+        self.assertEqual(PINS["crypto"]["patched_tree"], "f60ebbb7e33a6ee9a3bb297f5659fd308dda7990")
         self.assertEqual(HELPER.PATCHED_TREES["crypto"], PINS["crypto"]["patched_tree"])
 
     def test_compression_verifier_uses_compression_selected_proof_policy(self):
