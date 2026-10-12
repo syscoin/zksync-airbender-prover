@@ -532,12 +532,12 @@ class AirbenderPinTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                     HELPER.load_airbender_pins(manifest)
 
-    def test_reverification_rejects_commit_parent_tree_and_dirty_source(self):
+    def test_reverification_rejects_commit_ancestry_tree_and_dirty_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             values = {
                 ("rev-parse", "HEAD"): PINS["fork_commit"],
-                ("rev-parse", "HEAD^"): PINS["upstream_commit"],
+                ("merge-base", "HEAD", PINS["upstream_commit"]): PINS["upstream_commit"],
                 ("rev-parse", "HEAD^{tree}"): PINS["fork_tree"],
                 ("status", "--porcelain", "--untracked-files=all"): "",
             }
@@ -548,6 +548,33 @@ class AirbenderPinTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         HELPER.verify_airbender_source(root, PINS)
                     values[args] = original
+
+    def test_fork_source_allows_non_parent_upstream_ancestor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+
+            def commit(message):
+                subprocess.run(["git", "-C", str(root), "-c", "user.name=Test",
+                                "-c", "user.email=test@example.invalid", "commit",
+                                "--allow-empty", "--quiet", "-m", message], check=True)
+                return HELPER.run_git(root, "rev-parse", "HEAD")
+
+            base = commit("upstream base")
+            commit("first fork fix")
+            tip = commit("second fork fix")
+            pins = copy.deepcopy(PINS)
+            pins["upstream_commit"] = base
+            pins["fork_commit"] = tip
+            pins["fork_tree"] = HELPER.run_git(root, "rev-parse", "HEAD^{tree}")
+            HELPER.verify_airbender_source(root, pins)
+
+            subprocess.run(["git", "-C", str(root), "checkout", "--quiet", "-b",
+                            "unrelated", base], check=True)
+            pins["upstream_commit"] = tip
+            pins["fork_commit"] = commit("sibling fork")
+            with self.assertRaisesRegex(ValueError, "fork base changed"):
+                HELPER.verify_airbender_source(root, pins)
 
 
 class WrapperPinTests(unittest.TestCase):

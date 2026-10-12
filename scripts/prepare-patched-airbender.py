@@ -63,8 +63,8 @@ AIRBENDER_UPSTREAM = (
 )
 AIRBENDER_FORK = (
     "https://github.com/syscoin/zksync-airbender",
-    "e8f380777b7e90388c7323d6fd80a3b58c589f17",
-    "799e018339df40d0e456ba3fa0fc768ce0691853",
+    "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52",
+    "6693fdafa31c45ebf8acf26e9a1f3dfc3edcffdc",
 )
 WRAPPER_AIRBENDER_ROOTS = (
     "unified_reduced_machine_verifier", "blake2_with_compression_verifier",
@@ -691,8 +691,8 @@ def package_paths(upstream, expected):
 def verify_airbender_source(source, pins):
     require(run_git(source, "rev-parse", "HEAD") == pins["fork_commit"],
             "Airbender fork HEAD changed")
-    require(run_git(source, "rev-parse", "HEAD^") == pins["upstream_commit"],
-            "Airbender fork base changed")
+    require(run_git(source, "merge-base", "HEAD", pins["upstream_commit"])
+            == pins["upstream_commit"], "Airbender fork base changed")
     require(run_git(source, "rev-parse", "HEAD^{tree}") == pins["fork_tree"],
             "Airbender fork tree changed")
     require(not run_git(source, "status", "--porcelain", "--untracked-files=all"),

@@ -28,8 +28,8 @@ zksync_os_fri_prover = { path = "crates/zksync_os_fri_prover" }
 # zksync-airbender dependencies
 # SYSCOIN: Pin the reviewed degree-lift fork even for direct Cargo resolution.
 # The wrapper's rc.2 source is redirected to this same revision below.
-zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
-zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
+zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }
+zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }
 
 # zkos-wrapper dependencies
 # v0.6.0-rc.2 = rc.1 plus matter-labs/zkos-wrapper#77 (fold the unified layer into
@@ -103,10 +103,10 @@ overflow-checks = true
 # zkos-wrapper rc.2 still names the Matter Labs Airbender source. Redirect its
 # seven external roots to the same pinned fork so direct resolution stays unified.
 [patch."https://github.com/matter-labs/zksync-airbender"]
-unified_reduced_machine_verifier = { git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
-blake2_with_compression_verifier = { git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
-execution_utils = { git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
-setups = { git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
-field = { git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
-verifier_generator = { git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
-prover = { git = "https://github.com/syscoin/zksync-airbender", rev = "e8f380777b7e90388c7323d6fd80a3b58c589f17" }
+unified_reduced_machine_verifier = { git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }
+blake2_with_compression_verifier = { git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }
+execution_utils = { git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }
+setups = { git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }
+field = { git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }
+verifier_generator = { git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }
+prover = { git = "https://github.com/syscoin/zksync-airbender", rev = "553fdd31b9d7a0b354845c7b6b8e7c3d13337c52" }

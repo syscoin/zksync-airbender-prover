@@ -2,16 +2,17 @@
 
 Worker builds use `scripts/cargo-with-patched-airbender.sh LABEL -- cargo ... --locked`.
 Airbender comes from the immutable Syscoin fork commit
-`e8f380777b7e90388c7323d6fd80a3b58c589f17`. Its parent is the pinned Matter Labs
+`553fdd31b9d7a0b354845c7b6b8e7c3d13337c52`. It descends from the pinned Matter Labs
 `v0.6.0-rc.2` commit `03454c7a41053a4b88bb421e97fb9efe893a92f5`, and its tree is
-`799e018339df40d0e456ba3fa0fc768ce0691853`. It carries the former cumulative
-Airbender overlay with format-only changes. The fork owns the FRI degree lift, related native and
-recursive verifier changes, Security100 sizing, diagnostics, compact setup summaries,
-and streamed empty unified init/teardown markers. No Airbender patch is replayed by
-this repository.
+`6693fdafa31c45ebf8acf26e9a1f3dfc3edcffdc`. It carries the former cumulative
+Airbender overlay and subsequent randomized FRI degree-lift hardening. The fork owns the
+related native and recursive verifier changes, rebuilt Security100 recursion binaries,
+Security100 sizing, diagnostics, compact setup summaries, and streamed empty unified
+init/teardown markers. No Airbender patch is replayed by this repository.
 
 The build helper clones the fork into a fresh disposable source checkout, detaches the
-exact commit, and checks its parent, tree, and clean worktree before and after Cargo.
+exact commit, and checks its ancestry from the pinned upstream commit, tree, and clean
+worktree before and after Cargo.
 The current application declares the exact fork commit directly. Its canonical lock
 contains 46 fork packages, and seven Cargo redirects bind the wrapper's remaining rc.2
 references to the same commit. The helper replaces these Git redirects with path
@@ -63,5 +64,5 @@ patches, source package paths, and other build inputs.
 
 The existing bundled FRI setup summaries and SNARK commitment were generated before
 the FRI degree lift. Their tree identities do not match this fork and the loaders
-reject them. Fresh recursive guests, setup, verification key, deployed verifier, and
-end-to-end proof qualification remain required before real-proof acceptance.
+reject them. Fresh setup summaries, verification key, deployed verifier, and end-to-end proof
+qualification remain required before real-proof acceptance.
