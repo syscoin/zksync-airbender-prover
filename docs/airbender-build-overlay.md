@@ -32,13 +32,17 @@ use the prepared source workspace.
 The separate `zkos-wrapper` and common `zksync-crypto` sources also come from
 immutable Syscoin forks. The wrapper adds a private 64 KiB `OsRng` buffer around
 synchronous Bellman proof finalization. The common crypto fork is commit
-`720c1e165aee94d0df11bd26754b7387c2b8c944`, tree
-`16ab40313bd9c9158f557a38a4680cd84b073c51`, descending from Matter Labs commit
+`4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a`, tree
+`4fda70a408c7817474fe67fba46b38cfbe420e59`, descending from Matter Labs commit
 `bf2797e4ca13475bf797aa43e085389cdd6732f9`. It retains the reviewed native FRI
 query count, verifier-owned proof policy, degree lift, recursive/SNARK agreement,
-SHA-256, and row-accounting fixes, and hoists the shared `z * omega` product
-outside the FRI query loop. Compression column geometry and row allocation remain
-unchanged. `patches/zksync-crypto-fork-source.json` binds the common source identity;
+SHA-256, and row-accounting fixes. It hoists the shared `z * omega` product
+outside the FRI query loop and computes constrained weighted opening claims once
+per opening group. FRI folding shares the constrained coset factor across pairs,
+skips the constant first interpolation factor, and omits each group's unused final
+base-power square while preserving the coset inverse carried into the next group.
+Final-polynomial Horner evaluation starts from the highest coefficient. Compression
+column geometry and row allocation remain unchanged. `patches/zksync-crypto-fork-source.json` binds the common source identity;
 no common crypto byte patch is replayed. Both fork manifests bind exact upstream
 and fork commits and trees, ancestry, and the reviewed package versions. Preparation
 checks clean, exact source trees before and after Cargo. The FRI-only binary does
@@ -76,7 +80,7 @@ also retain the separate backend patch identities.
 
 The existing bundled FRI setup summaries and SNARK commitment were generated before
 the FRI degree lift. Their tree identities do not match the prepared forks and the
-loaders reject them. The common crypto hoist also changes the compression circuit
-while preserving its geometry. Fresh compression/SNARK setup, verification key,
+loaders reject them. The common crypto arithmetic optimizations also change the
+compression circuit while preserving its geometry. Fresh compression/SNARK setup, verification key,
 deployed verifier, and end-to-end proof qualification remain required before
 real-proof acceptance.

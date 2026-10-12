@@ -209,9 +209,9 @@ class ImageIdentityTests(unittest.TestCase):
         self.assertEqual(result["zksync_crypto"]["pins"]["fork_url"],
                          "https://github.com/syscoin/zksync-crypto.git")
         self.assertEqual(result["zksync_crypto"]["pins"]["fork_commit"],
-                         "720c1e165aee94d0df11bd26754b7387c2b8c944")
+                         "4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a")
         self.assertEqual(result["zksync_crypto"]["pins"]["fork_tree"],
-                         "16ab40313bd9c9158f557a38a4680cd84b073c51")
+                         "4fda70a408c7817474fe67fba46b38cfbe420e59")
         self.assertTrue({"patch_file", "patch_sha256", "changed_files", "patched_tree"}.isdisjoint(
             result["zksync_crypto"]["pins"]))
         cli_result = json.loads(self.cli("airbender-pins", str(manifest)))

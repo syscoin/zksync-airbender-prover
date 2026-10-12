@@ -89,8 +89,8 @@ CRYPTO_PACKAGES = dict.fromkeys((
 ), "0.32.10")
 CRYPTO_FORK = (
     "https://github.com/syscoin/zksync-crypto.git",
-    "720c1e165aee94d0df11bd26754b7387c2b8c944",
-    "16ab40313bd9c9158f557a38a4680cd84b073c51",
+    "4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a",
+    "4fda70a408c7817474fe67fba46b38cfbe420e59",
 )
 
 

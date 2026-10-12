@@ -17,8 +17,8 @@
     "zksync_pairing": "0.32.10",
     "zksync_solidity_vk_codegen": "0.32.10"
   },
-  "purpose": "Immutable common crypto fork: retain all reviewed native FRI query-count, verifier-owned proof-policy, degree-lift, recursive/SNARK-wrapper, SHA-256 and row-accounting fixes, and hoist the shared z*omega product outside the FRI-query loop. Compression column geometry and row allocation remain unchanged. Fresh compression and SNARK setup and full proof qualification are pending.",
+  "purpose": "Immutable common crypto fork: retain all reviewed native FRI query-count, verifier-owned proof-policy, degree-lift, recursive/SNARK-wrapper, SHA-256 and row-accounting fixes; hoist the shared z*omega product, constrain weighted opening claims once per opening group, share FRI folding coset factors, omit unused terminal base-power squares, and start final-polynomial Horner evaluation from its leading coefficient. Compression column geometry and row allocation remain unchanged. Fresh compression and SNARK setup and full proof qualification are pending.",
   "fork_url": "https://github.com/syscoin/zksync-crypto.git",
-  "fork_commit": "720c1e165aee94d0df11bd26754b7387c2b8c944",
-  "fork_tree": "16ab40313bd9c9158f557a38a4680cd84b073c51"
+  "fork_commit": "4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a",
+  "fork_tree": "4fda70a408c7817474fe67fba46b38cfbe420e59"
 }
