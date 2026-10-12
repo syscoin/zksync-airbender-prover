@@ -29,12 +29,22 @@ marker created by the preparer and rechecked after Cargo. The fork pin alone doe
 carry the separate wrapper and common-crypto verifier fixes, so proving binaries must
 use the prepared source workspace.
 
-The separate `zkos-wrapper` and common `zksync-crypto` overlays remain. Their patches
-include the recursive FRI verifier change and other reviewed fixes. The wrapper also
-adds a private 64 KiB `OsRng` buffer around synchronous Bellman proof finalization.
-Their manifests bind exact upstream commits and trees, patch hashes, changed-file
-preimages and postimages, and resulting trees. The FRI-only binary does not link the
-wrapper, but the source preparation checks the common proving graph in every role.
+The separate `zkos-wrapper` and common `zksync-crypto` sources also come from
+immutable Syscoin forks. The wrapper adds a private 64 KiB `OsRng` buffer around
+synchronous Bellman proof finalization. The common crypto fork is commit
+`720c1e165aee94d0df11bd26754b7387c2b8c944`, tree
+`16ab40313bd9c9158f557a38a4680cd84b073c51`, descending from Matter Labs commit
+`bf2797e4ca13475bf797aa43e085389cdd6732f9`. It retains the reviewed native FRI
+query count, verifier-owned proof policy, degree lift, recursive/SNARK agreement,
+SHA-256, and row-accounting fixes, and hoists the shared `z * omega` product
+outside the FRI query loop. Compression column geometry and row allocation remain
+unchanged. `patches/zksync-crypto-fork-source.json` binds the common source identity;
+no common crypto byte patch is replayed. Both fork manifests bind exact upstream
+and fork commits and trees, ancestry, and the reviewed package versions. Preparation
+checks clean, exact source trees before and after Cargo. The FRI-only binary does
+not link the wrapper, but source preparation checks the common proving graph in
+every role. Cargo path overrides continue to unify the selected application's
+upstream common crypto references with all eleven packages from this verified fork.
 
 FRI and explicit CPU SNARK builds use the common source preparation. The standalone
 FRI role is package-scoped and does not pull in the SNARK CUDA backend. CPU SNARK uses
@@ -49,6 +59,7 @@ Optional inputs:
 - `AIRBENDER_SOURCE_DIR`: an existing local Git clone containing the exact fork commit;
   it is cloned without modification.
 - `ZKOS_WRAPPER_SOURCE_DIR`: an existing exact wrapper Git clone.
+- `ZKSYNC_CRYPTO_SOURCE_DIR`: an existing exact common crypto Git clone.
 - `PROVER_SOURCE_DIR`: application source separate from wrapper tooling for release CI.
 - `AIRBENDER_BUILD_ATTESTATION`: a fresh absolute JSON path with an existing parent,
   written only after Cargo succeeds and inputs are rechecked.
@@ -59,10 +70,13 @@ not change the original checkout or Cargo's shared Git and registry sources. Eac
 runtime image includes `/usr/share/syscoin-prover/airbender-build-inputs.json`; each
 release archive includes its role's build record. The image or archive digest binds
 that record to the binary. The record and SBOM/provenance metadata identify the fork
-commit and tree, original lock source, selected lock derivation, wrapper and crypto
-patches, source package paths, and other build inputs.
+commit and tree, original lock source, selected lock derivation, wrapper and common
+crypto fork identities, source package paths, and other build inputs. GPU builds
+also retain the separate backend patch identities.
 
 The existing bundled FRI setup summaries and SNARK commitment were generated before
-the FRI degree lift. Their tree identities do not match this fork and the loaders
-reject them. Fresh setup summaries, verification key, deployed verifier, and end-to-end proof
-qualification remain required before real-proof acceptance.
+the FRI degree lift. Their tree identities do not match the prepared forks and the
+loaders reject them. The common crypto hoist also changes the compression circuit
+while preserving its geometry. Fresh compression/SNARK setup, verification key,
+deployed verifier, and end-to-end proof qualification remain required before
+real-proof acceptance.

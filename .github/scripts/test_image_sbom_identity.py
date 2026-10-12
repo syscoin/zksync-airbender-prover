@@ -189,7 +189,7 @@ class ImageIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "newer than"):
             identity.build_identity({**self.env, "BUILD_RUN_ATTEMPT": "3"})
 
-    def test_airbender_pins_bind_exact_manifest_patch_and_overlay(self):
+    def test_airbender_pins_bind_exact_fork_manifests_and_overlay(self):
         manifest = ROOT / "patches/airbender-fork-source.json"
         result = identity.airbender_build_pins(manifest)
         self.assertEqual(result["manifest_sha256"], hashlib.sha256(manifest.read_bytes()).hexdigest())
@@ -199,12 +199,21 @@ class ImageIdentityTests(unittest.TestCase):
                          hashlib.sha256(wrapper_manifest.read_bytes()).hexdigest())
         self.assertEqual(result["zkos_wrapper"]["pins"]["upstream_packages"],
                          {"circuit_mersenne_field": "0.1.0", "zkos-wrapper": "0.1.0"})
-        crypto_manifest = ROOT / "patches/zksync-crypto-native-fri-query-count.json"
+        crypto_manifest = ROOT / "patches/zksync-crypto-fork-source.json"
         self.assertEqual(result["zksync_crypto"]["manifest_sha256"],
                          hashlib.sha256(crypto_manifest.read_bytes()).hexdigest())
         self.assertEqual(result["zksync_crypto"]["pins"]["upstream_commit"],
                          "bf2797e4ca13475bf797aa43e085389cdd6732f9")
         self.assertEqual(len(result["zksync_crypto"]["pins"]["upstream_packages"]), 11)
+        self.assertEqual(result["zksync_crypto"]["pins"]["schema_version"], 2)
+        self.assertEqual(result["zksync_crypto"]["pins"]["fork_url"],
+                         "https://github.com/syscoin/zksync-crypto.git")
+        self.assertEqual(result["zksync_crypto"]["pins"]["fork_commit"],
+                         "720c1e165aee94d0df11bd26754b7387c2b8c944")
+        self.assertEqual(result["zksync_crypto"]["pins"]["fork_tree"],
+                         "16ab40313bd9c9158f557a38a4680cd84b073c51")
+        self.assertTrue({"patch_file", "patch_sha256", "changed_files", "patched_tree"}.isdisjoint(
+            result["zksync_crypto"]["pins"]))
         cli_result = json.loads(self.cli("airbender-pins", str(manifest)))
         self.assertEqual(cli_result, result)
         record = identity.image_record(self.context, identity.COMPONENTS[0],
@@ -287,21 +296,25 @@ class ImageIdentityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     identity.gpu_backend_build_pins(directory / "gpu32-memory.json", ROOT / "Cargo.lock")
 
-    def test_common_crypto_input_tampering_fails_before_sbom_evidence(self):
-        for filename in ("zksync-crypto-native-fri-query-count.patch",
-                         "zksync-crypto-native-fri-query-count.json"):
-            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+    def test_common_crypto_fork_tampering_fails_before_sbom_evidence(self):
+        changes = (
+            ("upstream_commit", "845905b2aae49215e3d4ad0b71998b4a6b5abebf"),
+            ("fork_url", "https://example.invalid/zksync-crypto.git"),
+            ("fork_commit", "f" * 40),
+            ("fork_tree", "f" * 40),
+            ("schema_version", 1),
+            ("patch_sha256", "f" * 64),
+        )
+        for field, value in changes:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 for original in (ROOT / "patches").iterdir():
                     if original.is_file():
                         shutil.copyfile(original, directory / original.name)
-                if filename.endswith(".patch"):
-                    (directory / filename).write_bytes(b"changed common crypto source input")
-                else:
-                    pins = json.loads((directory / filename).read_text())
-                    # The common bf2797 graph must never be attributed to the GPU 845 graph.
-                    pins["upstream_commit"] = "845905b2aae49215e3d4ad0b71998b4a6b5abebf"
-                    (directory / filename).write_text(json.dumps(pins))
+                manifest = directory / "zksync-crypto-fork-source.json"
+                pins = json.loads(manifest.read_text())
+                pins[field] = value
+                manifest.write_text(json.dumps(pins))
                 with self.assertRaises(ValueError):
                     identity.airbender_build_pins(directory / "airbender-fork-source.json")
 
@@ -366,7 +379,10 @@ class ImageIdentityTests(unittest.TestCase):
             self.assertIn("$airbender.zkos_wrapper.pins.fork_commit", workflow)
             self.assertIn("$airbender.zkos_wrapper.manifest_sha256", workflow)
             self.assertIn("$airbender.zksync_crypto.pins.upstream_commit", workflow)
-            self.assertIn("$airbender.zksync_crypto.pins.patch_sha256", workflow)
+            self.assertIn("$airbender.zksync_crypto.pins.fork_commit", workflow)
+            self.assertIn("/patches/zksync-crypto-fork-source.json", workflow)
+            self.assertNotIn("$airbender.zksync_crypto.pins.patch_sha256", workflow)
+            self.assertNotIn("zksync-crypto-native-fri-query-count", workflow)
             self.assertIn("$airbender.zksync_crypto.manifest_sha256", workflow)
         self.assertIn(".zkos_wrapper.inputs == $expected.zkos_wrapper",
                       (ROOT / ".github/workflows/release-bins.yml").read_text())
@@ -429,8 +445,12 @@ class ImageIdentityTests(unittest.TestCase):
         self.assertIn({"gitCommit": pins["zkos_wrapper"]["pins"]["fork_commit"]}, digests)
         self.assertIn({"sha256": pins["zkos_wrapper"]["manifest_sha256"]}, digests)
         self.assertIn({"gitCommit": pins["zksync_crypto"]["pins"]["upstream_commit"]}, digests)
-        for value in (pins["zksync_crypto"]["manifest_sha256"], pins["zksync_crypto"]["pins"]["patch_sha256"]):
-            self.assertIn({"sha256": value}, digests)
+        self.assertIn({"gitCommit": pins["zksync_crypto"]["pins"]["fork_commit"]}, digests)
+        self.assertIn({"sha256": pins["zksync_crypto"]["manifest_sha256"]}, digests)
+        crypto_material = next(item for item in definition["resolvedDependencies"]
+                               if item["uri"] == "git+" + pins["zksync_crypto"]["pins"]["fork_url"])
+        self.assertEqual(crypto_material["digest"],
+                         {"gitCommit": pins["zksync_crypto"]["pins"]["fork_commit"]})
         for key in ("canonical_lock_sha256", "overlay_lock_sha256"):
             self.assertIn({"sha256": pins["selected_lock"][key]}, digests)
         generated = next(item for item in definition["resolvedDependencies"]

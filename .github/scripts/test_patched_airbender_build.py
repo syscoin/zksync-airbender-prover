@@ -239,64 +239,36 @@ zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/matter-labs
             HELPER.audit_lock(modified, self.overlay, PINS)
 
 
-class CommonCryptoOverlayTests(unittest.TestCase):
+class CommonCryptoForkTests(unittest.TestCase):
     def fixture(self, temporary, pins=None):
-        directory = Path(temporary)
-        (directory / CRYPTO_PINS["patch_file"]).write_bytes(
-            (ROOT / "patches" / CRYPTO_PINS["patch_file"]).read_bytes())
-        manifest = directory / HELPER.CRYPTO_PIN_PATH.name
+        manifest = Path(temporary) / HELPER.CRYPTO_PIN_PATH.name
         manifest.write_text(json.dumps(pins or CRYPTO_PINS))
         return manifest
 
-    def test_exact_manifest_and_native_patch_scope(self):
+    def test_exact_manifest_and_no_byte_patch_inputs(self):
         self.assertEqual(HELPER.load_crypto_pins(), CRYPTO_PINS)
+        self.assertEqual(CRYPTO_PINS["schema_version"], 2)
         self.assertEqual(len(CRYPTO_PINS["upstream_packages"]), 11)
-        raw = (ROOT / "patches" / CRYPTO_PINS["patch_file"]).read_text()
-        sections = raw.split("diff --git ")[1:]
-        self.assertEqual(
-            {section.splitlines()[0].split()[1][2:] for section in sections},
-            set(CRYPTO_PINS["changed_files"]),
-        )
-        verifier = next(section for section in sections if section.startswith(
-            "a/crates/boojum/src/cs/implementations/verifier.rs "))
-        added = [line[1:].strip() for line in verifier.splitlines()
-                 if line.startswith("+") and not line.startswith("+++")]
-        self.assertEqual(added[:8], [
-            "use super::prover::ProofConfig;",
-            "/// `expected_proof_config` must come from verifier policy, independently of `proof`.",
-            "expected_proof_config: &ProofConfig,",
-            "if &proof.proof_config != expected_proof_config {",
-            'log!("Proof configuration differs from verifier expectation");',
-            "return false;",
-            "}",
-            "",
-        ])
-        self.assertIn(
-            "let lift_offset = ExtensionField::<F, 2, EXT>::from_coeff_in_base(",
-            added,
-        )
-        self.assertIn(
-            "simulated_ext_element.mul_assign(&lift);",
-            added,
-        )
-        for text in ("empty FRI query list must fail", "one missing FRI query must fail",
-                     "an extra FRI query must fail", "original proof must still verify"):
-            self.assertIn(text, raw)
+        self.assertEqual(tuple(CRYPTO_PINS[key] for key in ("fork_url", "fork_commit", "fork_tree")),
+                         HELPER.CRYPTO_FORK)
+        self.assertTrue({"patch_file", "patch_sha256", "changed_files", "patched_tree"}.isdisjoint(CRYPTO_PINS))
+        for suffix in ("json", "patch"):
+            self.assertFalse((ROOT / "patches" / ("zksync-crypto-native-fri-query-count." + suffix)).exists())
 
-    def test_manifest_unknown_origins_paths_fields_sizes_and_digests_rejected(self):
+    def test_manifest_unknown_origins_sources_fields_and_versions_rejected(self):
         edits = (
             lambda p: p.update(schema_version=True),
+            lambda p: p.update(schema_version=1),
             lambda p: p.update(upstream_url="https://example.invalid/crypto"),
             lambda p: p.update(upstream_commit="f" * 40),
             lambda p: p.update(upstream_tree="f" * 40),
             lambda p: p.update(upstream_lock_source=HELPER.CRYPTO_LOCK_SOURCE + "-changed"),
             lambda p: p["upstream_packages"].update(boojum="0.32.9"),
+            lambda p: p.update(fork_url="https://example.invalid/fork"),
+            lambda p: p.update(fork_commit="f" * 40),
+            lambda p: p.update(fork_tree="f" * 40),
             lambda p: p.update(patch_file="../escape.patch"),
-            lambda p: p.update(patch_sha256="0" * 64),
             lambda p: p.update(patched_tree="f" * 40),
-            lambda p: p["changed_files"].update({"../escape": {}}),
-            lambda p: p["changed_files"][next(iter(p["changed_files"]))].update(postimage_size=True),
-            lambda p: p["changed_files"][next(iter(p["changed_files"]))].update(preimage_sha256=None),
             lambda p: p.update(unknown="unreviewed"),
         )
         for edit in edits:
@@ -306,20 +278,15 @@ class CommonCryptoOverlayTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     HELPER.load_crypto_pins(self.fixture(temporary, pins))
 
-    def test_duplicate_keys_symlinks_and_changed_patch_rejected(self):
+    def test_duplicate_keys_and_symlinks_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self.fixture(temporary)
-            manifest.write_text('{"schema_version":1,"schema_version":1}')
+            manifest.write_text('{"schema_version":2,"schema_version":2}')
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 HELPER.load_crypto_pins(manifest)
             manifest.unlink()
             manifest.symlink_to(HELPER.CRYPTO_PIN_PATH)
             with self.assertRaises(ValueError):
-                HELPER.load_crypto_pins(manifest)
-        with tempfile.TemporaryDirectory() as temporary:
-            manifest = self.fixture(temporary)
-            (manifest.parent / CRYPTO_PINS["patch_file"]).write_bytes(b"changed")
-            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                 HELPER.load_crypto_pins(manifest)
 
     def test_lock_mixed_missing_duplicate_unknown_version_and_partial_graph_rejected(self):
@@ -345,14 +312,31 @@ class CommonCryptoOverlayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown common crypto"):
             HELPER.audit_lock(modified, overlay, PINS)
 
-    def test_prepare_clones_exact_origin_and_all_packages_without_touching_original(self):
+    def test_extra_fork_git_package_cannot_pass_as_an_unrelated_lock_input(self):
+        fork_source = ("git+" + CRYPTO_PINS["fork_url"] + "?rev=" + CRYPTO_PINS["fork_commit"]
+                       + "#" + CRYPTO_PINS["fork_commit"])
+        extra = {"name": "unexpected-common-fork", "version": "0.32.10", "source": fork_source}
+        canonical = copy.deepcopy(HELPER.read_toml(ROOT / "Cargo.lock"))
+        overlay = copy.deepcopy(HELPER.read_toml(ROOT / "patches/airbender.Cargo.lock"))
+        canonical["package"].append(extra.copy())
+        overlay["package"].append(extra.copy())
+        with self.assertRaisesRegex(ValueError, "mixed common crypto sources"):
+            HELPER.audit_lock(canonical, overlay, PINS)
+        with tempfile.TemporaryDirectory() as temporary:
+            lock = Path(temporary) / "Cargo.lock"
+            lock.write_text((ROOT / "Cargo.lock").read_text()
+                            + '\n[[package]]\nname = "unexpected-common-fork"\nversion = "0.32.10"\n'
+                            + "source = " + json.dumps(fork_source) + "\n")
+            original = lock.read_bytes()
+            with self.assertRaisesRegex(ValueError, "mixed common crypto sources"):
+                HELPER.selected_lock_overlay(lock, ROOT / "patches/airbender.Cargo.lock", PINS)
+            self.assertEqual(lock.read_bytes(), original)
+
+    def test_prepare_clones_exact_fork_and_all_packages_without_touching_original(self):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             build = Path(temporary)
             local = build / "original"
             local.mkdir()
-            git = stack.enter_context(patch.object(HELPER, "run_git", side_effect=lambda repo, *args:
-                "" if args == ("status", "--porcelain") else CRYPTO_PINS["upstream_tree"]))
-            hashes = stack.enter_context(patch.object(HELPER, "checked_hash"))
             verify = stack.enter_context(patch.object(HELPER, "verify_crypto"))
             paths = {name: "crates/" + name for name in HELPER.CRYPTO_PACKAGES}
             stack.enter_context(patch.object(HELPER, "package_paths", return_value=paths))
@@ -364,55 +348,68 @@ class CommonCryptoOverlayTests(unittest.TestCase):
             self.assertEqual(clone, str(local.resolve()))
             self.assertEqual(actual, paths)
             checkout.assert_called_once_with(
-                str(local.resolve()), root, CRYPTO_PINS["upstream_commit"], CRYPTO_PINS["upstream_tree"])
+                str(local.resolve()), root, CRYPTO_PINS["fork_commit"], CRYPTO_PINS["fork_tree"])
             run.assert_not_called()
             self.assertEqual(list(local.iterdir()), [])
             verify.assert_called_once_with(root, CRYPTO_PINS)
-            for relative, row in CRYPTO_PINS["changed_files"].items():
-                hashes.assert_any_call(root / relative, row["preimage_sha256"])
 
-    def test_crypto_reverification_rejects_head_tree_paths_untracked_and_late_edits(self):
-        pins = copy.deepcopy(CRYPTO_PINS)
+    def test_crypto_reverification_rejects_head_base_tree_and_dirty_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for relative, row in pins["changed_files"].items():
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(relative.encode())
-                row["postimage_sha256"] = HELPER.sha256(path)
-                row["postimage_size"] = path.stat().st_size
             values = {
-                ("rev-parse", "HEAD"): pins["upstream_commit"],
-                ("rev-parse", "HEAD^{tree}"): pins["upstream_tree"],
-                ("diff", "--name-only", "HEAD"): "\n".join(sorted(pins["changed_files"])),
-                ("ls-files", "--others", "--exclude-standard"): "",
-                ("diff", "--name-only"): "",
-                ("write-tree",): pins["patched_tree"],
+                ("rev-parse", "HEAD"): CRYPTO_PINS["fork_commit"],
+                ("merge-base", "HEAD", CRYPTO_PINS["upstream_commit"]): CRYPTO_PINS["upstream_commit"],
+                ("rev-parse", "HEAD^{tree}"): CRYPTO_PINS["fork_tree"],
+                ("status", "--porcelain", "--untracked-files=all"): "",
             }
             with patch.object(HELPER, "run_git", side_effect=lambda repo, *args: values[args]):
-                HELPER.verify_crypto(root, pins)
+                HELPER.verify_crypto(root, CRYPTO_PINS)
                 for args in values:
                     original = values[args]
                     values[args] = "unexpected"
                     with self.subTest(args=args), self.assertRaises(ValueError):
-                        HELPER.verify_crypto(root, pins)
+                        HELPER.verify_crypto(root, CRYPTO_PINS)
                     values[args] = original
-                row = pins["changed_files"][next(iter(pins["changed_files"]))]
-                row["postimage_size"] += 1
-                with self.assertRaisesRegex(ValueError, "postimage size mismatch"):
-                    HELPER.verify_crypto(root, pins)
-                row["postimage_size"] -= 1
-                relative = next(iter(pins["changed_files"]))
-                source = root / relative
-                source.unlink()
-                source.symlink_to(HELPER.CRYPTO_PIN_PATH)
-                with self.assertRaisesRegex(ValueError, "not a regular input"):
-                    HELPER.verify_crypto(root, pins)
-                source.unlink()
-                source.write_bytes(relative.encode())
-                (root / next(iter(pins["changed_files"]))).write_bytes(b"late edit")
-                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
-                    HELPER.verify_crypto(root, pins)
+
+    def test_real_fork_accepts_ancestry_and_rejects_staged_unstaged_and_untracked_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+
+            def commit(message):
+                subprocess.run(["git", "-C", str(root), "-c", "user.name=Test",
+                                "-c", "user.email=test@example.invalid", "commit",
+                                "--allow-empty", "--quiet", "-m", message], check=True)
+                return HELPER.run_git(root, "rev-parse", "HEAD")
+
+            source = root / "source.rs"
+            source.write_text("baseline")
+            HELPER.run_git(root, "add", "source.rs")
+            base = commit("upstream baseline")
+            source.write_text("fork")
+            HELPER.run_git(root, "add", "source.rs")
+            fork = commit("reviewed crypto fork")
+            pins = {**CRYPTO_PINS, "upstream_commit": base, "fork_commit": fork,
+                    "fork_tree": HELPER.run_git(root, "rev-parse", "HEAD^{tree}")}
+            HELPER.verify_crypto(root, pins)
+            source.write_text("late edit")
+            with self.assertRaisesRegex(ValueError, "fork source changed"):
+                HELPER.verify_crypto(root, pins)
+            HELPER.run_git(root, "add", "source.rs")
+            with self.assertRaisesRegex(ValueError, "fork source changed"):
+                HELPER.verify_crypto(root, pins)
+            HELPER.run_git(root, "restore", "--staged", "--worktree", "source.rs")
+            untracked = root / "new.rs"
+            untracked.write_text("unreviewed")
+            with self.assertRaisesRegex(ValueError, "fork source changed"):
+                HELPER.verify_crypto(root, pins)
+            untracked.unlink()
+            HELPER.run_git(root, "checkout", "--quiet", "-b", "sibling", base)
+            pins["fork_commit"] = commit("sibling")
+            pins["fork_tree"] = HELPER.run_git(root, "rev-parse", "HEAD^{tree}")
+            pins["upstream_commit"] = fork
+            with self.assertRaisesRegex(ValueError, "fork base changed"):
+                HELPER.verify_crypto(root, pins)
 
     def test_pure_metadata_never_invokes_external_commands(self):
         with patch.object(HELPER.subprocess, "run") as run, patch.object(HELPER.subprocess, "check_output") as output:
@@ -960,15 +957,15 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
             self.assertEqual(record["zkos_wrapper"]["source"]["fork_tree"], HELPER.WRAPPER_FORK[2])
             self.assertEqual(set(record["zkos_wrapper"]["package_paths"]), set(HELPER.WRAPPER_PACKAGES))
             self.assertEqual(record["zksync_crypto"]["inputs"], HELPER.crypto_pins_metadata())
-            self.assertEqual(record["zksync_crypto"]["source"]["patched_tree"], HELPER.CRYPTO_PATCHED_TREE)
+            self.assertEqual(record["zksync_crypto"]["source"]["fork_tree"], HELPER.CRYPTO_FORK[2])
             self.assertEqual(set(record["zksync_crypto"]["package_paths"]), set(HELPER.CRYPTO_PACKAGES))
             relative = "patches/zkos-wrapper-fork-source.json"
             self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             relative = "scripts/pinned_source_checkout.py"
             self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
-            for suffix in ("json", "patch"):
-                relative = "patches/zksync-crypto-native-fri-query-count." + suffix
-                self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+            relative = "patches/zksync-crypto-fork-source.json"
+            self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+            self.assertEqual(record["zksync_crypto"]["source"]["fork_commit"], HELPER.CRYPTO_FORK[1])
             self.assertEqual(record, json.loads((build / "build-result.json").read_text()))
             self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(),
                              (ROOT / "Cargo.lock").read_bytes().replace(
