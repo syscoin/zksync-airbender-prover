@@ -48,6 +48,36 @@ hash-bound inputs and scoped claim/result URLs. Every completed result is durabl
 native submission or external service handoff. A transport receipt is not proof
 verification or service credit.
 
+## Pinned source bootstrap
+
+For a custom rental bootstrap, use the repository-owned checkout entrypoint for
+each reviewed source identity, not an unrestricted full-history `git clone`:
+
+```sh
+python3 scripts/pinned_source_checkout.py \
+  https://github.com/syscoin/zksync-os-server.git \
+  "$REVIEWED_SERVER_COMMIT" "$REVIEWED_SERVER_TREE" \
+  /absolute/fresh/rental-sources/zksync-os-server
+```
+
+Supply independently reviewed full commit and tree identities; do not use a branch
+name or infer expected values from a fetched checkout. Repeat the same entrypoint
+for the selected Prover, Airbender and Wrapper sources. The destination must be
+fresh, absolute, and have an existing parent. An occupied or failed destination
+is retained for reconciliation, never automatically replaced or reused.
+
+The helper requires Git protocol-v2 blob filtering, fetches only the pinned
+commit's ancestry without historical blobs, and materializes its exact tree.
+History remains available for the existing fork/base ancestry checks. Public
+HTTPS origins need no credentials; existing local Git caches are also supported
+without editing their refs, configuration or worktree. A local cache must already
+contain every object in the pinned tree; incomplete caches are refused before
+the destination is created, without hydrating the cache from its remote. Missing
+historical blobs do not prevent reuse of a fully materialized pinned tree. The ordinary CPU/GPU
+preparation helpers use this same checkout path before their unchanged pin,
+patch, graph and source-tree validation. This does not install CUDA, build a
+prover, rent a host, select a network or run a proof.
+
 ## Runtime and configuration
 
 Use Python 3.10+ on Unix with durable local storage. The native one-job/pool tools

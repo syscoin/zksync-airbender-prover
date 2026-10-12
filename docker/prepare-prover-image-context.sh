@@ -32,6 +32,7 @@ readonly tooling_files=(
     scripts/cargo-with-patched-airbender.sh
     scripts/prepare-patched-airbender.py
     scripts/prepare-patched-gpu-backends.py
+    scripts/pinned_source_checkout.py
     patches/airbender-fork-source.json
     patches/airbender.Cargo.lock
     patches/zkos-wrapper-fork-source.json
@@ -82,6 +83,7 @@ readonly tooling_executables=(
     scripts/cargo-with-patched-airbender.sh
     scripts/prepare-patched-airbender.py
     scripts/prepare-patched-gpu-backends.py
+    scripts/pinned_source_checkout.py
     docker/zksync-airbender-prover/entrypoint.sh
     docker/zksync-os-prover-snark/entrypoint.sh
 )

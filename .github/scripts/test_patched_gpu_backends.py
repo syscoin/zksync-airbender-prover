@@ -193,14 +193,14 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
                     Path(command[command.index("--manifest-path") + 1]).parent.joinpath(
                         BASE.PREPARED_SOURCE_MARKER).write_text("changed after Cargo\n")
                 return unittest.mock.Mock(returncode=cargo_exit_code)
-            self.assertEqual(command[:2], ["git", "clone"])
-            return unittest.mock.Mock(returncode=0)
+            self.fail(f"unexpected external command: {command}")
 
         with ExitStack() as stack:
             stack.enter_context(patch.dict(HELPER.os.environ, {
                 "PROVER_SOURCE_DIR": str(source), "BELLMAN_CUDA_DIR": str(source / "native"),
                 "AIRBENDER_BUILD_ATTESTATION": str(attestation),
             }, clear=True))
+            checkout = stack.enter_context(patch.object(BASE, "checkout_pinned_source"))
             for target, name, kwargs in (
                 (HELPER, "base_helper", {"return_value": BASE}),
                 (BASE, "checked_hash", {"side_effect": check_local_or_external}),
@@ -228,6 +228,8 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
                 self.assertEqual(HELPER.main(command), cargo_exit_code)
         builds = list((source / "target/patched-gpu-backends").iterdir())
         self.assertEqual(len(builds), 1)
+        checkout.assert_called_once_with(
+            AIR["fork_url"], builds[0] / "airbender", AIR["fork_commit"], AIR["fork_tree"])
         return attestation, builds[0], events
 
     def test_success_records_wrapper_closure_and_reverifies_after_cargo(self):
@@ -245,6 +247,8 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
             self.assertEqual(record["prepared_source_marker_sha256"],
                              BASE.sha256(build / "prover" / BASE.PREPARED_SOURCE_MARKER))
             relative = "patches/zkos-wrapper-fork-source.json"
+            self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+            relative = "scripts/pinned_source_checkout.py"
             self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             for suffix in ("json", "patch"):
                 relative = "patches/zksync-crypto-native-fri-query-count." + suffix

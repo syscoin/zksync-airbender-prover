@@ -14,6 +14,7 @@ snapshots and build-inputs.json records remain under target/patched-airbender/.
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -31,6 +32,11 @@ except ImportError:  # Ubuntu 22.04: installed by apt, never fetched with pip.
 
 
 TOOLING_ROOT = Path(__file__).resolve().parents[1]
+CHECKOUT_HELPER_PATH = TOOLING_ROOT / "scripts/pinned_source_checkout.py"
+_checkout_spec = importlib.util.spec_from_file_location("pinned_source_checkout", CHECKOUT_HELPER_PATH)
+_checkout_helper = importlib.util.module_from_spec(_checkout_spec)
+_checkout_spec.loader.exec_module(_checkout_helper)
+checkout_pinned_source = _checkout_helper.checkout_pinned_source
 PIN_PATH = TOOLING_ROOT / "patches/airbender-fork-source.json"
 WRAPPER_PIN_PATH = TOOLING_ROOT / "patches/zkos-wrapper-fork-source.json"
 CRYPTO_PIN_PATH = TOOLING_ROOT / "patches/zksync-crypto-native-fri-query-count.json"
@@ -714,9 +720,7 @@ def prepare_wrapper(build, pins):
     if "ZKOS_WRAPPER_SOURCE_DIR" in os.environ:
         clone_source = str(Path(clone_source).resolve(strict=True))
         require(Path(clone_source).is_dir(), "ZKOS_WRAPPER_SOURCE_DIR must be a Git directory")
-    subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
-                    clone_source, str(upstream)], check=True)
-    run_git(upstream, "checkout", "--quiet", "--detach", pins["fork_commit"])
+    checkout_pinned_source(clone_source, upstream, pins["fork_commit"], pins["fork_tree"])
     verify_wrapper(upstream, pins)
     paths = package_paths(upstream, pins["upstream_packages"])
     return upstream, clone_source, paths
@@ -748,9 +752,7 @@ def prepare_crypto(build, pins):
     if "ZKSYNC_CRYPTO_SOURCE_DIR" in os.environ:
         clone_source = str(Path(clone_source).resolve(strict=True))
         require(Path(clone_source).is_dir(), "ZKSYNC_CRYPTO_SOURCE_DIR must be a Git directory")
-    subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
-                    clone_source, str(upstream)], check=True)
-    run_git(upstream, "checkout", "--quiet", "--detach", pins["upstream_commit"])
+    checkout_pinned_source(clone_source, upstream, pins["upstream_commit"], pins["upstream_tree"])
     require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"]
             and not run_git(upstream, "status", "--porcelain"),
             "dirty/wrong common crypto source baseline")
@@ -815,9 +817,7 @@ def main(argv):
     if "AIRBENDER_SOURCE_DIR" in os.environ:
         clone_source = str(Path(clone_source).resolve(strict=True))
         require(Path(clone_source).is_dir(), "AIRBENDER_SOURCE_DIR must be a Git directory")
-    subprocess.run(["git", "clone", "--quiet", "--no-checkout", "--no-hardlinks",
-                    clone_source, str(upstream)], check=True)
-    run_git(upstream, "checkout", "--quiet", "--detach", pins["fork_commit"])
+    checkout_pinned_source(clone_source, upstream, pins["fork_commit"], pins["fork_tree"])
     verify_airbender_source(upstream, pins)
     paths = package_paths(upstream, expected)
     wrapper, wrapper_clone_source, wrapper_paths = prepare_wrapper(build, wrapper_pins)
@@ -849,6 +849,7 @@ def main(argv):
         "tooling_sha256": {str(path.relative_to(TOOLING_ROOT)): sha256(path) for path in
                            (PIN_PATH, overlay, WRAPPER_PIN_PATH, CRYPTO_PIN_PATH,
                             CRYPTO_PIN_PATH.parent / crypto_pins["patch_file"], Path(__file__).resolve(),
+                            CHECKOUT_HELPER_PATH,
                             TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")},
         "application_source": str(source), "application_inputs_sha256": source_hashes,
         "workspace": str(workspace), "airbender_clone_source": clone_source,

@@ -108,7 +108,8 @@ def authenticate(record, expected_label):
         BASE.PIN_PATH.parent / air["overlay_lock_file"], BASE.WRAPPER_PIN_PATH,
         BASE.CRYPTO_PIN_PATH,
         BASE.CRYPTO_PIN_PATH.parent / crypto["patch_file"],
-        ROOT / "scripts/prepare-patched-airbender.py", ROOT / "scripts/cargo-with-patched-airbender.sh")}
+        ROOT / "scripts/prepare-patched-airbender.py", ROOT / "scripts/cargo-with-patched-airbender.sh",
+        ROOT / "scripts/pinned_source_checkout.py")}
     BASE.require(set(record["tooling_sha256"]) == tooling, "incomplete attested tooling")
     for relative, digest in record["tooling_sha256"].items():
         BASE.checked_hash(ROOT / relative_path(relative), digest)
