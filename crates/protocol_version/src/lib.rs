@@ -83,10 +83,10 @@ struct BinMd5Sum(&'static str);
 // SYSCOIN: Keep the zero sentinel rejection even after binding this isolated candidate
 // to the reproducible guest and its successfully generated Security100 verification key.
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const SYSCOIN_VK_HASH: &str = "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90";
+const SYSCOIN_VK_HASH: &str = "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144";
 const SYSCOIN_APP_MD5: &str = "1bc285f1bbde995134d483c4e75ee204";
 const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
-    0x08e47e45, 0x31d0dc34, 0x09c5ae1d, 0xb30b45bf, 0xec4b6189, 0x3c8444f4, 0x5f80e5c2, 0x54d5bd94,
+    0xff43db65, 0x64b43491, 0xd6c25a61, 0x3270e780, 0x2a4fca2b, 0xc67ad621, 0xe5cb08dd, 0x57d22975,
 ]);
 
 /// SYSCOIN: The sole canonical lane is protocol V32, Execution V7, Proving V8.
@@ -221,13 +221,24 @@ mod tests {
         assert_eq!(versions.vk_hashes(), vec![SYSCOIN_VK_HASH.to_owned()]);
         assert_eq!(
             SYSCOIN_VK_HASH,
-            "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90"
+            "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144"
         );
         assert_eq!(
             versions.program_commitment_for(SYSCOIN_VK_HASH),
             Some(SYSCOIN_PROGRAM_COMMITMENT)
         );
         assert!(!versions.contains(ZERO_VK_HASH));
+        for historical in [
+            "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90",
+            "0x229a4a5a7715fb19f8a5940e42d9cd53bb85f040bcf0f71c76612450fb8235b1",
+        ] {
+            assert!(!versions.contains(historical));
+            assert_eq!(versions.program_commitment_for(historical), None);
+        }
+        assert!(!versions.supports_program(&ProgramCommitment([
+            0x08e47e45, 0x31d0dc34, 0x09c5ae1d, 0xb30b45bf, 0xec4b6189, 0x3c8444f4,
+            0x5f80e5c2, 0x54d5bd94,
+        ])));
         assert!(!versions
             .contains("0xd5bc91a7af04425e93a92ad4e29f4f9ab62210087b5dea105d6bb579f1218139"));
         assert!(!versions.supports_program(&ProgramCommitment([
@@ -269,8 +280,8 @@ mod tests {
         assert_eq!(
             version.program_commitment.0,
             [
-                149192261, 835771444, 163950109, 3003860415, 3964363145, 1015301364, 1602282946,
-                1423293844,
+                4282637157, 1689531537, 3603061345, 846260096, 709872171, 3329938977, 3855288541,
+                1473390965,
             ]
         );
     }

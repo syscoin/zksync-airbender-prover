@@ -8,11 +8,11 @@
   "check_aux_params": true,
   "commitment_algorithm": "base-unrolled-unified-v1",
   "airbender_revision": "03454c7a41053a4b88bb421e97fb9efe893a92f5",
-  "wrapper_circuit_revision": "585595f145cb53a09a130706ca36f80ddcac3961",
-  "airbender_patched_tree": "98a3e82a726bca322340ec675263a4533857250a",
-  "wrapper_circuit_patched_tree": "b2697abcd4038e2c107917f4fd03f9832fa8c435",
-  "vk_hash": "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90",
-  "program_commitment": "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94",
+  "wrapper_circuit_revision": "816a3598c60fac37d02cf1dcd1bc48b2e2c75de1",
+  "airbender_patched_tree": "a41a4a18eeb102b405bcb63ad7ca85e9b6b13213",
+  "wrapper_circuit_patched_tree": "a1e9a551b9588b1dfab5c5088554fc69770c0e85",
+  "vk_hash": "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144",
+  "program_commitment": "0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975",
   "app": {
     "bin": {
       "size_bytes": 1329732,
@@ -25,42 +25,42 @@
   },
   "recursion_unrolled": {
     "bin": {
-      "size_bytes": 2314544,
-      "sha256": "1ee4c49901ffb1fdce540e778c7224b8c78718bc1a26788cd9876477a1b86a12"
+      "size_bytes": 2319668,
+      "sha256": "320fb4b3c46a6991b0059449c6744e0a935d276b14126ce15e5e89b7fae9f150"
     },
     "text": {
-      "size_bytes": 2274080,
-      "sha256": "9fbd823842541150daa1837ad4cad1a06e43793acfe02567b3594c50e090a17a"
+      "size_bytes": 2279204,
+      "sha256": "ec0ba1a617756348a745988027083141ee99022e4a8a5cf5778dd65ccbc9467a"
     }
   },
   "recursion_unified": {
     "bin": {
-      "size_bytes": 1273824,
-      "sha256": "8fd324daf3e4bb1ebe0452ecb3897b0d222e28b44969db362a2a16c7ea23fdd1"
+      "size_bytes": 1277440,
+      "sha256": "43985fe291efaf5f524ec4880900602d9ab0d51ebd87ad55c03e0f1aaaa0b086"
     },
     "text": {
-      "size_bytes": 1241932,
-      "sha256": "ff4477bbf731084207f46b847c76366628f3fc912f11f6b3374ae3e0e5884ef1"
+      "size_bytes": 1245552,
+      "sha256": "0c9e041574e579bb6503c6a976da639cf8dbb6e04d3d95f50d5d188ac1ac2e0b"
     }
   },
   "end_params": [
-    3172695763,
-    3196237043,
-    2833869376,
-    2972964775,
-    4030234005,
-    1813126596,
-    2687332117,
-    3052592912
+    2573324043,
+    1880334364,
+    1011603262,
+    959504562,
+    3515305074,
+    2676167601,
+    1565532066,
+    2615493531
   ],
   "aux_params": [
-    149192261,
-    835771444,
-    163950109,
-    3003860415,
-    3964363145,
-    1015301364,
-    1602282946,
-    1423293844
+    4282637157,
+    1689531537,
+    3603061345,
+    846260096,
+    709872171,
+    3329938977,
+    3855288541,
+    1473390965
   ]
 }

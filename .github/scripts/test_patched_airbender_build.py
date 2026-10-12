@@ -457,7 +457,7 @@ class AirbenderPinTests(unittest.TestCase):
             run.assert_not_called()
             output.assert_not_called()
 
-    def test_historical_fri_artifact_is_stale_against_lifted_source(self):
+    def test_current_fri_artifact_matches_lifted_source(self):
         artifact_path = ROOT / "crates/zksync_os_fri_prover/artifacts/syscoin-v32-security100-fri-setups.json"
         artifact = HELPER.json_document(artifact_path)
         metadata, summaries = artifact["metadata"], artifact["summaries"]
@@ -467,7 +467,7 @@ class AirbenderPinTests(unittest.TestCase):
         lock = HELPER.read_toml(ROOT / "Cargo.lock")
         revision = PINS["upstream_commit"]
         self.assertEqual(metadata["airbender_revision"], revision)
-        self.assertNotEqual(metadata["airbender_patched_tree"], PINS["fork_tree"])
+        self.assertEqual(metadata["airbender_patched_tree"], PINS["fork_tree"])
         self.assertIn(f'const AIRBENDER_REVISION: &str = "{revision}";', loader)
         self.assertIn('const BUNDLED_ARTIFACT_SHA256: &str =\n    "'
                       + HELPER.sha256(artifact_path) + '";', loader)
@@ -491,7 +491,7 @@ class AirbenderPinTests(unittest.TestCase):
         self.assertIn("target: ProofTarget::RecursionUnified", integration)
         self.assertIn("ProgramProver::new_with_setup_summaries_and_program_bytes(", integration)
         # The base revision still names the rc.2 lineage. The tree names the
-        # actual fork source, so these older summaries remain unqualified.
+        # actual fork source. Matching source identities is not proof qualification.
         for section, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
             self.assertEqual(metadata["app"][section]["sha256"], HELPER.sha256(ROOT / relative))
             self.assertEqual(metadata["app"][section]["size_bytes"], (ROOT / relative).stat().st_size)
@@ -520,7 +520,8 @@ class AirbenderPinTests(unittest.TestCase):
         loader = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
         self.assertIn("ci-test -- cargo test --locked --no-default-features", workflow)
         self.assertNotIn('cargo test --manifest-path "${airbender}/Cargo.toml"', workflow)
-        for test in ("stale_repository_artifact_is_rejected_after_source_lift",
+        for test in ("current_bundled_artifact_loads_and_binds_all_release_inputs",
+                     "historical_source_key_and_program_metadata_fail_closed",
                      "artifact_corruption_truncation_and_unknown_fields_fail_closed",
                      "every_metadata_field_is_release_pinned",
                      "both_sections_of_every_input_are_hash_and_length_bound",
@@ -627,16 +628,16 @@ class WrapperPinTests(unittest.TestCase):
             run.assert_not_called()
             output.assert_not_called()
 
-    def test_bundled_commitment_remains_stale_against_wrapper_fork(self):
+    def test_bundled_commitment_matches_the_pinned_wrapper_fork(self):
         artifact = HELPER.json_document(
             ROOT / "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json")
         pins = HELPER.load_wrapper_pins()
         loader = (ROOT / "crates/zksync_os_snark_prover/src/binary_commitment.rs").read_text()
         lock = HELPER.read_toml(ROOT / "Cargo.lock")
         dependency = HELPER.read_toml(ROOT / "Cargo.toml")["workspace"]["dependencies"]["zkos_wrapper"]
-        self.assertEqual(artifact["wrapper_circuit_revision"], pins["upstream_commit"])
-        self.assertNotEqual(artifact["wrapper_circuit_revision"], pins["fork_commit"])
-        self.assertNotEqual(artifact["wrapper_circuit_patched_tree"], pins["fork_tree"])
+        self.assertNotEqual(artifact["wrapper_circuit_revision"], pins["upstream_commit"])
+        self.assertEqual(artifact["wrapper_circuit_revision"], pins["fork_commit"])
+        self.assertEqual(artifact["wrapper_circuit_patched_tree"], pins["fork_tree"])
         self.assertIn(f'const WRAPPER_CIRCUIT_REVISION: &str = "{pins["fork_commit"]}";', loader)
         self.assertIn(f'const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "{pins["fork_tree"]}";', loader)
         self.assertEqual(dependency["git"], pins["fork_url"])
@@ -649,6 +650,29 @@ class WrapperPinTests(unittest.TestCase):
         for field, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
             self.assertEqual(artifact["app"][field]["sha256"], HELPER.sha256(ROOT / relative))
             self.assertEqual(artifact["app"][field]["size_bytes"], (ROOT / relative).stat().st_size)
+
+    def test_current_bundles_share_the_registered_key_chain_and_setup_digest(self):
+        commitment = HELPER.json_document(
+            ROOT / "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json")
+        fri_path = ROOT / "crates/zksync_os_fri_prover/artifacts/syscoin-v32-security100-fri-setups.json"
+        fri = HELPER.json_document(fri_path)
+        for field in ("schema_version", "protocol_version", "execution_version", "proving_version",
+                      "security_bits", "airbender_revision", "airbender_patched_tree", "vk_hash",
+                      "program_commitment", "app", "recursion_unrolled", "recursion_unified"):
+            self.assertEqual(fri["metadata"][field], commitment[field], field)
+        words = [int(commitment["program_commitment"][offset:offset + 8], 16)
+                 for offset in range(2, 66, 8)]
+        self.assertEqual(commitment["aux_params"], words)
+        self.assertEqual(commitment["end_params"], fri["summaries"]["recursion_unified"]["end_params"])
+        self.assertEqual(fri["summaries"]["security_bits"], 100)
+        self.assertEqual(commitment["wrapper_domain_log"], 25)
+        self.assertIs(commitment["check_aux_params"], True)
+        fri_source = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
+        registry = (ROOT / "crates/protocol_version/src/lib.rs").read_text()
+        self.assertIn('"' + HELPER.sha256(fri_path) + '"', fri_source)
+        self.assertIn('const VK_HASH: &str = "' + commitment["vk_hash"] + '";', fri_source)
+        self.assertIn('const SYSCOIN_VK_HASH: &str = "' + commitment["vk_hash"] + '";', registry)
+        self.assertIn('"' + commitment["program_commitment"] + '"', fri_source)
 
     def test_unknown_invalid_or_missing_pin_fields_fail_closed(self):
         pins = HELPER.load_wrapper_pins()

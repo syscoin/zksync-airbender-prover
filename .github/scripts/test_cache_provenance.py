@@ -142,25 +142,25 @@ class CacheProvenanceTests(unittest.TestCase):
         self.assertIn('wrong_tree[field] = json!("0".repeat(40));', self.snark)
         self.assertIn("missing_tree.as_object_mut().unwrap().remove(field);", self.snark)
 
-    def test_old_commitment_artifact_is_stale_against_effective_source_trees(self):
+    def test_current_commitment_artifact_matches_effective_source_trees(self):
         artifact = self.commitment
         self.assertEqual(artifact["schema_version"], 2)
         for field, pins, pin_field in (
             ("airbender_revision", self.airbender, "upstream_commit"),
-            ("wrapper_circuit_revision", self.wrapper, "upstream_commit"),
+            ("wrapper_circuit_revision", self.wrapper, "fork_commit"),
         ):
             self.assertEqual(artifact[field], pins[pin_field])
         for field, pins, pin_field in (
             ("airbender_patched_tree", self.airbender, "fork_tree"),
             ("wrapper_circuit_patched_tree", self.wrapper, "fork_tree"),
         ):
-            self.assertNotEqual(artifact[field], pins[pin_field])
+            self.assertEqual(artifact[field], pins[pin_field])
         self.assertIn(
-            "fn stale_repository_artifact_is_rejected_after_source_lift()",
+            "fn current_bundled_artifact_loads_and_binds_all_release_inputs()",
             self.fri,
         )
         self.assertIn(
-            "fn stale_repository_commitment_is_rejected_after_source_lift()",
+            "fn current_bundled_commitment_loads_and_matches_the_registered_candidate()",
             self.snark,
         )
 
@@ -191,8 +191,8 @@ class CacheProvenanceTests(unittest.TestCase):
         for source in (self.fri, self.snark):
             self.assertEqual(words_constant(source, "UNIFIED_END_PARAMS"), artifact["end_params"])
 
-    def test_retained_guest_identities_require_regeneration(self):
-        self.assertNotEqual(
+    def test_current_guest_identities_are_bound_to_the_regenerated_bundle(self):
+        self.assertEqual(
             self.commitment["airbender_patched_tree"], self.airbender["fork_tree"]
         )
         for identity in ("recursion_unrolled", "recursion_unified"):

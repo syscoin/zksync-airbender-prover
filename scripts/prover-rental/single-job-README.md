@@ -126,8 +126,10 @@ SHA-256 hashes of the **actual** guest `.bin`/`.text`, standalone native worker,
 and GPU compact CRS for SNARK. FRI uses `crs_sha256: null`. These are immutable
 image inputs, not runtime fields a rental may choose. Both build-time and startup
 checks hash those files. The native workers additionally enforce their compiled
-app/program/VK constants. The compiled V8 candidate app-bound VK is
-`0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90`,
+app/program/VK constants. The accepted optimized V8 candidate app-bound VK is
+`0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144`,
+with program commitment
+`0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975`,
 bound to the reviewed guest tree
 `6935489bdbc7b1ed31e608677d1b2418b10691b5`; see the
 [registered proving identity](../../crates/protocol_version/src/lib.rs)
@@ -135,8 +137,29 @@ and the [historical source release](https://github.com/syscoin/zksync-os-server/
 for the previous key. That historical qualification does not validate the corrected
 circuits or new key; the current server and generated Era verifier must match this identity.
 Use stage binaries built for that identity and hash their actual image contents.
-The source release does not qualify a rental image, selected hardware, live
-service deployment, or the still-absent canonical local-chain fixture.
+
+This source candidate uses common crypto `4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a`
+and the original wrapper `816a3598c60fac37d02cf1dcd1bc48b2e2c75de1`, with the
+`2^16` compression row hint; measured padded compression rows are 65,536 rather
+than 131,072. The final SNARK domain remains `2^25`. One offline run per version
+with the same native two-batch inputs and GPU measured 321.3 s for the optimized
+pipeline versus 326.1 s previously (1.47% faster). Maximum host RSS was
+56,268,596 KiB versus 56,277,388 KiB, effectively unchanged. Both sampled GPU
+peaks were 32,095 MiB; this includes the arena reservation and does not establish
+minimum VRAM or an instantaneous peak. Historical PR #11 captures used four FRI
+inputs on a different host and are not directly comparable.
+
+All three optimized wrapper proofs passed stock CPU and independent CPU verification.
+Independent CPU key generation exited `0` in 761.95 s with maximum RSS
+90,359,952 KiB, and all three CPU/GPU keys matched byte-for-byte. The actual optimized
+proof passed the normal-profile local EVM verifier; both changed-public-input and
+valid-field scalar-opening cases reverted (estimated verification gas 406,832).
+The complete normal EVM/EraVM 278-contract inventory check passed, with only PLONK and
+its embedding Gateway deployer changed. Normal locked CPU release-loader tests passed
+70 cases and five opening-precomputation tests passed separately. These offline results
+do not qualify a rental image, selected hardware,
+live service deployment, or the still-absent canonical local-chain fixture. No live
+deployment is established by this candidate.
 
 The base image must already contain `/usr/bin/zksync_os_fri_prover` or
 `/usr/bin/zksync_os_snark_prover`, `/multiblock_batch.bin`, and

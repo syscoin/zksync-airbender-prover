@@ -32,7 +32,7 @@ const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "a1e9a551b9588b1dfab5c5088554fc69770c
 // The unified-verifier half is pinned independently, just as the app-chain half is
 // pinned by protocol_version. Regenerate and review both when the circuit changes.
 const UNIFIED_END_PARAMS: [u32; 8] = [
-    3172695763, 3196237043, 2833869376, 2972964775, 4030234005, 1813126596, 2687332117, 3052592912,
+    2573324043, 1880334364, 1011603262, 959504562, 3515305074, 2676167601, 1565532066, 2615493531,
 ];
 
 /// How a cold wrapper obtains its app-bound circuit constants.
@@ -293,22 +293,41 @@ mod tests {
     }
 
     #[test]
-    fn stale_repository_commitment_is_rejected_after_source_lift() {
+    fn current_bundled_commitment_loads_and_matches_the_registered_candidate() {
         let (bin, text) = app_paths();
-        let error = load_bundled_commitment(&bin, &text)
-            .err()
-            .expect("stale wrapper source must reject bundled commitment");
-        assert!(error.to_string().contains("circuit revision mismatch"));
+        let commitment = load_bundled_commitment(&bin, &text).unwrap();
+        assert_eq!(commitment.end_params, UNIFIED_END_PARAMS);
+        assert_eq!(
+            SupportedProtocolVersions::default().program_commitment_for(&artifact().vk_hash),
+            Some(ProgramCommitment(commitment.aux_params))
+        );
+    }
+
+    #[test]
+    fn historical_final_keys_and_programs_are_not_supported() {
+        let versions = SupportedProtocolVersions::default();
+        for historical in [
+            "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90",
+            "0x229a4a5a7715fb19f8a5940e42d9cd53bb85f040bcf0f71c76612450fb8235b1",
+        ] {
+            assert!(!versions.contains(historical));
+            assert_eq!(versions.program_commitment_for(historical), None);
+            let mut value: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
+            value["vk_hash"] = json!(historical);
+            assert!(serde_json::from_value::<Artifact>(value)
+                .unwrap()
+                .validate_metadata(100)
+                .is_err());
+        }
+        assert!(!versions.supports_program(&ProgramCommitment([
+            0x08e47e45, 0x31d0dc34, 0x09c5ae1d, 0xb30b45bf, 0xec4b6189, 0x3c8444f4,
+            0x5f80e5c2, 0x54d5bd94,
+        ])));
     }
 
     #[test]
     fn every_metadata_field_is_checked() {
-        // Metadata-only mutation tests need a valid baseline, even though the
-        // checked-in artifact remains stale for release loading.
-        let mut baseline: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
-        baseline["wrapper_circuit_revision"] = json!(WRAPPER_CIRCUIT_REVISION);
-        baseline["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
-        baseline["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
+        let baseline: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
         let normalized: Artifact = serde_json::from_value(baseline.clone()).unwrap();
         normalized.validate_metadata(100).unwrap();
         for (field, wrong) in [
@@ -340,13 +359,7 @@ mod tests {
 
     #[test]
     fn old_schema_and_wrong_effective_source_trees_fail_closed() {
-        // Metadata-only fixtures do not qualify cached commitment words or guest
-        // bytes. The full bundle tests require regenerated release artifacts.
-        let mut canonical: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
-        canonical["schema_version"] = json!(2);
-        canonical["wrapper_circuit_revision"] = json!(WRAPPER_CIRCUIT_REVISION);
-        canonical["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
-        canonical["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
+        let canonical: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
         serde_json::from_value::<Artifact>(canonical.clone())
             .unwrap()
             .validate_metadata(100)
@@ -378,9 +391,6 @@ mod tests {
         for field in ["end_params", "aux_params"] {
             for index in 0..8 {
                 let mut value: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
-                value["wrapper_circuit_revision"] = json!(WRAPPER_CIRCUIT_REVISION);
-                value["airbender_patched_tree"] = json!(AIRBENDER_PATCHED_TREE);
-                value["wrapper_circuit_patched_tree"] = json!(WRAPPER_CIRCUIT_PATCHED_TREE);
                 let old = value[field][index].as_u64().unwrap();
                 value[field][index] = json!(old ^ 1);
                 let changed: Artifact = serde_json::from_value(value).unwrap();
@@ -395,10 +405,16 @@ mod tests {
     #[test]
     fn every_binary_length_and_digest_is_checked() {
         let (bin, text) = app_paths();
-        assert!(artifact().validate_recursion_binaries().is_err());
-        let mut current: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
-        current["recursion_unrolled"] = current_recursion_identity(RecursionLayer::Unrolled);
-        current["recursion_unified"] = current_recursion_identity(RecursionLayer::Unified);
+        artifact().validate_recursion_binaries().unwrap();
+        let current: Value = serde_json::from_str(BUNDLED_ARTIFACT).unwrap();
+        assert_eq!(
+            current["recursion_unrolled"],
+            current_recursion_identity(RecursionLayer::Unrolled)
+        );
+        assert_eq!(
+            current["recursion_unified"],
+            current_recursion_identity(RecursionLayer::Unified)
+        );
         let manifest: Artifact = serde_json::from_value(current.clone()).unwrap();
         manifest.app.bin.verify_file(&bin, "app binary").unwrap();
         manifest.app.text.verify_file(&text, "app text").unwrap();
@@ -493,7 +509,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a regenerated FRI, wrapper, and SNARK release commitment"]
     fn derived_comparison_checks_both_arrays() {
         let (bin, text) = app_paths();
         let mut derived = load_bundled_commitment(&bin, &text).unwrap();

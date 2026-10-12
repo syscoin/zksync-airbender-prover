@@ -993,7 +993,7 @@ mod tests {
 
     #[cfg(not(feature = "gpu"))]
     #[test]
-    fn bundled_policy_rejects_stale_commitment_across_all_cold_builds() {
+    fn bundled_policy_authenticates_current_commitment_across_all_cold_builds() {
         for (stage, phase_three) in [
             ("pre-lease", false),
             ("phase-one-two", false),
@@ -1001,14 +1001,49 @@ mod tests {
             ("next-job-rebuild", false),
         ] {
             let config = cold_policy_test_config(phase_three);
+            let expected = super::binary_commitment::load_bundled_commitment(
+                config.bin.as_deref().unwrap(),
+                config.text.as_deref().unwrap(),
+            )
+            .unwrap();
+            let carried_vk = config.compression_vk.as_ref().map(|vk| format!("{vk:?}"));
+            let mut wrapper = super::create_snark_wrapper_from_config_with_policy(
+                config,
+                super::BinaryCommitmentPolicy::Bundled,
+            )
+            .unwrap_or_else(|error| panic!("{stage}: {error:#}"));
+            let commitment = wrapper.resolved_binary_commitment().unwrap();
+            assert_eq!(commitment.end_params, expected.end_params, "{stage}");
+            assert_eq!(commitment.aux_params, expected.aux_params, "{stage}");
+            if let Some(carried_vk) = carried_vk {
+                assert_eq!(
+                    format!("{:?}", wrapper.compression_vk().unwrap()),
+                    carried_vk,
+                    "{stage}"
+                );
+            }
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn bundled_policy_rejects_swapped_app_sections_across_all_cold_builds() {
+        for (stage, phase_three) in [
+            ("pre-lease", false),
+            ("phase-one-two", false),
+            ("phase-three", true),
+            ("next-job-rebuild", false),
+        ] {
+            let mut config = cold_policy_test_config(phase_three);
+            std::mem::swap(&mut config.bin, &mut config.text);
             let error = super::create_snark_wrapper_from_config_with_policy(
                 config,
                 super::BinaryCommitmentPolicy::Bundled,
             )
             .err()
-            .expect("a stale bundled commitment must fail before wrapper construction");
+            .expect("swapped app sections must fail before wrapper construction");
             assert!(
-                format!("{error:#}").contains("bundled commitment circuit revision mismatch"),
+                format!("{error:#}").contains("bundled commitment app binary length mismatch"),
                 "{stage}: {error:#}"
             );
         }
@@ -1081,27 +1116,30 @@ mod tests {
         assert!(message.contains("not registered by any supported protocol version"));
     }
 
-    // The default worker must reject the stale circuit before claiming work.
+    // With authenticated current commitment inputs, the default worker must still
+    // reject a missing trusted setup before claiming work or deriving a setup.
     #[test]
-    fn validated_wrapper_source_rejects_stale_commitment_before_polling() {
+    fn validated_wrapper_source_rejects_missing_setup_before_polling() {
         let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let app_path = crate_dir.join("../../multiblock_batch.bin");
         let missing_setup = crate_dir.join("missing-trusted-setup-for-wrapper-source-test.key");
+        assert!(!missing_setup.exists(), "test setup path must stay absent");
         let error = match super::WrapperSource::new_validated(
             missing_setup.to_string_lossy().into_owned(),
             app_path,
             &SupportedProtocolVersions::default(),
         ) {
-            Ok(_) => panic!("stale commitment must fail before polling"),
+            Ok(_) => panic!("missing trusted setup must fail before polling"),
             Err(error) => error,
         };
         let message = format!("{error:#}");
         assert!(message.contains("initialize app-bound SNARK wrapper before queue polling"));
-        assert!(message.contains("bundled commitment circuit revision mismatch"));
+        assert!(message.contains("while attempting to read trusted setup metadata"));
+        assert!(message.contains("missing-trusted-setup-for-wrapper-source-test.key"));
     }
 
-    // CPU-cold workers bind all inputs before queue polling, so the missing-setup
-    // gate can be checked while the bundled commitment awaits regeneration.
+    // CPU-cold workers bind all inputs before queue polling, so a missing setup
+    // must fail at input capture before any setup derivation or queue claim.
     #[cfg(all(unix, not(feature = "gpu")))]
     #[test]
     fn cpu_cold_wrapper_source_rejects_missing_setup_before_polling() {

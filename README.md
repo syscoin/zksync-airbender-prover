@@ -284,6 +284,9 @@ including with `--binary-commitment-policy recompute`. Neither comparison establ
 optimal core count or a warm-proving speedup. Security100, zero knowledge, log-25, verification
 keys and proof formats are unchanged.
 
+The historical PR #11 comparison used four FRI inputs on a different host. Those timings
+are not directly comparable to the optimized two-batch candidate measurements below.
+
 ### Separate FRI and default GPU SNARK deployment
 
 <!-- SYSCOIN: Keep FRI residency separate from the server-leased combine/wrap worker. -->
@@ -338,8 +341,9 @@ requester. A worker asks for work when ready; the server does not broadcast the 
 every SNARK prover. In a decentralized pool this lease remains the single-work guarantee while
 multiple compatible workers may request jobs. The GPU worker combines its assigned FRI range
 and uses the GPU backend for the three wrapper proof phases; host witness generation, synthesis
-and verification still run. The offline 30 GiB result covers final phase 3 only, not this full
-service pipeline or a larger range.
+and verification still run. The historical offline 30 GiB result covers final phase 3 only.
+The optimized candidate measurements below cover an offline two-batch pipeline; larger ranges
+and normal service execution still require qualification.
 
 The default `docker/zksync-os-prover-snark/Dockerfile` target is `gpu`; `--target cpu` explicitly
 builds the CPU image. Release archives distinguish `zksync_os_snark_prover-...-gpu.tar.gz`
@@ -371,21 +375,58 @@ aggregation hashes every input and would change the settlement public output.
 The release names belong to different repositories: `v0.6.0-rc.2` is the pinned Airbender proving
 stack, while the checked-in Syscoin guest below is based on final `zksync-os v0.4.0`.
 
-This V32 source integration binds the unchanged Syscoin app MD5, newly measured Security100
-program commitment and app-bound VK
-`0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90`.
-The zero-VK rejection and all other production identity checks remain intact. Genuine
+The optimized V32 source candidate binds the unchanged Syscoin app MD5 and accepted Security100
+program commitment
+`0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975`
+to the newly derived app-bound VK
+`0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144`.
+Its common crypto source is `4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a` (tree
+`4fda70a408c7817474fe67fba46b38cfbe420e59`), with the original wrapper
+`816a3598c60fac37d02cf1dcd1bc48b2e2c75de1` (tree
+`a1e9a551b9588b1dfab5c5088554fc69770c0e85`). The wrapper restores the original
+`2^16` compression row hint: the measured padded compression rows fall from 131,072
+to 65,536, while the final SNARK domain remains `2^25`. Airbender stays pinned to
+`0d8c852954afcae1f160151a17fe80886f1755b0` (tree
+`a41a4a18eeb102b405bcb63ad7ca85e9b6b13213`). Security100, auxiliary-parameter checks,
+CRS verification and fresh zero-knowledge randomness remain required.
+
+The accepted offline comparison used the same native two-batch inputs and GPU, with one
+run per version. It measures this candidate snapshot, not sustained performance:
+
+| Measurement | Previous candidate | Optimized candidate |
+| --- | ---: | ---: |
+| Pipeline time | 326.1 s | 321.3 s |
+| Maximum host RSS | 56,277,388 KiB | 56,268,596 KiB |
+| Sampled GPU peak | 32,095 MiB | 32,095 MiB |
+
+The observed pipeline improvement is 1.47%; host RSS is effectively unchanged. Sampled
+GPU usage includes the arena reservation and does not establish minimum required VRAM
+or an instantaneous peak. All three optimized wrapper proofs passed both stock CPU
+verification and independent CPU verification. Independent CPU key generation exited
+successfully (`0`) in 761.95 s with maximum RSS 90,359,952 KiB; all three CPU keys are
+byte-identical to their GPU counterparts, including the final VK above.
+
+The generated verifier also accepted the actual optimized proof using the normal
+Solc 0.8.28 / Prague / 9,999,999-run build profile on isolated Anvil. Changed public
+input and changed valid-field scalar-opening cases both reverted; estimated verification
+gas was 406,832. The canonical EVM/EraVM build and complete 278-contract inventory check
+passed, changing only PLONK and its embedding Gateway deployer. Normal locked CPU
+release-loader tests passed 70 cases, and the five opening-precomputation regressions
+passed separately. These offline results do not activate the canonical fixture or
+establish a live deployment, sustained service run, or testnet cutover.
+The zero-VK rejection and all other production identity checks remain required. Genuine
 FRI and CPU SNARK service proofs, native verification and DA/commit/prove/execute receipts
 were observed for an earlier 11-batch mock frontier using the previous
 `0xc1ab3d6506620ad299672c2c2530e8732ac7bae55cdb9d8cf1fa12355b7388fe` key and old recursion chain.
 Those retained results validate only that historical source snapshot, not the corrected
-circuits, new key, newly built release commit or production deployment.
+circuits, optimized key, newly built release commit or production deployment.
 Sustained throughput/drain, migration, asset-bridge and recovery gates remain pending,
 and server/Era/prover identities must be rolled out together before a public cutover.
 
-The GPU32 memory optimization passed an offline final-wrapper experiment with the previous
+An earlier GPU32 memory optimization passed an offline final-wrapper experiment with the previous
 Security100 `c1ab3d65…b7388fe` VK: 303.82 seconds end to end, 29.91 GiB sampled GPU memory and 43.61 GiB sampled
-host RSS on an RTX5090. This source now integrates its pinned Bellman CUDA and crypto-GPU
+host RSS on an RTX5090. That historical capture is separate from the optimized candidate
+measurements above. This source integrates its pinned Bellman CUDA and crypto-GPU
 overlays into the default SNARK/combined build recipes. A new ordinary service build,
 full-range service acceptance, native/DA/settlement verification and sustained performance
 are still required; the retained offline binary/proof is not a service qualification or a
@@ -398,7 +439,7 @@ the reviewed Syscoin patch, source tree `6935489bdbc7b1ed31e608677d1b2418b10691b
 `1bc285f1bbde995134d483c4e75ee204`; its paired `.text` is 1,200,064 bytes with SHA-256
 `9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a`. Its Security100
 program commitment with the corrected recursive guests is
-`0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94`.
+`0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975`.
 All twelve canonical-recipe recursive guest `.bin`/`.text`/`.elf` outputs
 matched byte-for-byte between the Mac Docker build and an independent Linux
 Docker host; the old-source control also reproduced all eight checked
