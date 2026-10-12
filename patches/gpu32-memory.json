@@ -83,8 +83,8 @@
       },
       "crates/shivini/src/prover.rs": {
         "preimage_sha256": "ee66aa47cdc92035d653804e81f1b9b724b8f00b199349e0bc8ed332513b7078",
-        "postimage_sha256": "e63fc7f40acfdefe56191ff25ee2fbe084718768504a98a219c2e4c030e3e4c7",
-        "postimage_size": 73312
+        "postimage_sha256": "3d8bff1757fe756882e9bc2701a64d3fa6830e909c33a7d1261a5745f5ccf101",
+        "postimage_size": 74049
       },
       "crates/shivini/src/synthesis_utils.rs": {
         "preimage_sha256": "ba2dd148846115572ef1d4fe2b0457fae1240a6207de580deef42926544ba692",
@@ -92,9 +92,9 @@
         "postimage_size": 26395
       }
     },
-    "patched_tree": "f60ebbb7e33a6ee9a3bb297f5659fd308dda7990",
+    "patched_tree": "ca46bf0221a15de458f2d05fcac9c528c8142f06",
     "patch_file": "crypto-gpu32-memory.patch",
-    "patch_sha256": "48123ef2663ca64b17689d8373a0e1f7ba72d80479d21f27f89fcfb2b16bc29a",
+    "patch_sha256": "7973de2702a6ae80679d1e968aa58ae68901367f9b743551187e0979eb58ba40",
     "upstream_commit": "845905b2aae49215e3d4ad0b71998b4a6b5abebf",
     "upstream_edge_source": "git+https://github.com/matter-labs/zksync-crypto-gpu.git?branch=oh_for_wrapper",
     "upstream_lock_source": "git+https://github.com/matter-labs/zksync-crypto-gpu.git?branch=oh_for_wrapper#845905b2aae49215e3d4ad0b71998b4a6b5abebf",

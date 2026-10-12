@@ -320,20 +320,66 @@ index b8a855d..1a3ba80 100644
      }
  
 diff --git a/crates/shivini/src/prover.rs b/crates/shivini/src/prover.rs
-index 62f7a2d..12bfde3 100644
+index 62f7a2d..311ec3b 100644
 --- a/crates/shivini/src/prover.rs
 +++ b/crates/shivini/src/prover.rs
-@@ -1700,5 +1700,211 @@ fn compute_deep_quotiening_over_coset(
+@@ -735,9 +735,18 @@ fn gpu_prove_from_trace<
+     let mut challenges = svec!(h_challenges.len());
+     challenges.copy_from_slice(&h_challenges)?;
+ 
++    // All source oracle caps and opening claims are bound before this offset.
++    let h_lift = if is_dry_run()? {
++        [F::ZERO; 2]
++    } else {
++        transcript.get_multiple_challenges_fixed::<2>()
++    };
++    let h_lift = ExtensionField::<F, 2, EXT>::from_coeff_in_base(h_lift);
++
+     let mut deep_quotient = vec![];
+     let z = h_z.into();
+     let z_omega = h_z_omega.into();
++    let lift_offset = h_lift.into();
+     for coset_idx in 0..fri_lde_degree {
+         let trace_values = trace_cache.get_coset_evaluations(coset_idx)?;
+         let trace_polys = trace_values.as_polynomials();
+@@ -761,6 +770,7 @@ fn gpu_prove_from_trace<
+             &evaluations_at_zero,
+             &z,
+             &z_omega,
++            &lift_offset,
+             &public_input_opening_tuples,
+             &challenges,
+         )?;
+@@ -1619,6 +1629,7 @@ fn compute_deep_quotiening_over_coset(
+     evaluations_at_zero: &Option<SVec<EF>>,
+     z: &DExt,
+     z_omega: &DExt,
++    lift_offset: &DExt,
+     public_input_opening_tuples: &[(F, Vec<(usize, F)>)],
+     challenges: &SVec<EF>,
+ ) -> CudaResult<ComplexPoly<'static, CosetEvaluations>> {
+@@ -1678,6 +1689,12 @@ fn compute_deep_quotiening_over_coset(
+         &maybe_denom_at_zero,
+         &mut quotient,
+     )?;
++    // The arena may reuse these buffers for the extension lift. Wait for the
++    // quotient kernel to finish reading them before returning their blocks.
++    get_stream().synchronize()?;
++    drop(denom_at_z);
++    drop(denom_at_z_omega);
++    drop(maybe_denom_at_zero);
+ 
+     // public inputs
+     // One kernel per term isn't optimal, but it's easy, and should be negligible anyway
+@@ -1700,5 +1717,210 @@ fn compute_deep_quotiening_over_coset(
          quotient.add_assign(&quotient_for_row)?;
      }
  
-+    // Keep the lift nonzero at lookup's fixed opening point 0 so false
-+    // lookup openings retain their pole while degree-N sources exceed FRI's bound.
-+    let mut lift = roots;
-+    let mut two = F::ONE;
-+    two.double();
-+    lift.add_constant(&DF::from_host_value(&two)?)?;
-+    quotient.mul_assign_real(&lift)?;
++    // A fixed factor lets committed rational sources hide their pole. The
++    // extension offset is sampled after every source commitment and claim.
++    let mut lift = ComplexPoly::<CosetEvaluations>::from_real(&roots)?;
++    lift.add_constant(lift_offset)?;
++    quotient.mul_assign(&lift)?;
 +
      Ok(quotient)
  }
@@ -358,6 +404,8 @@ index 62f7a2d..12bfde3 100644
 +        let omega = domain_generator_for_size::<F>(DOMAIN_SIZE as u64);
 +        let lde_omega = domain_generator_for_size::<F>((DOMAIN_SIZE * LDE_DEGREE) as u64);
 +        let z = EF::from_coeff_in_base([F::from_u64_unchecked(2), F::from_u64_unchecked(3)]);
++        let lift_offset =
++            EF::from_coeff_in_base([F::from_u64_unchecked(13), F::from_u64_unchecked(17)]);
 +        let mut z_omega = z;
 +        z_omega.mul_assign_by_base(&omega);
 +        let extension_coefficient = EF::from_coeff_in_base([F::ONE, F::ONE]);
@@ -486,6 +534,7 @@ index 62f7a2d..12bfde3 100644
 +                    &evaluations_at_zero,
 +                    &z.into(),
 +                    &z_omega.into(),
++                    &lift_offset.into(),
 +                    &public_inputs,
 +                    &challenges,
 +                )?;
@@ -519,11 +568,9 @@ index 62f7a2d..12bfde3 100644
 +                        opening.mul_assign(challenge);
 +                        expected.add_assign(&opening);
 +                    }
-+                    let mut lift = point;
-+                    let mut two = F::ONE;
-+                    two.double();
-+                    lift.add_assign(&two);
-+                    expected.mul_assign_by_base(&lift);
++                    let mut lift = EF::from_coeff_in_base([point, F::ZERO]);
++                    lift.add_assign(&lift_offset);
++                    expected.mul_assign(&lift);
 +                    assert_eq!(
 +                        [actual_values[index], actual_values[index + DOMAIN_SIZE]],
 +                        expected.into_coeffs_in_base(),

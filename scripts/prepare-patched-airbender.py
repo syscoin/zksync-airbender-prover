@@ -93,7 +93,7 @@ CRYPTO_CHANGED_PATHS = {
     "crates/boojum/src/gadgets/sha256/mod.rs",
     "crates/snark-wrapper/src/verifier/fri.rs",
 }
-CRYPTO_PATCHED_TREE = "6de22a5ab1c4fa8b903ae7719280f3d90380524f"
+CRYPTO_PATCHED_TREE = "f8d7b132a841e0bfbfccd27614314a279d523887"
 
 
 def require(condition, message):

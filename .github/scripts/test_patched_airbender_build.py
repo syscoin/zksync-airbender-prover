@@ -226,7 +226,7 @@ class CommonCryptoOverlayTests(unittest.TestCase):
             "a/crates/boojum/src/cs/implementations/verifier.rs "))
         added = [line[1:].strip() for line in verifier.splitlines()
                  if line.startswith("+") and not line.startswith("+++")]
-        self.assertEqual(added[:9], [
+        self.assertEqual(added[:8], [
             "use super::prover::ProofConfig;",
             "/// `expected_proof_config` must come from verifier policy, independently of `proof`.",
             "expected_proof_config: &ProofConfig,",
@@ -235,10 +235,13 @@ class CommonCryptoOverlayTests(unittest.TestCase):
             "return false;",
             "}",
             "",
-            "return false;",
         ])
         self.assertIn(
-            "simulated_ext_element.mul_assign_by_base(&lift);",
+            "let lift_offset = ExtensionField::<F, 2, EXT>::from_coeff_in_base(",
+            added,
+        )
+        self.assertIn(
+            "simulated_ext_element.mul_assign(&lift);",
             added,
         )
         for text in ("empty FRI query list must fail", "one missing FRI query must fail",

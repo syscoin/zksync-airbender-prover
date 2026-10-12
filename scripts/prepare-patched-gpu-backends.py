@@ -45,7 +45,7 @@ UPSTREAM = {
                 "d1fa8670ee84ec3477c6cc1c85a3554cfa5e0206",
                 "fa1ab78c59f9cdba2fedf4a00813dcf1c4c92d5c"),
 }
-PATCHED_TREES = {"crypto": "f60ebbb7e33a6ee9a3bb297f5659fd308dda7990",
+PATCHED_TREES = {"crypto": "ca46bf0221a15de458f2d05fcac9c528c8142f06",
                  "bellman": "6e403e5a75ed91ca75c0bec533dbc73f82541ce2"}
 CHANGED_PATHS = {
     "crypto": {"crates/gpu-prover/src/cuda_bindings/context.rs",
