@@ -469,9 +469,9 @@ class ImageIdentityTests(unittest.TestCase):
                 self.assertNotEqual(subprocess.run(args, input=json.dumps(record), capture_output=True,
                                                    text=True).returncode, 0)
 
-    def test_native_boojum_ci_uses_attested_workspace_and_preserves_failures(self):
+    def test_pinned_fri_ci_uses_attested_workspace_and_preserves_failures(self):
         lines = (ROOT / ".github/workflows/ci.yaml").read_text().splitlines()
-        step = lines.index("      - name: Run pinned native Boojum FRI query-count regression")
+        step = lines.index("      - name: Run pinned Boojum FRI and lookup regressions")
         self.assertEqual(lines[step + 1], "        timeout-minutes: 20")
         self.assertEqual(lines[step + 2], "        env:")
         start = lines.index("        run: |", step) + 1
@@ -500,24 +500,27 @@ if name == "jq":
     print(record[sys.argv[-2].removeprefix(".")])
     raise SystemExit(0)
 log = Path(os.environ["WORKFLOW_CALL_LOG"])
+previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 if name == "python3":
     source = sys.stdin.read()
     assert "helper.verify_crypto" in source and "helper.load_crypto_pins" in source
     event = {"kind": "verify", "crypto": sys.argv[-2], "record": sys.argv[-1]}
-    previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     status_key = "VERIFY_AFTER_EXIT_CODE" if previous else "VERIFY_BEFORE_EXIT_CODE"
 else:
     assert name == "cargo"
+    cargo_index = sum(event["kind"] == "cargo" for event in previous)
     event = {"kind": "cargo", "argv": sys.argv[1:], "target": os.environ["CARGO_TARGET_DIR"],
              "jobs": os.environ["CARGO_BUILD_JOBS"]}
-    status_key = "BOOJUM_TEST_EXIT_CODE"
+    status_key = "CARGO_FAIL_EXIT_CODE" if cargo_index == int(os.environ["CARGO_FAIL_INDEX"]) else None
 with log.open("a") as output:
     output.write(json.dumps(event) + "\n")
-raise SystemExit(int(os.environ[status_key]))
+raise SystemExit(int(os.environ[status_key]) if status_key else 0)
 '''
-        for cargo_status, before_status, after_status in ((0, 0, 0), (7, 0, 0), (0, 9, 0), (0, 0, 11)):
-            with self.subTest(cargo=cargo_status, before=before_status, after=after_status), \
-                    tempfile.TemporaryDirectory(prefix="native boojum ci ") as temporary:
+        scenarios = [(None, 0, 0)] + [(index, 0, 0) for index in range(5)] + \
+                    [(None, 9, 0), (None, 0, 11)]
+        for failing_cargo, before_status, after_status in scenarios:
+            with self.subTest(cargo=failing_cargo, before=before_status, after=after_status), \
+                    tempfile.TemporaryDirectory(prefix="pinned fri ci ") as temporary:
                 root = Path(temporary)
                 commands = root / "commands"
                 commands.mkdir()
@@ -532,18 +535,33 @@ raise SystemExit(int(os.environ[status_key]))
                 result = subprocess.run(["bash", "-eu", "-c", script], cwd=ROOT, capture_output=True,
                                         text=True, env={**os.environ, **step_env, "RUNNER_TEMP": str(root),
                                         "PATH": str(commands) + os.pathsep + os.environ.get("PATH", ""),
-                                        "WORKFLOW_CALL_LOG": str(log), "BOOJUM_TEST_EXIT_CODE": str(cargo_status),
+                                        "WORKFLOW_CALL_LOG": str(log), "CARGO_FAIL_INDEX": str(failing_cargo if failing_cargo is not None else -1),
+                                        "CARGO_FAIL_EXIT_CODE": "7",
                                         "VERIFY_BEFORE_EXIT_CODE": str(before_status),
                                         "VERIFY_AFTER_EXIT_CODE": str(after_status)})
-                self.assertEqual(result.returncode, before_status or after_status or cargo_status, result.stderr)
+                self.assertEqual(result.returncode,
+                                 before_status or after_status or (7 if failing_cargo is not None else 0),
+                                 result.stderr)
                 crypto = workspace.parent / "zksync-crypto"
                 verify = {"kind": "verify", "crypto": str(crypto), "record": str(record)}
                 expected = [verify]
                 if not before_status:
-                    expected += [{"kind": "cargo", "target": str(target), "jobs": "1", "argv": [
-                        "test", "--manifest-path", str(crypto / "Cargo.toml"), "--locked", "-p", "boojum", "--lib",
-                        "cs::implementations::cs::test::prove_simple", "--", "--exact", "--nocapture", "--test-threads=1"]},
-                        verify]
+                    manifest = ["--manifest-path", str(crypto / "Cargo.toml"), "--locked"]
+                    commands = [
+                        ["test", *manifest, "-p", "boojum", "--lib",
+                         "cs::implementations::cs::test::prove_simple", "--", "--exact", "--nocapture", "--test-threads=1"],
+                        ["test", *manifest, "-p", "boojum", "--lib",
+                         "cs::implementations::cs::test::prove_simple_specialized_with_lookups", "--", "--exact", "--test-threads=1"],
+                        ["test", *manifest, "-p", "boojum", "--lib",
+                         "cs::implementations::prover::degree_lift_tests", "--", "--test-threads=1"],
+                        ["test", *manifest, "-p", "boojum", "--lib",
+                         "gadgets::recursion::recursive_verifier::test::test_recursive_verification_of_degree_lifted_proof",
+                         "--", "--exact", "--test-threads=1"],
+                        ["check", *manifest, "-p", "snark_wrapper"],
+                    ]
+                    expected += [{"kind": "cargo", "target": str(target), "jobs": "1", "argv": args}
+                                 for args in commands]
+                    expected.append(verify)
                 self.assertEqual([json.loads(line) for line in log.read_text().splitlines()], expected)
 
 
