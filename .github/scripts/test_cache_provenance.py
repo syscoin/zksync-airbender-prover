@@ -205,6 +205,22 @@ class CacheProvenanceTests(unittest.TestCase):
                 "sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw),
             })
 
+    def test_current_docs_distinguish_offline_qualification_from_live_gates(self):
+        overlay = " ".join((ROOT / "docs/airbender-build-overlay.md").read_text().split())
+        self.assertIn("current bundled FRI setup summaries and SNARK commitment were regenerated", overlay)
+        self.assertIn("release-loader tests accept matching current bundles and reject altered inputs", overlay)
+        self.assertIn("retained two-batch input", overlay)
+        self.assertIn("all three CPU/GPU keys matched byte-for-byte", overlay)
+        self.assertIn("normal-profile local EVM", overlay)
+        self.assertIn("do not establish live verifier deployment, service acceptance", overlay)
+        self.assertIn("broader workload qualification or sustained throughput", overlay)
+        self.assertNotIn("were generated before the FRI degree lift", overlay)
+        self.assertNotIn("loaders reject them", overlay)
+        for relative in ("README.md", "scripts/prover-rental/single-job-README.md"):
+            current = (ROOT / relative).read_text()
+            self.assertIn(self.commitment["vk_hash"], current)
+            self.assertIn(self.commitment["program_commitment"], current)
+
 
 if __name__ == "__main__":
     unittest.main()

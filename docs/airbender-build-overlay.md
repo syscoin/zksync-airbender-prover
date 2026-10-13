@@ -84,9 +84,16 @@ commit and tree, original lock source, selected lock derivation, wrapper and com
 crypto fork identities, source package paths, and other build inputs. GPU builds
 also retain the separate backend patch identities.
 
-The existing bundled FRI setup summaries and SNARK commitment were generated before
-the FRI degree lift. Their tree identities do not match the prepared forks and the
-loaders reject them. The common crypto arithmetic optimizations also change the
-compression circuit while preserving its geometry. Fresh compression/SNARK setup, verification key,
-deployed verifier, and end-to-end proof qualification remain required before
-real-proof acceptance.
+The current bundled FRI setup summaries and SNARK commitment were regenerated for
+the prepared fork identities, including the optimized common-crypto circuit.
+Normal locked CPU release-loader tests accept matching current bundles and reject
+altered inputs. For the retained two-batch input, fresh native FRI proofs, stock
+GPU wrapper/compression/SNARK proving and all three independent CPU verifications
+completed; all three CPU/GPU keys matched byte-for-byte. The generated verifier
+accepted the actual optimized proof on the normal-profile local EVM, and changed
+public-input and valid-field scalar-opening controls both reverted.
+
+These offline results do not establish live verifier deployment, service acceptance,
+broader workload qualification or sustained throughput. Those gates remain pending;
+see the [current qualification and build scope](../README.md#separate-fri-and-default-gpu-snark-deployment) for the
+measured input, identities, normal-worker build provenance and remaining limits.

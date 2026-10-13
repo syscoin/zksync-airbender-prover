@@ -427,10 +427,15 @@ An earlier GPU32 memory optimization passed an offline final-wrapper experiment 
 Security100 `c1ab3d65…b7388fe` VK: 303.82 seconds end to end, 29.91 GiB sampled GPU memory and 43.61 GiB sampled
 host RSS on an RTX5090. That historical capture is separate from the optimized candidate
 measurements above. This source integrates its pinned Bellman CUDA and crypto-GPU
-overlays into the default SNARK/combined build recipes. A new ordinary service build,
-full-range service acceptance, native/DA/settlement verification and sustained performance
-are still required; the retained offline binary/proof is not a service qualification or a
-claim of an instantaneous memory peak or other hardware support.
+overlays into the default SNARK/combined build recipes. A normal locked GPU combined/SNARK
+worker build from `ce6d4bd51cbf69162bf5ef1a9c2e29f457726a5c` completed successfully,
+with build-attestation SHA-256
+`f92fc4975b869c4493859b02496b84d6bab1613cff293d03c2a61157b4c7cb2f`.
+That build-only result does not establish worker service startup, full-range service
+acceptance, native/DA/settlement verification or sustained performance. It must not be
+relabeled as a build of a later release commit. The historical offline binary/proof is
+not a service qualification or a claim of an instantaneous memory peak or other
+hardware support.
 
 The guest is built reproducibly from final `zksync-os v0.4.0` (`69bc4305...`) plus
 the reviewed Syscoin patch, source tree `6935489bdbc7b1ed31e608677d1b2418b10691b5`.
