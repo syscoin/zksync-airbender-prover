@@ -207,8 +207,11 @@ class CacheProvenanceTests(unittest.TestCase):
 
     def test_current_docs_distinguish_offline_qualification_from_live_gates(self):
         overlay = " ".join((ROOT / "docs/airbender-build-overlay.md").read_text().split())
-        self.assertIn("current bundled FRI setup summaries and SNARK commitment were regenerated", overlay)
-        self.assertIn("release-loader tests accept matching current bundles and reject altered inputs", overlay)
+        current, historical_marker, historical = overlay.partition("The preceding `4f1e95bf` snapshot")
+        self.assertTrue(historical_marker)
+        self.assertIn(self.commitment["vk_hash"], current)
+        self.assertIn("retaining the unchanged setup summaries and commitment parameters", current)
+        self.assertIn("tests accepted matching bundles and rejected altered inputs", historical)
         self.assertIn("retained two-batch input", overlay)
         self.assertIn("all three CPU/GPU keys matched byte-for-byte", overlay)
         self.assertIn("normal-profile local EVM", overlay)

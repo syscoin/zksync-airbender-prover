@@ -375,10 +375,42 @@ aggregation hashes every input and would change the settlement public output.
 The release names belong to different repositories: `v0.6.0-rc.2` is the pinned Airbender proving
 stack, while the checked-in Syscoin guest below is based on final `zksync-os v0.4.0`.
 
-The optimized V32 source candidate binds the unchanged Syscoin app MD5 and accepted Security100
+The current source candidate pins common crypto
+`5eafa1f914519d88a13c577a9e8cc5c7db1dfc77` (tree
+`c52391d0df82126d27e5c76810e9df85c61875d0`) to constrain recursive transcript
+query bits to their canonical Goldilocks representative and correct addition
+witnesses whose sum equals the modulus. Its freshly generated app-bound VK is
+`0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153`.
+The new compression and SNARK proofs passed independent CPU verification. The generated
+verifier accepted the actual new proof on the normal-profile local EVM and rejected both
+changed-public-input and changed-scalar-opening controls. The unchanged native FRI/RISC
+proof inputs were retained, not regenerated. The runtime candidate bundles now bind the
+new VK while preserving those setup summaries and commitment parameters. Independent CPU
+key generation reproduced the retained RISC key and the new compression/SNARK keys byte-for-byte.
+The normal locked CPU release-loader run at Prover commit
+`875975949ba3b856faaf5b0c092b8b81762c947a` (tree
+`ac0a431ca1d4738b07a23bad1e9f7fd4274a0066`) passed all 70 tests: 4 protocol,
+12 FRI and 54 SNARK tests. Its build-attestation SHA-256 is
+`378a51f1bc9e5c0f9a80f42ce3ef8e8afa124ac221072542bde9d5b17ada5ceb`.
+The normal locked GPU combined and standalone SNARK worker builds also completed from
+that same source snapshot, with build-attestation SHA-256
+`05080505a1f09c21d43457f4b33db80de850fd4a38738234ef311e293afb9da4`.
+The combined binary SHA-256 is
+`4324e19759a4dd777df29926303eb51593fe989f40d1deba2e164d6445da5823`;
+the standalone SNARK binary SHA-256 is
+`9d9b8f7b6d7b8cfb348e09c669e9d52bdb9cb65210e3a9cd74890f968f8dc0ac`.
+All 53 attested GPU application/tooling input hashes match the current executable
+inputs; later test/documentation changes do not relabel these as new binary builds.
+No proof or worker was started by the loader/build runs. Normal producer build/loader
+qualification is complete, while CI completion, final release promotion and live
+verifier/service adoption remain separate gates.
+The measurements below belong to the preceding source snapshot and are not measurements
+of the new candidate.
+
+The preceding optimized V32 source snapshot binds the unchanged Syscoin app MD5 and accepted Security100
 program commitment
 `0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975`
-to the newly derived app-bound VK
+to the app-bound VK
 `0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144`.
 Its common crypto source is `4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a` (tree
 `4fda70a408c7817474fe67fba46b38cfbe420e59`), with the original wrapper
@@ -391,7 +423,7 @@ to 65,536, while the final SNARK domain remains `2^25`. Airbender stays pinned t
 CRS verification and fresh zero-knowledge randomness remain required.
 
 The accepted offline comparison used the same native two-batch inputs and GPU, with one
-run per version. It measures this candidate snapshot, not sustained performance:
+run per version. It measures that preceding snapshot, not the current source or sustained performance:
 
 | Measurement | Previous candidate | Optimized candidate |
 | --- | ---: | ---: |

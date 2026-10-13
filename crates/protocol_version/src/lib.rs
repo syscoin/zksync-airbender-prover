@@ -83,7 +83,7 @@ struct BinMd5Sum(&'static str);
 // SYSCOIN: Keep the zero sentinel rejection even after binding this isolated candidate
 // to the reproducible guest and its successfully generated Security100 verification key.
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const SYSCOIN_VK_HASH: &str = "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144";
+const SYSCOIN_VK_HASH: &str = "0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153";
 const SYSCOIN_APP_MD5: &str = "1bc285f1bbde995134d483c4e75ee204";
 const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
     0xff43db65, 0x64b43491, 0xd6c25a61, 0x3270e780, 0x2a4fca2b, 0xc67ad621, 0xe5cb08dd, 0x57d22975,
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(versions.vk_hashes(), vec![SYSCOIN_VK_HASH.to_owned()]);
         assert_eq!(
             SYSCOIN_VK_HASH,
-            "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144"
+            "0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153"
         );
         assert_eq!(
             versions.program_commitment_for(SYSCOIN_VK_HASH),
@@ -231,6 +231,7 @@ mod tests {
         for historical in [
             "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90",
             "0x229a4a5a7715fb19f8a5940e42d9cd53bb85f040bcf0f71c76612450fb8235b1",
+            "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144",
         ] {
             assert!(!versions.contains(historical));
             assert_eq!(versions.program_commitment_for(historical), None);
