@@ -56,9 +56,20 @@ actual proof and rejected changed-public-input and changed-scalar-opening contro
 the normal-profile local EVM. The new app-bound VK is
 `0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153`.
 The runtime candidate bundles now bind this VK while retaining the unchanged setup
-summaries and commitment parameters. Independent CPU key agreement, normal worker
-build/loader checks and release qualification remain pending. Earlier measurements
-belong to `4f1e95bf`, not this source.
+summaries and commitment parameters. Independent CPU key generation reproduced the
+retained RISC key and new compression/SNARK keys byte-for-byte. Normal locked CPU
+release-loader tests at Prover commit `875975949ba3b856faaf5b0c092b8b81762c947a`
+passed all 70 tests (4 protocol, 12 FRI and 54 SNARK); the current qualification
+section in the README records the exact source tree and build-attestation hash.
+Normal locked GPU combined and standalone SNARK worker builds from that same source
+snapshot also completed; the README records their exact attestation and binary hashes.
+All 53 attested GPU application/tooling input hashes match the current executable
+inputs. No proof or worker was started by the loader/build runs. Normal producer
+build/loader qualification is complete; CI completion, final release promotion and
+live verifier/service adoption remain separate gates. Earlier measurements belong
+to `4f1e95bf`, not this source.
+The source manifests retain their attested pre-build `purpose` descriptions; the
+completed checks above supersede those descriptions' pending-qualification wording.
 `patches/zksync-crypto-fork-source.json` binds the common source identity;
 no common crypto byte patch is replayed. Both fork manifests bind exact upstream
 and fork commits and trees, ancestry, and the reviewed package versions. Preparation

@@ -386,8 +386,24 @@ verifier accepted the actual new proof on the normal-profile local EVM and rejec
 changed-public-input and changed-scalar-opening controls. The unchanged native FRI/RISC
 proof inputs were retained, not regenerated. The runtime candidate bundles now bind the
 new VK while preserving those setup summaries and commitment parameters. Independent CPU
-key agreement, normal worker builds, release-loader validation and release qualification
-remain pending. No live verifier or service adoption is established by these offline results.
+key generation reproduced the retained RISC key and the new compression/SNARK keys byte-for-byte.
+The normal locked CPU release-loader run at Prover commit
+`875975949ba3b856faaf5b0c092b8b81762c947a` (tree
+`ac0a431ca1d4738b07a23bad1e9f7fd4274a0066`) passed all 70 tests: 4 protocol,
+12 FRI and 54 SNARK tests. Its build-attestation SHA-256 is
+`378a51f1bc9e5c0f9a80f42ce3ef8e8afa124ac221072542bde9d5b17ada5ceb`.
+The normal locked GPU combined and standalone SNARK worker builds also completed from
+that same source snapshot, with build-attestation SHA-256
+`05080505a1f09c21d43457f4b33db80de850fd4a38738234ef311e293afb9da4`.
+The combined binary SHA-256 is
+`4324e19759a4dd777df29926303eb51593fe989f40d1deba2e164d6445da5823`;
+the standalone SNARK binary SHA-256 is
+`9d9b8f7b6d7b8cfb348e09c669e9d52bdb9cb65210e3a9cd74890f968f8dc0ac`.
+All 53 attested GPU application/tooling input hashes match the current executable
+inputs; later test/documentation changes do not relabel these as new binary builds.
+No proof or worker was started by the loader/build runs. Normal producer build/loader
+qualification is complete, while CI completion, final release promotion and live
+verifier/service adoption remain separate gates.
 The measurements below belong to the preceding source snapshot and are not measurements
 of the new candidate.
 

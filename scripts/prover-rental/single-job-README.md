@@ -136,8 +136,17 @@ The new compression/SNARK proofs passed independent CPU verification, and the
 generated verifier accepted the actual proof on the normal-profile local EVM while
 rejecting changed-public-input and changed-scalar-opening controls. The runtime candidate
 bundles now bind this VK, retaining the unchanged setup summaries and commitment parameters.
-Independent CPU key agreement, normal worker build/loader checks and release qualification
-are still pending. These offline results do not qualify a rental image or live service.
+Independent CPU key generation reproduced the retained RISC key and new compression/SNARK
+keys byte-for-byte. The normal locked CPU release-loader run at Prover commit
+`875975949ba3b856faaf5b0c092b8b81762c947a` passed all 70 tests (4 protocol, 12 FRI
+and 54 SNARK); the main README records its exact source tree and build-attestation hash.
+Normal locked GPU combined and standalone SNARK worker builds from that same source
+snapshot also completed; the main README records their exact attestation and binary hashes.
+All 53 attested GPU application/tooling input hashes match the current executable
+inputs. No proof or worker was started by the loader/build runs. Normal producer
+build/loader qualification is complete, while CI completion, final release promotion
+and live adoption remain separate gates. These offline results do not qualify a
+rental image or live service.
 Do not deploy this candidate with the preceding key below.
 
 The preceding accepted optimized V8 snapshot's app-bound VK is
