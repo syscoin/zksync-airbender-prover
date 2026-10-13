@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +61,33 @@ class PinnedSourceCheckoutTests(unittest.TestCase):
         self.assertNotIn(self.old_blob, stored.splitlines())
         self.assertEqual(self.git(self.source, "config", "--local", "--list"), before)
         self.assertEqual(self.git(self.source, "status", "--porcelain"), "")
+
+    def test_shallow_cache_with_exact_pinned_tree_refuses_before_jobs_or_mutation(self):
+        cache = self.root / "shallow-cache"
+        self.git(self.root, "clone", "--quiet", "--depth=1", self.source.as_uri(), str(cache))
+        self.assertEqual(self.git(cache, "rev-parse", "HEAD"), self.commit)
+        self.assertEqual(self.git(cache, "rev-parse", "HEAD^{tree}"), self.tree)
+        self.assertEqual(self.git(cache, "rev-parse", "--is-shallow-repository"), "true")
+        self.assertEqual((cache / "current.txt").read_text(), "pinned current tree\n")
+        before = {str(path.relative_to(cache)): path.read_bytes()
+                  for path in cache.rglob("*") if path.is_file()}
+        for source in (cache, cache.as_uri()):
+            with self.subTest(source=str(source)), patch.object(HELPER, "_git", wraps=HELPER._git) as git:
+                with self.assertRaisesRegex(ValueError, "fresh non-shallow cache"):
+                    HELPER.checkout_pinned_source(source, self.destination, self.commit, self.tree)
+                git.assert_called_once_with("-C", cache, "rev-parse", "--is-shallow-repository")
+            self.assertFalse(self.destination.exists())
+            self.assertEqual(before, {str(path.relative_to(cache)): path.read_bytes()
+                                     for path in cache.rglob("*") if path.is_file()})
+
+    def test_local_ancestry_metadata_must_explicitly_attest_non_shallow(self):
+        for reported in ("", "true\n", "unknown\n"):
+            with self.subTest(reported=reported), patch.object(HELPER, "_git", return_value=
+                    subprocess.CompletedProcess([], 0, stdout=reported, stderr="")) as git:
+                with self.assertRaisesRegex(ValueError, "full commit ancestry"):
+                    HELPER.checkout_pinned_source(self.source, self.destination, self.commit, self.tree)
+                git.assert_called_once_with("-C", self.source, "rev-parse", "--is-shallow-repository")
+            self.assertFalse(self.destination.exists())
 
     def test_wrong_tree_refuses_before_materialization_and_preserves_outcome(self):
         with self.assertRaisesRegex(ValueError, "differs from the reviewed"):
