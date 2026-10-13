@@ -363,6 +363,7 @@ def main(argv):
     wrapper_inputs = base.wrapper_pins_metadata()
     common_crypto_pins = base.load_crypto_pins()
     common_crypto_inputs = base.crypto_pins_metadata()
+    base.require_compatible_build_guards(source, air, wrapper_pins, common_crypto_pins)
     overlay_raw, selected_lock = base.selected_lock_overlay(
         source / "Cargo.lock", base.PIN_PATH.parent / air["overlay_lock_file"], air,
         wrapper_pins, common_crypto_pins)

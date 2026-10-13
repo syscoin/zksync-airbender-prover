@@ -483,6 +483,35 @@ class SourceAdmissionTests(unittest.TestCase):
             self.assertIn("!" + relative + "\n", ignore)
 
 
+class PreparedGuardCompatibilityTests(unittest.TestCase):
+    def test_gpu_rejects_old_or_malformed_guard_before_native_inputs_or_jobs(self):
+        current = (ROOT / "crates/zksync_os_fri_prover/build.rs").read_bytes()
+        for raw in (current.replace(b"4fda70a408c7817474fe67fba46b38cfbe420e59",
+                                    b"f8d7b132a841e0bfbfccd27614314a279d523887"),
+                    current.replace(b"assert_eq!(actual, expected", b"assert_eq!(actual, actual")):
+            with self.subTest(old=b"f8d7" in raw), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                guard = root / "crates/zksync_os_fri_prover/build.rs"
+                guard.parent.mkdir(parents=True)
+                guard.write_bytes(raw)
+                with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \
+                        patch.object(HELPER, "base_helper", return_value=BASE), \
+                        patch.object(HELPER, "bellman_library") as native, \
+                        patch.object(HELPER, "prepare_backend") as backend, \
+                        patch.object(BASE, "copy_application") as copy_app, \
+                        patch.object(BASE, "checkout_pinned_source") as checkout, \
+                        patch.object(BASE.subprocess, "run") as run:
+                    with self.assertRaisesRegex(ValueError, "incompatible proving-source guard"):
+                        HELPER.main(["old-guard", "--", "cargo", "build", "--locked"])
+                    native.assert_not_called()
+                    backend.assert_not_called()
+                    copy_app.assert_not_called()
+                    checkout.assert_not_called()
+                    run.assert_not_called()
+                self.assertEqual(guard.read_bytes(), raw)
+                self.assertFalse((root / "target").exists())
+
+
 class BuildLaneTests(unittest.TestCase):
     def command(self, *options):
         return ["cargo", "build", "--locked", *options]

@@ -849,6 +849,80 @@ class CommandTests(unittest.TestCase):
             checked.assert_not_called()
 
 
+class PreparedGuardCompatibilityTests(unittest.TestCase):
+    def validate(self, source):
+        HELPER.require_compatible_build_guards(
+            source, PINS, HELPER.load_wrapper_pins(), HELPER.load_crypto_pins())
+
+    def test_current_guards_match_the_selected_marker_identity(self):
+        self.validate(ROOT)
+        for crate in ("zksync_os_fri_prover", "zksync_os_snark_prover"):
+            self.assertEqual(HELPER.sha256(ROOT / "crates" / crate / "build.rs"),
+                             HELPER.PREPARED_BUILD_GUARD_SHA256)
+
+    def test_guardless_historical_source_retains_existing_compatibility_checks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            self.validate(Path(temporary))
+
+    def test_old_exact_tree_and_malformed_guards_are_rejected_unchanged(self):
+        current = (ROOT / "crates/zksync_os_fri_prover/build.rs").read_bytes()
+        old = current.replace(b"a1e9a551b9588b1dfab5c5088554fc69770c0e85",
+                              b"9a1110f6c514338b3143909a726fe97b9af6c9cd").replace(
+            b"4fda70a408c7817474fe67fba46b38cfbe420e59",
+            b"f8d7b132a841e0bfbfccd27614314a279d523887")
+        malformed = current.replace(b"assert_eq!(actual, expected", b"assert_eq!(actual, actual")
+        for crate in ("zksync_os_fri_prover", "zksync_os_snark_prover"):
+            for raw in (old, malformed):
+                with self.subTest(crate=crate, old=raw == old), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    guard = root / "crates" / crate / "build.rs"
+                    guard.parent.mkdir(parents=True)
+                    guard.write_bytes(raw)
+                    with self.assertRaisesRegex(ValueError, "exact matching validated tooling"):
+                        self.validate(root)
+                    self.assertEqual(guard.read_bytes(), raw)
+                    self.assertFalse((root / "target").exists())
+
+    def test_guard_identity_cannot_disagree_with_selected_pins(self):
+        changed = dict(HELPER.load_crypto_pins(), fork_tree="f" * 40)
+        with self.assertRaisesRegex(ValueError, "incompatible proving-source guard"):
+            HELPER.require_compatible_build_guards(ROOT, PINS, HELPER.load_wrapper_pins(), changed)
+
+    def test_guard_symlinks_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            guard = root / "crates/zksync_os_fri_prover/build.rs"
+            guard.parent.mkdir(parents=True)
+            guard.symlink_to(ROOT / "crates/zksync_os_fri_prover/build.rs")
+            with self.assertRaisesRegex(ValueError, "incompatible proving-source guard"):
+                self.validate(root)
+
+    def test_cpu_rejects_incompatible_guard_before_snapshot_network_or_cargo(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/protocol_version"]\n')
+            package = root / "crates/protocol_version/Cargo.toml"
+            package.parent.mkdir(parents=True)
+            package.write_text('[package]\nname = "protocol_version"\nversion = "0.1.0"\n')
+            guard = root / "crates/zksync_os_snark_prover/build.rs"
+            guard.parent.mkdir(parents=True)
+            original = (ROOT / "crates/zksync_os_snark_prover/build.rs").read_bytes().replace(
+                b"4fda70a408c7817474fe67fba46b38cfbe420e59",
+                b"f8d7b132a841e0bfbfccd27614314a279d523887")
+            guard.write_bytes(original)
+            with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \
+                    patch.object(HELPER, "copy_application") as copy_app, \
+                    patch.object(HELPER, "checkout_pinned_source") as checkout, \
+                    patch.object(HELPER.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "incompatible proving-source guard"):
+                    HELPER.main(["old-guard", "--", "cargo", "build", "--locked", "-p", "protocol_version"])
+                copy_app.assert_not_called()
+                checkout.assert_not_called()
+                run.assert_not_called()
+            self.assertEqual(guard.read_bytes(), original)
+            self.assertFalse((root / "target").exists())
+
+
 class PreparedBuildGuardTests(unittest.TestCase):
     def test_proving_build_scripts_require_workspace_bound_marker(self):
         with tempfile.TemporaryDirectory() as temporary:

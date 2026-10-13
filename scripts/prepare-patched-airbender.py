@@ -74,6 +74,7 @@ WRAPPER_AIRBENDER_ROOTS = (
     "execution_utils", "setups", "field", "verifier_generator", "prover",
 )
 PREPARED_SOURCE_MARKER = ".syscoin-proving-sources-prepared"
+PREPARED_BUILD_GUARD_SHA256 = "6e3b455295535c424e76dae307461a484ef02aac2734f59e35a59c74942824f5"
 CRYPTO_UPSTREAM = (
     "https://github.com/matter-labs/zksync-crypto.git",
     "bf2797e4ca13475bf797aa43e085389cdd6732f9",
@@ -248,6 +249,26 @@ def write_prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins):
     with marker.open("xb") as destination:
         destination.write(prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins))
     return sha256(marker)
+
+
+def require_compatible_build_guards(source, pins, wrapper_pins, crypto_pins):
+    """Reject cross-generation guarded applications before snapshots or source downloads.
+
+    Guardless historical sources retain the existing lock/feature compatibility checks.
+    Existing guards are immutable application inputs, never rewritten or broadened.
+    """
+    expected_identity = ('"{}\\n' + "\\n".join((pins["fork_commit"], pins["fork_tree"],
+                         wrapper_pins["fork_tree"], crypto_pins["fork_tree"])) + '\\n"')
+    for crate in ("zksync_os_fri_prover", "zksync_os_snark_prover"):
+        guard = source / "crates" / crate / "build.rs"
+        if not guard.exists() and not guard.is_symlink():
+            continue
+        require(guard.is_file() and not guard.is_symlink()
+                and sha256(guard) == PREPARED_BUILD_GUARD_SHA256
+                and expected_identity in guard.read_text(),
+                "incompatible proving-source guard: " + str(guard)
+                + "; use this application's exact matching validated tooling, or select "
+                "application source qualified with the current tooling")
 
 
 def load_wrapper_pins(path=WRAPPER_PIN_PATH):
@@ -756,6 +777,7 @@ def main(argv):
     wrapper_inputs = wrapper_pins_metadata()
     crypto_pins = load_crypto_pins()
     crypto_inputs = crypto_pins_metadata()
+    require_compatible_build_guards(source, pins, wrapper_pins, crypto_pins)
     overlay = PIN_PATH.parent / pins["overlay_lock_file"]
     checked_hash(overlay, pins["overlay_lock_sha256"])
     overlay_raw, selected_lock = selected_lock_overlay(

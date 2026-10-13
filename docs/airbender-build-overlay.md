@@ -28,6 +28,12 @@ Direct Cargo builds of the FRI and SNARK packages fail without a workspace-bound
 marker created by the preparer and rechecked after Cargo. The fork pin alone does not
 carry the separate wrapper and common-crypto verifier fixes, so proving binaries must
 use the prepared source workspace.
+Before creating snapshots or downloading proving sources, both preparation lanes reject
+application tags whose existing FRI/SNARK build guards bind a different source generation.
+Use such a tag's exact matching validated tooling; current tooling does not rewrite its
+guard, mislabel old trees as current, or accept an old guarded VK/source combination.
+Historically guardless tags retain the existing dependency-graph and feature compatibility
+checks; their availability is not a claim of current proof or release qualification.
 
 The separate `zkos-wrapper` and common `zksync-crypto` sources also come from
 immutable Syscoin forks. The wrapper adds a private 64 KiB `OsRng` buffer around
