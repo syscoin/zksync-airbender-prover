@@ -486,10 +486,19 @@ class SourceAdmissionTests(unittest.TestCase):
 class PreparedGuardCompatibilityTests(unittest.TestCase):
     def test_gpu_rejects_old_or_malformed_guard_before_native_inputs_or_jobs(self):
         current = (ROOT / "crates/zksync_os_fri_prover/build.rs").read_bytes()
-        for raw in (current.replace(b"4fda70a408c7817474fe67fba46b38cfbe420e59",
-                                    b"f8d7b132a841e0bfbfccd27614314a279d523887"),
-                    current.replace(b"assert_eq!(actual, expected", b"assert_eq!(actual, actual")):
-            with self.subTest(old=b"f8d7" in raw), tempfile.TemporaryDirectory() as temporary:
+        current_tree = json.loads((ROOT / "patches/zksync-crypto-fork-source.json").read_text())["fork_tree"].encode()
+        old_tree = b"4fda70a408c7817474fe67fba46b38cfbe420e59"
+        comparison = b"assert_eq!(actual, expected"
+        self.assertNotEqual(current_tree, old_tree)
+        self.assertEqual(current.count(current_tree), 1)
+        self.assertEqual(current.count(comparison), 1)
+        cases = {
+            "old_crypto_tree": current.replace(current_tree, old_tree),
+            "malformed_comparison": current.replace(comparison, b"assert_eq!(actual, actual"),
+        }
+        for case, raw in cases.items():
+            self.assertNotEqual(raw, current)
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 guard = root / "crates/zksync_os_fri_prover/build.rs"
                 guard.parent.mkdir(parents=True)
