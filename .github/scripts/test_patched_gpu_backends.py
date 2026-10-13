@@ -242,7 +242,7 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
             self.assertEqual(record["zkos_wrapper"]["source"]["fork_tree"], BASE.WRAPPER_FORK[2])
             self.assertEqual(set(record["zkos_wrapper"]["package_paths"]), set(BASE.WRAPPER_PACKAGES))
             self.assertEqual(record["zksync_crypto"]["inputs"], BASE.crypto_pins_metadata())
-            self.assertEqual(record["zksync_crypto"]["source"]["patched_tree"], BASE.CRYPTO_PATCHED_TREE)
+            self.assertEqual(record["zksync_crypto"]["source"]["fork_tree"], BASE.CRYPTO_FORK[2])
             self.assertEqual(set(record["zksync_crypto"]["package_paths"]), set(BASE.CRYPTO_PACKAGES))
             self.assertEqual(record["prepared_source_marker_sha256"],
                              BASE.sha256(build / "prover" / BASE.PREPARED_SOURCE_MARKER))
@@ -250,9 +250,9 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
             self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
             relative = "scripts/pinned_source_checkout.py"
             self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
-            for suffix in ("json", "patch"):
-                relative = "patches/zksync-crypto-native-fri-query-count." + suffix
-                self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+            relative = "patches/zksync-crypto-fork-source.json"
+            self.assertEqual(record["tooling_sha256"][relative], HELPER.sha256(ROOT / relative))
+            self.assertEqual(record["zksync_crypto"]["source"]["fork_commit"], BASE.CRYPTO_FORK[1])
             self.assertEqual(record, json.loads((build / "build-result.json").read_text()))
             self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(),
                              (ROOT / "Cargo.lock").read_bytes().replace(
@@ -481,6 +481,35 @@ class SourceAdmissionTests(unittest.TestCase):
                          "patches/crypto-gpu32-memory.patch", "patches/bellman-gpu32-memory.patch"):
             self.assertIn("    " + relative + "\n", context)
             self.assertIn("!" + relative + "\n", ignore)
+
+
+class PreparedGuardCompatibilityTests(unittest.TestCase):
+    def test_gpu_rejects_old_or_malformed_guard_before_native_inputs_or_jobs(self):
+        current = (ROOT / "crates/zksync_os_fri_prover/build.rs").read_bytes()
+        for raw in (current.replace(b"4fda70a408c7817474fe67fba46b38cfbe420e59",
+                                    b"f8d7b132a841e0bfbfccd27614314a279d523887"),
+                    current.replace(b"assert_eq!(actual, expected", b"assert_eq!(actual, actual")):
+            with self.subTest(old=b"f8d7" in raw), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                guard = root / "crates/zksync_os_fri_prover/build.rs"
+                guard.parent.mkdir(parents=True)
+                guard.write_bytes(raw)
+                with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \
+                        patch.object(HELPER, "base_helper", return_value=BASE), \
+                        patch.object(HELPER, "bellman_library") as native, \
+                        patch.object(HELPER, "prepare_backend") as backend, \
+                        patch.object(BASE, "copy_application") as copy_app, \
+                        patch.object(BASE, "checkout_pinned_source") as checkout, \
+                        patch.object(BASE.subprocess, "run") as run:
+                    with self.assertRaisesRegex(ValueError, "incompatible proving-source guard"):
+                        HELPER.main(["old-guard", "--", "cargo", "build", "--locked"])
+                    native.assert_not_called()
+                    backend.assert_not_called()
+                    copy_app.assert_not_called()
+                    checkout.assert_not_called()
+                    run.assert_not_called()
+                self.assertEqual(guard.read_bytes(), raw)
+                self.assertFalse((root / "target").exists())
 
 
 class BuildLaneTests(unittest.TestCase):

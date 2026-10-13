@@ -25,7 +25,11 @@ The image SBOM also preserves the Airbender source manifest under
 `io.syscoin.prover.airbender-build.inputs`, including its manifest SHA-256. The
 manifest binds the immutable Syscoin fork commit/tree, its rc.2 parent, and the
 selected Cargo lock derivation; the reference overlay lock is hash-checked before
-SBOM publication. `airbender-build-pins.json` is retained beside the SBOM. The exact
+SBOM publication. The same evidence includes the wrapper and common crypto fork
+manifests, their SHA-256 digests, and immutable upstream/fork commit and tree
+identities. Release and image provenance retain the common crypto fork commit and
+source-manifest digest instead of a common crypto byte-patch digest.
+`airbender-build-pins.json` is retained beside the SBOM. The exact
 image additionally contains `/usr/share/syscoin-prover/airbender-build-inputs.json`,
 the role's success-only source/command/compiler record. See the
 [build overlay documentation](airbender-build-overlay.md) for the proof boundary.

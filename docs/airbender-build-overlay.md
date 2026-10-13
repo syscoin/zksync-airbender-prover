@@ -28,13 +28,33 @@ Direct Cargo builds of the FRI and SNARK packages fail without a workspace-bound
 marker created by the preparer and rechecked after Cargo. The fork pin alone does not
 carry the separate wrapper and common-crypto verifier fixes, so proving binaries must
 use the prepared source workspace.
+Before creating snapshots or downloading proving sources, both preparation lanes reject
+application tags whose existing FRI/SNARK build guards bind a different source generation.
+Use such a tag's exact matching validated tooling; current tooling does not rewrite its
+guard, mislabel old trees as current, or accept an old guarded VK/source combination.
+Historically guardless tags retain the existing dependency-graph and feature compatibility
+checks; their availability is not a claim of current proof or release qualification.
 
-The separate `zkos-wrapper` and common `zksync-crypto` overlays remain. Their patches
-include the recursive FRI verifier change and other reviewed fixes. The wrapper also
-adds a private 64 KiB `OsRng` buffer around synchronous Bellman proof finalization.
-Their manifests bind exact upstream commits and trees, patch hashes, changed-file
-preimages and postimages, and resulting trees. The FRI-only binary does not link the
-wrapper, but the source preparation checks the common proving graph in every role.
+The separate `zkos-wrapper` and common `zksync-crypto` sources also come from
+immutable Syscoin forks. The wrapper adds a private 64 KiB `OsRng` buffer around
+synchronous Bellman proof finalization. The common crypto fork is commit
+`4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a`, tree
+`4fda70a408c7817474fe67fba46b38cfbe420e59`, descending from Matter Labs commit
+`bf2797e4ca13475bf797aa43e085389cdd6732f9`. It retains the reviewed native FRI
+query count, verifier-owned proof policy, degree lift, recursive/SNARK agreement,
+SHA-256, and row-accounting fixes. It hoists the shared `z * omega` product
+outside the FRI query loop and computes constrained weighted opening claims once
+per opening group. FRI folding shares the constrained coset factor across pairs,
+skips the constant first interpolation factor, and omits each group's unused final
+base-power square while preserving the coset inverse carried into the next group.
+Final-polynomial Horner evaluation starts from the highest coefficient. Compression
+column geometry and row allocation remain unchanged. `patches/zksync-crypto-fork-source.json` binds the common source identity;
+no common crypto byte patch is replayed. Both fork manifests bind exact upstream
+and fork commits and trees, ancestry, and the reviewed package versions. Preparation
+checks clean, exact source trees before and after Cargo. The FRI-only binary does
+not link the wrapper, but source preparation checks the common proving graph in
+every role. Cargo path overrides continue to unify the selected application's
+upstream common crypto references with all eleven packages from this verified fork.
 
 FRI and explicit CPU SNARK builds use the common source preparation. The standalone
 FRI role is package-scoped and does not pull in the SNARK CUDA backend. CPU SNARK uses
@@ -49,6 +69,7 @@ Optional inputs:
 - `AIRBENDER_SOURCE_DIR`: an existing local Git clone containing the exact fork commit;
   it is cloned without modification.
 - `ZKOS_WRAPPER_SOURCE_DIR`: an existing exact wrapper Git clone.
+- `ZKSYNC_CRYPTO_SOURCE_DIR`: an existing exact common crypto Git clone.
 - `PROVER_SOURCE_DIR`: application source separate from wrapper tooling for release CI.
 - `AIRBENDER_BUILD_ATTESTATION`: a fresh absolute JSON path with an existing parent,
   written only after Cargo succeeds and inputs are rechecked.
@@ -59,10 +80,20 @@ not change the original checkout or Cargo's shared Git and registry sources. Eac
 runtime image includes `/usr/share/syscoin-prover/airbender-build-inputs.json`; each
 release archive includes its role's build record. The image or archive digest binds
 that record to the binary. The record and SBOM/provenance metadata identify the fork
-commit and tree, original lock source, selected lock derivation, wrapper and crypto
-patches, source package paths, and other build inputs.
+commit and tree, original lock source, selected lock derivation, wrapper and common
+crypto fork identities, source package paths, and other build inputs. GPU builds
+also retain the separate backend patch identities.
 
-The existing bundled FRI setup summaries and SNARK commitment were generated before
-the FRI degree lift. Their tree identities do not match this fork and the loaders
-reject them. Fresh setup summaries, verification key, deployed verifier, and end-to-end proof
-qualification remain required before real-proof acceptance.
+The current bundled FRI setup summaries and SNARK commitment were regenerated for
+the prepared fork identities, including the optimized common-crypto circuit.
+Normal locked CPU release-loader tests accept matching current bundles and reject
+altered inputs. For the retained two-batch input, fresh native FRI proofs, stock
+GPU wrapper/compression/SNARK proving and all three independent CPU verifications
+completed; all three CPU/GPU keys matched byte-for-byte. The generated verifier
+accepted the actual optimized proof on the normal-profile local EVM, and changed
+public-input and valid-field scalar-opening controls both reverted.
+
+These offline results do not establish live verifier deployment, service acceptance,
+broader workload qualification or sustained throughput. Those gates remain pending;
+see the [current qualification and build scope](../README.md#separate-fri-and-default-gpu-snark-deployment) for the
+measured input, identities, normal-worker build provenance and remaining limits.

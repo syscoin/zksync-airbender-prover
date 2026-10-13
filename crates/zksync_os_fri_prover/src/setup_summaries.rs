@@ -24,17 +24,17 @@ const BUNDLED_ARTIFACT: &[u8] =
     include_bytes!("../artifacts/syscoin-v32-security100-fri-setups.json");
 // Updated only after independent CPU derivation and a complete equality check.
 const BUNDLED_ARTIFACT_SHA256: &str =
-    "4193ac0cdd7e9a8bed3d42c4fec3a3f16f08f1677f454a4901fe97c0cdef82ae";
+    "02ca65c17f060ff02596bc64df4cff3d4826f13572d1786b6ca7b958e37661ce";
 const MAX_ARTIFACT_BYTES: usize = 1024 * 1024;
 // The revision records the upstream origin; the reviewed patched tree binds the
 // effective circuit source, including generated relations and recursive guests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
 const AIRBENDER_PATCHED_TREE: &str = "a41a4a18eeb102b405bcb63ad7ca85e9b6b13213";
-const VK_HASH: &str = "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90";
+const VK_HASH: &str = "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144";
 const PROGRAM_COMMITMENT: &str =
-    "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94";
+    "0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975";
 const UNIFIED_END_PARAMS: [u32; 8] = [
-    3172695763, 3196237043, 2833869376, 2972964775, 4030234005, 1813126596, 2687332117, 3052592912,
+    2573324043, 1880334364, 1011603262, 959504562, 3515305074, 2676167601, 1565532066, 2615493531,
 ];
 
 /// How a FRI worker obtains the three compact setup summaries.
@@ -156,22 +156,22 @@ fn canonical_metadata() -> Metadata {
         },
         recursion_unrolled: BinaryIdentity {
             bin: FileIdentity::pinned(
-                2314544,
-                "1ee4c49901ffb1fdce540e778c7224b8c78718bc1a26788cd9876477a1b86a12",
+                2319668,
+                "320fb4b3c46a6991b0059449c6744e0a935d276b14126ce15e5e89b7fae9f150",
             ),
             text: FileIdentity::pinned(
-                2274080,
-                "9fbd823842541150daa1837ad4cad1a06e43793acfe02567b3594c50e090a17a",
+                2279204,
+                "ec0ba1a617756348a745988027083141ee99022e4a8a5cf5778dd65ccbc9467a",
             ),
         },
         recursion_unified: BinaryIdentity {
             bin: FileIdentity::pinned(
-                1273824,
-                "8fd324daf3e4bb1ebe0452ecb3897b0d222e28b44969db362a2a16c7ea23fdd1",
+                1277440,
+                "43985fe291efaf5f524ec4880900602d9ab0d51ebd87ad55c03e0f1aaaa0b086",
             ),
             text: FileIdentity::pinned(
-                1241932,
-                "ff4477bbf731084207f46b847c76366628f3fc912f11f6b3374ae3e0e5884ef1",
+                1245552,
+                "0c9e041574e579bb6503c6a976da639cf8dbb6e04d3d95f50d5d188ac1ac2e0b",
             ),
         },
     }
@@ -356,7 +356,6 @@ pub fn verify_derived_release_artifact(
 mod tests {
     use super::*;
     use serde_json::{json, Value};
-    use zksync_airbender_execution_utils::unrolled::UnrolledProgramSetup;
 
     fn app_paths() -> (std::path::PathBuf, std::path::PathBuf) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -367,47 +366,15 @@ mod tests {
     }
 
     fn artifact() -> Artifact {
-        let mut artifact = parse_authenticated(BUNDLED_ARTIFACT).unwrap();
-        // Structural mutation tests use the current source identity; the
-        // checked-in artifact itself remains stale until release regeneration.
-        artifact.metadata.airbender_patched_tree = AIRBENDER_PATCHED_TREE.to_owned();
-        artifact
+        parse_authenticated(BUNDLED_ARTIFACT).unwrap()
     }
 
-    fn structurally_valid_summaries() -> (ProgramSetupSummaries, Vec<u8>) {
-        fn rebind_binary(setup: UnrolledProgramSetup, binary: &[u8]) -> UnrolledProgramSetup {
-            let mut padded = binary.to_vec();
-            zksync_airbender_execution_utils::setups::pad_bytecode_bytes_for_proving(&mut padded);
-            let families = setup
-                .circuit_families_setups
-                .iter()
-                .map(|(&id, &caps)| (id, caps))
-                .collect::<Vec<_>>();
-            UnrolledProgramSetup::new_from_setups_and_binary(
-                &padded,
-                &families,
-                &setup.inits_and_teardowns_setup,
-            )
-        }
-
-        let (bin, _) = app_paths();
-        let binary = canonical_metadata()
-            .app
-            .bin
-            .read_verified(&bin, "app binary")
-            .unwrap();
-        let mut summaries = artifact().summaries;
-        let security = SecurityLevel::Security100.model();
-        summaries.base = rebind_binary(summaries.base, &binary);
-        summaries.recursion_unrolled = rebind_binary(
-            summaries.recursion_unrolled,
-            recursion_artifact(security, RecursionLayer::Unrolled, RecursionArtifact::Bin),
-        );
-        summaries.recursion_unified = rebind_binary(
-            summaries.recursion_unified,
-            recursion_artifact(security, RecursionLayer::Unified, RecursionArtifact::Bin),
-        );
-        (summaries, binary)
+    fn validated_bundled_summaries() -> (ProgramSetupSummaries, Vec<u8>) {
+        let (bin, text) = app_paths();
+        let artifact = artifact();
+        let (binary, _) = artifact.metadata.checked_inputs(&bin, &text).unwrap();
+        artifact.validate_summaries(&binary).unwrap();
+        (artifact.summaries, binary)
     }
 
     #[test]
@@ -480,15 +447,43 @@ mod tests {
     }
 
     #[test]
-    fn stale_repository_artifact_is_rejected_after_source_lift() {
+    fn current_bundled_artifact_loads_and_binds_all_release_inputs() {
         let (bin, text) = app_paths();
-        let error = load_bundled_setup_summaries(&bin, &text)
-            .err()
-            .expect("stale source tree must reject bundled FRI setup");
-        assert!(error
-            .to_string()
-            .contains("effective Airbender source tree mismatch"));
-        assert!(verify_derived_release_artifact(&bin, &text, BUNDLED_ARTIFACT).is_err());
+        let summaries = load_bundled_setup_summaries(&bin, &text).unwrap();
+        assert_eq!(summaries.recursion_unified.end_params, UNIFIED_END_PARAMS);
+        assert_eq!(
+            ProgramCommitment(summaries.program_commitment()).to_string(),
+            PROGRAM_COMMITMENT
+        );
+    }
+
+    #[test]
+    fn historical_source_key_and_program_metadata_fail_closed() {
+        for (field, historical) in [
+            (
+                "airbender_patched_tree",
+                "98a3e82a726bca322340ec675263a4533857250a",
+            ),
+            (
+                "vk_hash",
+                "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90",
+            ),
+            (
+                "vk_hash",
+                "0x229a4a5a7715fb19f8a5940e42d9cd53bb85f040bcf0f71c76612450fb8235b1",
+            ),
+            (
+                "program_commitment",
+                "0x08e47e4531d0dc3409c5ae1db30b45bfec4b61893c8444f45f80e5c254d5bd94",
+            ),
+        ] {
+            let mut value = serde_json::to_value(canonical_metadata()).unwrap();
+            value[field] = json!(historical);
+            assert!(serde_json::from_value::<Metadata>(value)
+                .unwrap()
+                .validate()
+                .is_err());
+        }
     }
 
     #[test]
@@ -558,9 +553,9 @@ mod tests {
         let (bin, text) = app_paths();
         let binary = metadata.app.bin.read_verified(&bin, "app binary").unwrap();
         let text_bytes = metadata.app.text.read_verified(&text, "app text").unwrap();
-        for (release_identity, bytes, current_release_input) in [
-            (&metadata.app.bin, binary.as_slice(), true),
-            (&metadata.app.text, text_bytes.as_slice(), true),
+        for (release_identity, bytes) in [
+            (&metadata.app.bin, binary.as_slice()),
+            (&metadata.app.text, text_bytes.as_slice()),
             (
                 &metadata.recursion_unrolled.bin,
                 recursion_artifact(
@@ -568,7 +563,6 @@ mod tests {
                     RecursionLayer::Unrolled,
                     RecursionArtifact::Bin,
                 ),
-                false,
             ),
             (
                 &metadata.recursion_unrolled.text,
@@ -577,7 +571,6 @@ mod tests {
                     RecursionLayer::Unrolled,
                     RecursionArtifact::Txt,
                 ),
-                false,
             ),
             (
                 &metadata.recursion_unified.bin,
@@ -586,7 +579,6 @@ mod tests {
                     RecursionLayer::Unified,
                     RecursionArtifact::Bin,
                 ),
-                false,
             ),
             (
                 &metadata.recursion_unified.text,
@@ -595,17 +587,10 @@ mod tests {
                     RecursionLayer::Unified,
                     RecursionArtifact::Txt,
                 ),
-                false,
             ),
         ] {
             let identity = FileIdentity::pinned(bytes.len() as u64, &digest(bytes));
-            if current_release_input {
-                assert_eq!(&identity, release_identity);
-            } else {
-                assert!(release_identity
-                    .verify(bytes, "stale recursion input")
-                    .is_err());
-            }
+            assert_eq!(&identity, release_identity);
             identity.verify(bytes, "test").unwrap();
             let mut changed = bytes.to_vec();
             changed[0] ^= 1;
@@ -618,11 +603,9 @@ mod tests {
 
     #[test]
     fn summary_order_security_geometry_and_derived_values_are_checked() {
-        // The release artifact is stale; rebind its caps to current binaries
-        // only to exercise structural checks without pretending to authenticate it.
-        let (summaries, binary) = structurally_valid_summaries();
+        let (summaries, binary) = validated_bundled_summaries();
         let security = SecurityLevel::Security100.model();
-        assert!(artifact().validate_summaries(&binary).is_err());
+        artifact().validate_summaries(&binary).unwrap();
         summaries.validate(security, &binary).unwrap();
         let value = serde_json::to_value(&summaries).unwrap();
         let mut swapped = summaries.clone();

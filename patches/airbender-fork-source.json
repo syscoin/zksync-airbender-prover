@@ -11,5 +11,5 @@
   "canonical_lock_sha256": "44cd359ad7b0111511e3bfdb6a84ce93f26965ae5970bf16a284a966e5a1e411",
   "overlay_lock_file": "airbender.Cargo.lock",
   "overlay_lock_sha256": "cf62d057a5c6f393bab785817e65e7055aafa016c50c6c29ac87d29f11ec430d",
-  "purpose": "Immutable Syscoin Airbender source for the v32 Security100 FRI degree lift. The fork descends from the reviewed v0.6.0-rc.2 base and carries the former cumulative overlay plus randomized FRI degree-lift hardening and rebuilt recursion verifier binaries. Setup summaries, verification key, deployed verifier, and end-to-end proof qualification remain pending."
+  "purpose": "Immutable Syscoin Airbender source for the v32 Security100 FRI degree lift. The fork descends from the reviewed v0.6.0-rc.2 base and carries the former cumulative overlay plus randomized FRI degree-lift hardening and rebuilt recursion verifier binaries. Fresh native FRI proofs, setup summaries, CPU/GPU verification keys, stock GPU wrapping/SNARK proving, independent native verification and normal-profile EVM acceptance are qualified offline for the retained two-batch input. Live verifier deployment, service acceptance and broader workload qualification remain pending."
 }

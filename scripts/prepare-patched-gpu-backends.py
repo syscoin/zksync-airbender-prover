@@ -363,6 +363,7 @@ def main(argv):
     wrapper_inputs = base.wrapper_pins_metadata()
     common_crypto_pins = base.load_crypto_pins()
     common_crypto_inputs = base.crypto_pins_metadata()
+    base.require_compatible_build_guards(source, air, wrapper_pins, common_crypto_pins)
     overlay_raw, selected_lock = base.selected_lock_overlay(
         source / "Cargo.lock", base.PIN_PATH.parent / air["overlay_lock_file"], air,
         wrapper_pins, common_crypto_pins)
@@ -416,7 +417,7 @@ def main(argv):
     tooling = (PIN_PATH, *(PIN_PATH.parent / pins[k]["patch_file"] for k in ("crypto", "bellman")),
                base.PIN_PATH, base.PIN_PATH.parent / air["overlay_lock_file"],
                base.WRAPPER_PIN_PATH,
-               base.CRYPTO_PIN_PATH, base.CRYPTO_PIN_PATH.parent / common_crypto_pins["patch_file"],
+               base.CRYPTO_PIN_PATH,
                Path(__file__).resolve(), TOOLING_ROOT / "scripts/prepare-patched-airbender.py",
                base.CHECKOUT_HELPER_PATH,
                TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")
@@ -432,9 +433,8 @@ def main(argv):
         "zksync_crypto": {
             "inputs": common_crypto_inputs,
             "source": {"clone_source": common_crypto_clone,
-                       "upstream_commit": common_crypto_pins["upstream_commit"],
-                       "upstream_tree": common_crypto_pins["upstream_tree"],
-                       "patched_tree": common_crypto_pins["patched_tree"]},
+                       "fork_commit": common_crypto_pins["fork_commit"],
+                       "fork_tree": common_crypto_pins["fork_tree"]},
             "package_paths": common_crypto_paths,
         },
         "gpu_backend_overlay": {"inputs": metadata, "crypto_source": crypto_record, "bellman_native": native},

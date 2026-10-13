@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "upstream_url": "https://github.com/matter-labs/zksync-crypto.git",
+  "upstream_commit": "bf2797e4ca13475bf797aa43e085389cdd6732f9",
+  "upstream_tree": "2708ca8cbe657e1480e18eece5664c6d27509cb8",
+  "upstream_lock_source": "git+https://github.com/matter-labs/zksync-crypto.git?branch=oh_for_wrapper#bf2797e4ca13475bf797aa43e085389cdd6732f9",
+  "upstream_packages": {
+    "boojum": "0.32.10",
+    "fflonk": "0.32.10",
+    "franklin-crypto": "0.32.10",
+    "rescue_poseidon": "0.32.10",
+    "snark_wrapper": "0.32.10",
+    "zksync_bellman": "0.32.10",
+    "zksync_cs_derive": "0.32.10",
+    "zksync_ff": "0.32.10",
+    "zksync_ff_derive": "0.32.10",
+    "zksync_pairing": "0.32.10",
+    "zksync_solidity_vk_codegen": "0.32.10"
+  },
+  "purpose": "Immutable common crypto fork: retain all reviewed native FRI query-count, verifier-owned proof-policy, degree-lift, recursive/SNARK-wrapper, SHA-256 and row-accounting fixes; hoist the shared z*omega product, constrain weighted opening claims once per opening group, share FRI folding coset factors, omit unused terminal base-power squares, and start final-polynomial Horner evaluation from its leading coefficient. Compression column geometry and row allocation remain unchanged. Fresh compression and SNARK setup, stock GPU proving, independent native verification and normal-profile EVM acceptance are qualified offline for the retained two-batch input. Live deployment, service acceptance and broader workload qualification remain pending.",
+  "fork_url": "https://github.com/syscoin/zksync-crypto.git",
+  "fork_commit": "4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a",
+  "fork_tree": "4fda70a408c7817474fe67fba46b38cfbe420e59"
+}

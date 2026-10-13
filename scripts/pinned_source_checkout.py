@@ -28,8 +28,9 @@ def checkout_pinned_source(source, target, commit, tree):
     """Preserve ancestry and materialize only the hash-checked pinned tree.
 
     Failed fresh directories are retained; occupied paths are never reused.
-    Local caches are served through Git's file transport, never copied/hardlinked
-    or modified. Blob filtering is required, not a silent full-fetch fallback.
+    Non-shallow local caches are served through Git's file transport, never
+    copied/hardlinked or modified. Blob filtering is required, not a silent
+    full-fetch fallback.
     """
     target = Path(target)
     if (not target.is_absolute() or not target.parent.is_dir()
@@ -51,10 +52,18 @@ def checkout_pinned_source(source, target, commit, tree):
         raise ValueError("source must be a credential-free HTTPS URL or local Git directory")
     local_transport = parsed.scheme == "file"
     if local_transport:
+        local_source = Path(unquote(parsed.path)).resolve(strict=True)
+        ancestry_error = ("local source cache must have full commit ancestry; use a fresh "
+                          "non-shallow cache or the pinned HTTPS source")
+        try:
+            shallow = _git("-C", local_source, "rev-parse", "--is-shallow-repository")
+        except subprocess.CalledProcessError as error:
+            raise ValueError(ancestry_error) from error
+        if shallow.stdout.strip() != "false":
+            raise ValueError(ancestry_error)
         # --missing=print disables lazy fetch before revision parsing, including
         # on Git 2.43. Inspect only this commit's tree, not historical blobs.
         # An incomplete local cache must never hydrate itself during upload-pack.
-        local_source = Path(unquote(parsed.path)).resolve(strict=True)
         try:
             available = _git("-C", local_source, "rev-list", "--objects", "--no-object-names",
                              "--no-walk=unsorted", "--missing=print", commit)

@@ -107,7 +107,6 @@ def authenticate(record, expected_label):
         BASE.PIN_PATH,
         BASE.PIN_PATH.parent / air["overlay_lock_file"], BASE.WRAPPER_PIN_PATH,
         BASE.CRYPTO_PIN_PATH,
-        BASE.CRYPTO_PIN_PATH.parent / crypto["patch_file"],
         ROOT / "scripts/prepare-patched-airbender.py", ROOT / "scripts/cargo-with-patched-airbender.sh",
         ROOT / "scripts/pinned_source_checkout.py")}
     BASE.require(set(record["tooling_sha256"]) == tooling, "incomplete attested tooling")
@@ -156,13 +155,15 @@ def lock_overlay(raw, selected, air, crypto):
             BASE.require(not any(origin in source for origin in (
                 "github.com/matter-labs/zksync-airbender", "github.com/syscoin/zksync-airbender",
                 "github.com/matter-labs/zkos-wrapper", "github.com/syscoin/zkos-wrapper",
-                "github.com/matter-labs/zksync-crypto.git")), "unknown wrapper proving source")
+                "github.com/matter-labs/zksync-crypto.git", "github.com/syscoin/zksync-crypto.git")),
+                "unknown wrapper proving source")
         if not source:
             BASE.require(name not in local, "duplicate wrapper workspace package")
             local[name] = version
         for edge in package.get("dependencies", []):
             BASE.require(not any(origin in edge for origin in (
-                "github.com/matter-labs/zksync-airbender", "github.com/matter-labs/zksync-crypto.git")),
+                "github.com/matter-labs/zksync-airbender", "github.com/matter-labs/zksync-crypto.git",
+                "github.com/syscoin/zksync-crypto.git")),
                 "qualified proving dependency edge requires review")
     BASE.require(found == set(reviewed), "partial wrapper proving source graph")
     BASE.require(local == WRAPPER_WORKSPACE_PACKAGES, "unknown wrapper workspace package graph")
@@ -216,7 +217,8 @@ def metadata_graph(metadata, workspace, roots, paths, groups):
             BASE.require(not any(origin in (package.get("source") or "") for origin in (
                 "github.com/matter-labs/zksync-airbender", "github.com/syscoin/zksync-airbender",
                 "github.com/matter-labs/zkos-wrapper", "github.com/syscoin/zkos-wrapper",
-                "github.com/matter-labs/zksync-crypto.git")), "Cargo resolved an unknown proving package")
+                "github.com/matter-labs/zksync-crypto.git", "github.com/syscoin/zksync-crypto.git")),
+                "Cargo resolved an unknown proving package")
     # Cargo omits the inactive GPU-only fflonk package from CPU metadata. Its
     # pinned path patch and exact lock identity remain mandatory in the owning
     # manifest/lock; if emitted, the path/version/source checks above still apply.

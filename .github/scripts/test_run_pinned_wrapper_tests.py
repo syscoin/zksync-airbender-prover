@@ -87,7 +87,6 @@ class WrapperTests(unittest.TestCase):
         tooling = (BASE.PIN_PATH,
                    BASE.PIN_PATH.parent / self.air["overlay_lock_file"], BASE.WRAPPER_PIN_PATH,
                    BASE.CRYPTO_PIN_PATH,
-                   BASE.CRYPTO_PIN_PATH.parent / self.crypto["patch_file"],
                    ROOT / "scripts/prepare-patched-airbender.py", ROOT / "scripts/cargo-with-patched-airbender.sh",
                    ROOT / "scripts/pinned_source_checkout.py")
         self.target = self.root / "target cache"
@@ -175,6 +174,20 @@ class WrapperTests(unittest.TestCase):
         for name, raw in cases.items():
             with self.subTest(name=name), self.assertRaises(ValueError):
                 RUNNER.lock_overlay(raw, self.selected, self.air, self.crypto)
+
+    def test_extra_fork_git_source_is_rejected_in_lock_and_cargo_metadata(self):
+        self.authenticated()
+        fork_source = ("git+" + self.crypto["fork_url"] + "?rev=" + self.crypto["fork_commit"]
+                       + "#" + self.crypto["fork_commit"])
+        extra = {"name": "unexpected-common-fork", "version": "0.32.10", "source": fork_source}
+        raw = (self.raw + ('\n[[package]]\nname = "unexpected-common-fork"\nversion = "0.32.10"\n'
+                           + "source = " + json.dumps(fork_source) + "\n").encode())
+        with self.assertRaisesRegex(ValueError, "unknown wrapper proving source"):
+            RUNNER.lock_overlay(raw, self.selected, self.air, self.crypto)
+        metadata = self.metadata(self.workspace)
+        metadata["packages"].append(extra)
+        with self.assertRaisesRegex(ValueError, "unknown proving package"):
+            RUNNER.metadata_graph(metadata, self.workspace, self.roots, self.paths, self.groups)
 
     def test_attestation_label_success_pins_lock_source_and_tooling_drift_rejected(self):
         self.authenticated()

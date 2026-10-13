@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build from immutable Airbender and wrapper forks and reviewed crypto patches.
+"""Build from immutable Airbender, wrapper and common crypto forks.
 
 Usage: cargo-with-patched-airbender.sh LABEL -- cargo build|test|run|check|clippy|metadata|tree --locked ...
 PROVER_SOURCE_DIR separates reviewed tooling from application source in release CI.
@@ -40,7 +40,7 @@ exec(compile(CHECKOUT_HELPER_PATH.read_bytes(), str(CHECKOUT_HELPER_PATH), "exec
 checkout_pinned_source = _checkout_helper.checkout_pinned_source
 PIN_PATH = TOOLING_ROOT / "patches/airbender-fork-source.json"
 WRAPPER_PIN_PATH = TOOLING_ROOT / "patches/zkos-wrapper-fork-source.json"
-CRYPTO_PIN_PATH = TOOLING_ROOT / "patches/zksync-crypto-native-fri-query-count.json"
+CRYPTO_PIN_PATH = TOOLING_ROOT / "patches/zksync-crypto-fork-source.json"
 SOURCE_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
                 "multiblock_batch.bin", "multiblock_batch.text")
 ALLOWED_COMMANDS = {"build", "test", "run", "check", "clippy", "metadata", "tree"}
@@ -74,6 +74,7 @@ WRAPPER_AIRBENDER_ROOTS = (
     "execution_utils", "setups", "field", "verifier_generator", "prover",
 )
 PREPARED_SOURCE_MARKER = ".syscoin-proving-sources-prepared"
+PREPARED_BUILD_GUARD_SHA256 = "6e3b455295535c424e76dae307461a484ef02aac2734f59e35a59c74942824f5"
 CRYPTO_UPSTREAM = (
     "https://github.com/matter-labs/zksync-crypto.git",
     "bf2797e4ca13475bf797aa43e085389cdd6732f9",
@@ -87,16 +88,11 @@ CRYPTO_PACKAGES = dict.fromkeys((
     "zksync_bellman", "zksync_cs_derive", "zksync_ff", "zksync_ff_derive",
     "zksync_pairing", "zksync_solidity_vk_codegen",
 ), "0.32.10")
-CRYPTO_CHANGED_PATHS = {
-    "crates/boojum/src/cs/implementations/convenience.rs",
-    "crates/boojum/src/cs/implementations/cs.rs",
-    "crates/boojum/src/cs/implementations/prover.rs",
-    "crates/boojum/src/cs/implementations/verifier.rs",
-    "crates/boojum/src/gadgets/recursion/recursive_verifier.rs",
-    "crates/boojum/src/gadgets/sha256/mod.rs",
-    "crates/snark-wrapper/src/verifier/fri.rs",
-}
-CRYPTO_PATCHED_TREE = "f8d7b132a841e0bfbfccd27614314a279d523887"
+CRYPTO_FORK = (
+    "https://github.com/syscoin/zksync-crypto.git",
+    "4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a",
+    "4fda70a408c7817474fe67fba46b38cfbe420e59",
+)
 
 
 def require(condition, message):
@@ -245,7 +241,7 @@ def prepare_application_manifest(manifest, snark_manifest, pins, air_source, air
 def prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins):
     return (str(workspace.resolve()) + "\n" + pins["fork_commit"] + "\n"
             + pins["fork_tree"] + "\n" + wrapper_pins["fork_tree"] + "\n"
-            + crypto_pins["patched_tree"] + "\n").encode()
+            + crypto_pins["fork_tree"] + "\n").encode()
 
 
 def write_prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins):
@@ -253,6 +249,26 @@ def write_prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins):
     with marker.open("xb") as destination:
         destination.write(prepared_source_marker(workspace, pins, wrapper_pins, crypto_pins))
     return sha256(marker)
+
+
+def require_compatible_build_guards(source, pins, wrapper_pins, crypto_pins):
+    """Reject cross-generation guarded applications before snapshots or source downloads.
+
+    Guardless historical sources retain the existing lock/feature compatibility checks.
+    Existing guards are immutable application inputs, never rewritten or broadened.
+    """
+    expected_identity = ('"{}\\n' + "\\n".join((pins["fork_commit"], pins["fork_tree"],
+                         wrapper_pins["fork_tree"], crypto_pins["fork_tree"])) + '\\n"')
+    for crate in ("zksync_os_fri_prover", "zksync_os_snark_prover"):
+        guard = source / "crates" / crate / "build.rs"
+        if not guard.exists() and not guard.is_symlink():
+            continue
+        require(guard.is_file() and not guard.is_symlink()
+                and sha256(guard) == PREPARED_BUILD_GUARD_SHA256
+                and expected_identity in guard.read_text(),
+                "incompatible proving-source guard: " + str(guard)
+                + "; use this application's exact matching validated tooling, or select "
+                "application source qualified with the current tooling")
 
 
 def load_wrapper_pins(path=WRAPPER_PIN_PATH):
@@ -282,10 +298,10 @@ def load_crypto_pins(path=CRYPTO_PIN_PATH):
     pins = json_document(path)
     require(isinstance(pins, dict) and set(pins) == {
         "schema_version", "upstream_url", "upstream_commit", "upstream_tree",
-        "upstream_lock_source", "upstream_packages", "patch_file", "patch_sha256",
-        "changed_files", "patched_tree", "purpose",
+        "upstream_lock_source", "upstream_packages", "fork_url", "fork_commit",
+        "fork_tree", "purpose",
     }, "unknown common crypto pin fields")
-    require(type(pins["schema_version"]) is int and pins["schema_version"] == 1,
+    require(type(pins["schema_version"]) is int and pins["schema_version"] == 2,
             "unsupported common crypto pin schema")
     require(tuple(pins[k] for k in ("upstream_url", "upstream_commit", "upstream_tree"))
             == CRYPTO_UPSTREAM, "unknown common crypto upstream origin")
@@ -293,25 +309,8 @@ def load_crypto_pins(path=CRYPTO_PIN_PATH):
             "unknown common crypto lock source")
     require(pins["upstream_packages"] == CRYPTO_PACKAGES,
             "unknown common crypto package graph")
-    require(pins["patch_file"] == "zksync-crypto-native-fri-query-count.patch"
-            and isinstance(pins["patch_sha256"], str)
-            and re.fullmatch(r"[0-9a-f]{64}", pins["patch_sha256"])
-            and pins["patch_sha256"] != "0" * 64, "invalid common crypto patch identity")
-    checked_hash(path.parent / pins["patch_file"], pins["patch_sha256"])
-    require(pins["patched_tree"] == CRYPTO_PATCHED_TREE,
-            "unknown common crypto patched tree")
-    require(isinstance(pins["changed_files"], dict)
-            and set(pins["changed_files"]) == CRYPTO_CHANGED_PATHS,
-            "unknown common crypto source closure")
-    for relative, row in pins["changed_files"].items():
-        require(isinstance(row, dict) and set(row) == {
-            "preimage_sha256", "postimage_sha256", "postimage_size",
-        }, "unknown common crypto source fields")
-        require(all(isinstance(row[key], str) and re.fullmatch(r"[0-9a-f]{64}", row[key])
-                    and row[key] != "0" * 64 for key in ("preimage_sha256", "postimage_sha256")),
-                "invalid common crypto source digest")
-        require(type(row["postimage_size"]) is int and row["postimage_size"] > 0,
-                "invalid common crypto postimage size")
+    require(tuple(pins[k] for k in ("fork_url", "fork_commit", "fork_tree"))
+            == CRYPTO_FORK, "unknown common crypto fork source")
     require(isinstance(pins["purpose"], str) and pins["purpose"], "missing common crypto purpose")
     return pins
 
@@ -350,7 +349,9 @@ def audit_lock(canonical, overlay, pins, wrapper_pins=None, crypto_pins=None):
                     "unknown wrapper package/version")
             wrapper_packages[name] = version
             del package["source"]
-        elif "github.com/matter-labs/zksync-crypto" in source and "zksync-crypto-gpu" not in source:
+        elif (any(origin in source for origin in
+                  ("github.com/matter-labs/zksync-crypto", "github.com/syscoin/zksync-crypto"))
+              and "zksync-crypto-gpu" not in source):
             require(source == crypto_pins["upstream_lock_source"], "mixed common crypto sources in lock")
             name, version = package["name"], package["version"]
             require(name not in crypto_packages and crypto_pins["upstream_packages"].get(name) == version,
@@ -391,7 +392,9 @@ def selected_lock_overlay(source_lock, reference_overlay, pins, wrapper_pins=Non
                         ("github.com/matter-labs/zksync-airbender", "github.com/syscoin/zksync-airbender"))
         wrapper = any(origin in source for origin in
                       ("github.com/matter-labs/zkos-wrapper", "github.com/syscoin/zkos-wrapper"))
-        crypto = "github.com/matter-labs/zksync-crypto" in source and "zksync-crypto-gpu" not in source
+        crypto = (any(origin in source for origin in
+                      ("github.com/matter-labs/zksync-crypto", "github.com/syscoin/zksync-crypto"))
+                  and "zksync-crypto-gpu" not in source)
         if not airbender and not wrapper and not crypto:
             continue
         if airbender:
@@ -727,46 +730,27 @@ def prepare_wrapper(build, pins):
     return upstream, clone_source, paths
 
 
-def verify_crypto(upstream, pins):
-    require(run_git(upstream, "rev-parse", "HEAD") == pins["upstream_commit"],
-            "common crypto HEAD changed")
-    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"],
-            "common crypto upstream tree changed")
-    require(run_git(upstream, "diff", "--name-only", "HEAD").splitlines()
-            == sorted(pins["changed_files"]), "unexpected common crypto changed paths")
-    require(not run_git(upstream, "ls-files", "--others", "--exclude-standard"),
-            "unexpected common crypto untracked files")
-    require(not run_git(upstream, "diff", "--name-only"),
-            "common crypto changed after patch staging")
-    require(run_git(upstream, "write-tree") == pins["patched_tree"],
-            "common crypto patched tree mismatch")
-    for relative, row in pins["changed_files"].items():
-        path = upstream / relative
-        checked_hash(path, row["postimage_sha256"])
-        require(path.stat().st_size == row["postimage_size"],
-                "common crypto postimage size mismatch")
+def verify_crypto(source, pins):
+    require(run_git(source, "rev-parse", "HEAD") == pins["fork_commit"],
+            "common crypto fork HEAD changed")
+    require(run_git(source, "merge-base", "HEAD", pins["upstream_commit"])
+            == pins["upstream_commit"], "common crypto fork base changed")
+    require(run_git(source, "rev-parse", "HEAD^{tree}") == pins["fork_tree"],
+            "common crypto fork tree changed")
+    require(not run_git(source, "status", "--porcelain", "--untracked-files=all"),
+            "common crypto fork source changed")
 
 
 def prepare_crypto(build, pins):
-    upstream = build / "zksync-crypto"
-    clone_source = os.environ.get("ZKSYNC_CRYPTO_SOURCE_DIR", pins["upstream_url"])
+    source = build / "zksync-crypto"
+    clone_source = os.environ.get("ZKSYNC_CRYPTO_SOURCE_DIR", pins["fork_url"])
     if "ZKSYNC_CRYPTO_SOURCE_DIR" in os.environ:
         clone_source = str(Path(clone_source).resolve(strict=True))
         require(Path(clone_source).is_dir(), "ZKSYNC_CRYPTO_SOURCE_DIR must be a Git directory")
-    checkout_pinned_source(clone_source, upstream, pins["upstream_commit"], pins["upstream_tree"])
-    require(run_git(upstream, "rev-parse", "HEAD^{tree}") == pins["upstream_tree"]
-            and not run_git(upstream, "status", "--porcelain"),
-            "dirty/wrong common crypto source baseline")
-    for relative, row in pins["changed_files"].items():
-        checked_hash(upstream / relative, row["preimage_sha256"])
-    patch = CRYPTO_PIN_PATH.parent / pins["patch_file"]
-    checked_hash(patch, pins["patch_sha256"])
-    run_git(upstream, "apply", "--check", str(patch))
-    run_git(upstream, "apply", str(patch))
-    run_git(upstream, "add", "--", *sorted(pins["changed_files"]))
-    verify_crypto(upstream, pins)
-    paths = package_paths(upstream, pins["upstream_packages"])
-    return upstream, clone_source, paths
+    checkout_pinned_source(clone_source, source, pins["fork_commit"], pins["fork_tree"])
+    verify_crypto(source, pins)
+    paths = package_paths(source, pins["upstream_packages"])
+    return source, clone_source, paths
 
 
 def write_json_exclusive(path, value):
@@ -793,6 +777,7 @@ def main(argv):
     wrapper_inputs = wrapper_pins_metadata()
     crypto_pins = load_crypto_pins()
     crypto_inputs = crypto_pins_metadata()
+    require_compatible_build_guards(source, pins, wrapper_pins, crypto_pins)
     overlay = PIN_PATH.parent / pins["overlay_lock_file"]
     checked_hash(overlay, pins["overlay_lock_sha256"])
     overlay_raw, selected_lock = selected_lock_overlay(
@@ -842,14 +827,13 @@ def main(argv):
         "zksync_crypto": {
             "inputs": crypto_inputs,
             "source": {"clone_source": crypto_clone_source,
-                       "upstream_commit": crypto_pins["upstream_commit"],
-                       "upstream_tree": crypto_pins["upstream_tree"],
-                       "patched_tree": crypto_pins["patched_tree"]},
+                       "fork_commit": crypto_pins["fork_commit"],
+                       "fork_tree": crypto_pins["fork_tree"]},
             "package_paths": crypto_paths,
         },
         "tooling_sha256": {str(path.relative_to(TOOLING_ROOT)): sha256(path) for path in
                            (PIN_PATH, overlay, WRAPPER_PIN_PATH, CRYPTO_PIN_PATH,
-                            CRYPTO_PIN_PATH.parent / crypto_pins["patch_file"], Path(__file__).resolve(),
+                            Path(__file__).resolve(),
                             CHECKOUT_HELPER_PATH,
                             TOOLING_ROOT / "scripts/cargo-with-patched-airbender.sh")},
         "application_source": str(source), "application_inputs_sha256": source_hashes,
