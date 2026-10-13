@@ -309,6 +309,7 @@ mod tests {
         for historical in [
             "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90",
             "0x229a4a5a7715fb19f8a5940e42d9cd53bb85f040bcf0f71c76612450fb8235b1",
+            "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144",
         ] {
             assert!(!versions.contains(historical));
             assert_eq!(versions.program_commitment_for(historical), None);

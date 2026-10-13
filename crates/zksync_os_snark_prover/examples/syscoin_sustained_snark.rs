@@ -39,7 +39,7 @@ use zksync_sequencer_proof_client::{
 const BIN_SHA: &str = "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6";
 const TEXT_SHA: &str = "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a";
 const PROGRAM: &str = "0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975";
-const VK: &str = "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144";
+const VK: &str = "0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153";
 // Exact canonical GPU CRS in docker/prover-build-pins.json; never use CPU CRS here.
 const CRS_BYTES: u64 = 4_831_838_468;
 const CRS_SHA: &str = "90d1dea94da665d5741dcc6e9ffc1af23a29669f950a6d599a6ccfee4cfb81bd";

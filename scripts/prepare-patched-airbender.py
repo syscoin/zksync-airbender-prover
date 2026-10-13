@@ -74,7 +74,7 @@ WRAPPER_AIRBENDER_ROOTS = (
     "execution_utils", "setups", "field", "verifier_generator", "prover",
 )
 PREPARED_SOURCE_MARKER = ".syscoin-proving-sources-prepared"
-PREPARED_BUILD_GUARD_SHA256 = "6e3b455295535c424e76dae307461a484ef02aac2734f59e35a59c74942824f5"
+PREPARED_BUILD_GUARD_SHA256 = "a379aad278c27a645c0087172cc75b2f488fb70e09d9d7785dbc446f51c31a97"
 CRYPTO_UPSTREAM = (
     "https://github.com/matter-labs/zksync-crypto.git",
     "bf2797e4ca13475bf797aa43e085389cdd6732f9",
@@ -90,8 +90,8 @@ CRYPTO_PACKAGES = dict.fromkeys((
 ), "0.32.10")
 CRYPTO_FORK = (
     "https://github.com/syscoin/zksync-crypto.git",
-    "4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a",
-    "4fda70a408c7817474fe67fba46b38cfbe420e59",
+    "5eafa1f914519d88a13c577a9e8cc5c7db1dfc77",
+    "c52391d0df82126d27e5c76810e9df85c61875d0",
 )
 
 

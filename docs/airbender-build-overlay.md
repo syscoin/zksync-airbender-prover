@@ -38,8 +38,8 @@ checks; their availability is not a claim of current proof or release qualificat
 The separate `zkos-wrapper` and common `zksync-crypto` sources also come from
 immutable Syscoin forks. The wrapper adds a private 64 KiB `OsRng` buffer around
 synchronous Bellman proof finalization. The common crypto fork is commit
-`4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a`, tree
-`4fda70a408c7817474fe67fba46b38cfbe420e59`, descending from Matter Labs commit
+`5eafa1f914519d88a13c577a9e8cc5c7db1dfc77`, tree
+`c52391d0df82126d27e5c76810e9df85c61875d0`, descending from Matter Labs commit
 `bf2797e4ca13475bf797aa43e085389cdd6732f9`. It retains the reviewed native FRI
 query count, verifier-owned proof policy, degree lift, recursive/SNARK agreement,
 SHA-256, and row-accounting fixes. It hoists the shared `z * omega` product
@@ -47,8 +47,19 @@ outside the FRI query loop and computes constrained weighted opening claims once
 per opening group. FRI folding shares the constrained coset factor across pairs,
 skips the constant first interpolation factor, and omits each group's unused final
 base-power square while preserving the coset inverse carried into the next group.
-Final-polynomial Horner evaluation starts from the highest coefficient. Compression
-column geometry and row allocation remain unchanged. `patches/zksync-crypto-fork-source.json` binds the common source identity;
+Final-polynomial Horner evaluation starts from the highest coefficient. It also
+constrains recursive transcript query bits to their canonical Goldilocks
+representative and corrects addition witnesses whose sum equals the modulus.
+The query-bit guard adds compression constraints. Fresh compression/SNARK proofs for
+this source passed independent CPU verification; its generated verifier accepted the
+actual proof and rejected changed-public-input and changed-scalar-opening controls on
+the normal-profile local EVM. The new app-bound VK is
+`0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153`.
+The runtime candidate bundles now bind this VK while retaining the unchanged setup
+summaries and commitment parameters. Independent CPU key agreement, normal worker
+build/loader checks and release qualification remain pending. Earlier measurements
+belong to `4f1e95bf`, not this source.
+`patches/zksync-crypto-fork-source.json` binds the common source identity;
 no common crypto byte patch is replayed. Both fork manifests bind exact upstream
 and fork commits and trees, ancestry, and the reviewed package versions. Preparation
 checks clean, exact source trees before and after Cargo. The FRI-only binary does
@@ -84,14 +95,15 @@ commit and tree, original lock source, selected lock derivation, wrapper and com
 crypto fork identities, source package paths, and other build inputs. GPU builds
 also retain the separate backend patch identities.
 
-The current bundled FRI setup summaries and SNARK commitment were regenerated for
-the prepared fork identities, including the optimized common-crypto circuit.
-Normal locked CPU release-loader tests accept matching current bundles and reject
-altered inputs. For the retained two-batch input, fresh native FRI proofs, stock
-GPU wrapper/compression/SNARK proving and all three independent CPU verifications
-completed; all three CPU/GPU keys matched byte-for-byte. The generated verifier
-accepted the actual optimized proof on the normal-profile local EVM, and changed
-public-input and valid-field scalar-opening controls both reverted.
+The preceding `4f1e95bf` snapshot's bundled FRI setup summaries and SNARK commitment
+were qualified with its prepared fork identities. Its normal locked CPU release-loader
+tests accepted matching bundles and rejected altered inputs. For the retained
+two-batch input, native FRI proofs, stock GPU wrapper/compression/SNARK proving and
+all three independent CPU verifications completed; all three CPU/GPU keys matched
+byte-for-byte. That generated verifier accepted its actual optimized proof on the
+normal-profile local EVM, and changed-public-input and valid-field scalar-opening
+controls both reverted. These are historical results, not new worker or bundle
+qualification for the canonical-query fix.
 
 These offline results do not establish live verifier deployment, service acceptance,
 broader workload qualification or sustained throughput. Those gates remain pending;

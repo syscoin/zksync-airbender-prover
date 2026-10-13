@@ -12,7 +12,7 @@
     "circuit_identity": "rv32im-unsigned-base/reduced-unrolled/reduced-unified-v1",
     "cap_size": 64,
     "num_cosets": 2,
-    "vk_hash": "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144",
+    "vk_hash": "0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153",
     "program_commitment": "0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975",
     "app": {
       "bin": {

@@ -375,10 +375,26 @@ aggregation hashes every input and would change the settlement public output.
 The release names belong to different repositories: `v0.6.0-rc.2` is the pinned Airbender proving
 stack, while the checked-in Syscoin guest below is based on final `zksync-os v0.4.0`.
 
-The optimized V32 source candidate binds the unchanged Syscoin app MD5 and accepted Security100
+The current source candidate pins common crypto
+`5eafa1f914519d88a13c577a9e8cc5c7db1dfc77` (tree
+`c52391d0df82126d27e5c76810e9df85c61875d0`) to constrain recursive transcript
+query bits to their canonical Goldilocks representative and correct addition
+witnesses whose sum equals the modulus. Its freshly generated app-bound VK is
+`0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153`.
+The new compression and SNARK proofs passed independent CPU verification. The generated
+verifier accepted the actual new proof on the normal-profile local EVM and rejected both
+changed-public-input and changed-scalar-opening controls. The unchanged native FRI/RISC
+proof inputs were retained, not regenerated. The runtime candidate bundles now bind the
+new VK while preserving those setup summaries and commitment parameters. Independent CPU
+key agreement, normal worker builds, release-loader validation and release qualification
+remain pending. No live verifier or service adoption is established by these offline results.
+The measurements below belong to the preceding source snapshot and are not measurements
+of the new candidate.
+
+The preceding optimized V32 source snapshot binds the unchanged Syscoin app MD5 and accepted Security100
 program commitment
 `0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975`
-to the newly derived app-bound VK
+to the app-bound VK
 `0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144`.
 Its common crypto source is `4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a` (tree
 `4fda70a408c7817474fe67fba46b38cfbe420e59`), with the original wrapper
@@ -391,7 +407,7 @@ to 65,536, while the final SNARK domain remains `2^25`. Airbender stays pinned t
 CRS verification and fresh zero-knowledge randomness remain required.
 
 The accepted offline comparison used the same native two-batch inputs and GPU, with one
-run per version. It measures this candidate snapshot, not sustained performance:
+run per version. It measures that preceding snapshot, not the current source or sustained performance:
 
 | Measurement | Previous candidate | Optimized candidate |
 | --- | ---: | ---: |

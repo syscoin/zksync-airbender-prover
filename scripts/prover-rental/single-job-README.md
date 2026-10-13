@@ -126,7 +126,21 @@ SHA-256 hashes of the **actual** guest `.bin`/`.text`, standalone native worker,
 and GPU compact CRS for SNARK. FRI uses `crs_sha256: null`. These are immutable
 image inputs, not runtime fields a rental may choose. Both build-time and startup
 checks hash those files. The native workers additionally enforce their compiled
-app/program/VK constants. The accepted optimized V8 candidate app-bound VK is
+app/program/VK constants. The current common-crypto source candidate is
+`5eafa1f914519d88a13c577a9e8cc5c7db1dfc77` (tree
+`c52391d0df82126d27e5c76810e9df85c61875d0`); it adds canonical recursive query-bit
+constraints and corrects modulus-boundary addition witnesses. Its regenerated
+app-bound VK is
+`0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153`.
+The new compression/SNARK proofs passed independent CPU verification, and the
+generated verifier accepted the actual proof on the normal-profile local EVM while
+rejecting changed-public-input and changed-scalar-opening controls. The runtime candidate
+bundles now bind this VK, retaining the unchanged setup summaries and commitment parameters.
+Independent CPU key agreement, normal worker build/loader checks and release qualification
+are still pending. These offline results do not qualify a rental image or live service.
+Do not deploy this candidate with the preceding key below.
+
+The preceding accepted optimized V8 snapshot's app-bound VK is
 `0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144`,
 with program commitment
 `0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975`,
@@ -135,10 +149,11 @@ bound to the reviewed guest tree
 [registered proving identity](../../crates/protocol_version/src/lib.rs)
 and the [historical source release](https://github.com/syscoin/zksync-os-server/blob/123174413b852490a6d81df529270390fbed0fc0/scripts/releases/era-v32/README.md)
 for the previous key. That historical qualification does not validate the corrected
-circuits or new key; the current server and generated Era verifier must match this identity.
-Use stage binaries built for that identity and hash their actual image contents.
+circuits or new key. The server, generated Era verifier and newly built stage binaries
+must instead match the current candidate identity, and the actual image contents must
+be hashed.
 
-This source candidate uses common crypto `4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a`
+That preceding snapshot uses common crypto `4f1e95bf742ff87fe4ce18acfad4e2a305b94c7a`
 and the original wrapper `816a3598c60fac37d02cf1dcd1bc48b2e2c75de1`, with the
 `2^16` compression row hint; measured padded compression rows are 65,536 rather
 than 131,072. The final SNARK domain remains `2^25`. One offline run per version

@@ -868,11 +868,13 @@ class PreparedGuardCompatibilityTests(unittest.TestCase):
         current = (ROOT / "crates/zksync_os_fri_prover/build.rs").read_bytes()
         old = current.replace(b"a1e9a551b9588b1dfab5c5088554fc69770c0e85",
                               b"9a1110f6c514338b3143909a726fe97b9af6c9cd").replace(
-            b"4fda70a408c7817474fe67fba46b38cfbe420e59",
+            b"c52391d0df82126d27e5c76810e9df85c61875d0",
             b"f8d7b132a841e0bfbfccd27614314a279d523887")
+        preceding = current.replace(b"c52391d0df82126d27e5c76810e9df85c61875d0",
+                                    b"4fda70a408c7817474fe67fba46b38cfbe420e59")
         malformed = current.replace(b"assert_eq!(actual, expected", b"assert_eq!(actual, actual")
         for crate in ("zksync_os_fri_prover", "zksync_os_snark_prover"):
-            for raw in (old, malformed):
+            for raw in (old, preceding, malformed):
                 with self.subTest(crate=crate, old=raw == old), tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     guard = root / "crates" / crate / "build.rs"
@@ -907,8 +909,8 @@ class PreparedGuardCompatibilityTests(unittest.TestCase):
             guard = root / "crates/zksync_os_snark_prover/build.rs"
             guard.parent.mkdir(parents=True)
             original = (ROOT / "crates/zksync_os_snark_prover/build.rs").read_bytes().replace(
-                b"4fda70a408c7817474fe67fba46b38cfbe420e59",
-                b"f8d7b132a841e0bfbfccd27614314a279d523887")
+                b"c52391d0df82126d27e5c76810e9df85c61875d0",
+                b"4fda70a408c7817474fe67fba46b38cfbe420e59")
             guard.write_bytes(original)
             with patch.dict(HELPER.os.environ, {"PROVER_SOURCE_DIR": str(root)}, clear=True), \
                     patch.object(HELPER, "copy_application") as copy_app, \

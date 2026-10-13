@@ -9,7 +9,7 @@ fn main() {
         .expect("canonical prover workspace");
     let marker = workspace.join(".syscoin-proving-sources-prepared");
     let expected = format!(
-        "{}\n0d8c852954afcae1f160151a17fe80886f1755b0\na41a4a18eeb102b405bcb63ad7ca85e9b6b13213\na1e9a551b9588b1dfab5c5088554fc69770c0e85\n4fda70a408c7817474fe67fba46b38cfbe420e59\n",
+        "{}\n0d8c852954afcae1f160151a17fe80886f1755b0\na41a4a18eeb102b405bcb63ad7ca85e9b6b13213\na1e9a551b9588b1dfab5c5088554fc69770c0e85\nc52391d0df82126d27e5c76810e9df85c61875d0\n",
         workspace.display()
     );
     let actual = fs::read_to_string(&marker)
