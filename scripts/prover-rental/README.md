@@ -279,6 +279,15 @@ startup does no cloning, compilation or package installation. FRI needs no CRS.
 The separate SNARK image carries its CRS. FlashBoot does not replace the image
 registry or guarantee a GPU cache survives eviction.
 
+Rebuild and republish rental images when their CA bundles change, then pin the
+new digest in their rental or endpoint policy before resuming. All rental image
+builds check Python's default TLS trust store for the distrusted emSign ECC Root
+CA - G3; the Serverless image also checks certifi and botocore. The build disables
+only that certificate by fingerprint in the Debian trust configuration; other
+emSign roots stay enabled. The single-job and warm adapters use the checker's
+`--system-only` mode and need no Serverless SDK. Existing images and restored
+FlashBoot workers keep their old trust until replaced.
+
 Create a Runpod queue endpoint using the pinned Serverless FRI image and record
 the endpoint/template IDs. Configure FlashBoot explicitly as `FLASHBOOT`, one
 GPU, zero minimum/one maximum worker, five idle seconds, and `QUEUE_DELAY`

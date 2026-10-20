@@ -26,6 +26,8 @@ class BuildImageTests(unittest.TestCase):
 
             def inspect_build(command, **_):
                 context = Path(command[-1])
+                self.assertIn("check-trust-store.py --refresh-system --system-only",
+                              (context / "Dockerfile").read_text())
                 for line in (context / "Dockerfile").read_text().splitlines():
                     if line.startswith("COPY "):
                         for name in line.split()[1:-1]:
@@ -37,6 +39,26 @@ class BuildImageTests(unittest.TestCase):
 
             argv = ["build-image.py", "--warm", "--fri-release", str(release_path), "--base-image",
                     "example/prover@sha256:" + "a" * 64, "--tag", "warm-test", "--execute"]
+            with patch.object(sys, "argv", argv), patch.object(builder.subprocess, "run", inspect_build):
+                builder.main()
+
+    def test_single_job_context_checks_system_trust_without_sdk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            release_path = Path(temporary) / "FRI.json"
+            job.write_new(release_path, job.encode(release("FRI")))
+
+            def inspect_build(command, **_):
+                context = Path(command[-1])
+                recipe = (context / "Dockerfile").read_text()
+                self.assertIn("check-trust-store.py --refresh-system --system-only", recipe)
+                self.assertNotIn("pip install", recipe)
+                for line in recipe.splitlines():
+                    if line.startswith("COPY "):
+                        for name in line.split()[1:-1]:
+                            self.assertTrue((context / name).exists(), name)
+
+            argv = ["build-image.py", "--release", str(release_path), "--base-image",
+                    "example/prover@sha256:" + "a" * 64, "--tag", "single-test", "--execute"]
             with patch.object(sys, "argv", argv), patch.object(builder.subprocess, "run", inspect_build):
                 builder.main()
 
@@ -100,6 +122,7 @@ class BuildImageTests(unittest.TestCase):
                     if line.startswith("COPY "):
                         for name in line.split()[1:-1]:
                             self.assertTrue((context / name).exists(), name)
+                self.assertNotIn("--system-only", (context / "Dockerfile").read_text())
                 script = ("import runpod, rental_provider, job, worker, fri_session, serverless_worker; "
                           "assert runpod.is_sdk; assert job.Error is rental_provider.Error; "
                           "assert fri_session.Error is rental_provider.Error")
@@ -129,6 +152,7 @@ class BuildImageTests(unittest.TestCase):
         self.assertIn("RUNPOD_LOG_LEVEL=INFO", recipe)
         self.assertIn("RUNPOD_INIT_TIMEOUT=610", recipe)
         self.assertIn("RUNPOD_REALTIME_CONCURRENCY=1", recipe)
+        self.assertIn("check-trust-store.py --refresh-system", recipe)
         self.assertNotIn("setup_compact.key", recipe)
         self.assertNotIn("git clone", recipe)
         self.assertNotIn("cargo build", recipe)

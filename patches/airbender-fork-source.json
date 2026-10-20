@@ -8,8 +8,8 @@
   "fork_url": "https://github.com/syscoin/zksync-airbender",
   "fork_commit": "0d8c852954afcae1f160151a17fe80886f1755b0",
   "fork_tree": "a41a4a18eeb102b405bcb63ad7ca85e9b6b13213",
-  "canonical_lock_sha256": "44cd359ad7b0111511e3bfdb6a84ce93f26965ae5970bf16a284a966e5a1e411",
+  "canonical_lock_sha256": "e4d36582602a92d75846023fb0fbb1d1290f81a6cd3f1dced98a87db6df51d20",
   "overlay_lock_file": "airbender.Cargo.lock",
-  "overlay_lock_sha256": "cf62d057a5c6f393bab785817e65e7055aafa016c50c6c29ac87d29f11ec430d",
+  "overlay_lock_sha256": "4390c699c9d78a73b9b5369e8d79200e2ebe3259a371dd9c18a3ea8d32332252",
   "purpose": "Immutable Syscoin Airbender source for the v32 Security100 FRI degree lift. The fork descends from the reviewed v0.6.0-rc.2 base and carries the former cumulative overlay plus randomized FRI degree-lift hardening and rebuilt recursion verifier binaries. Fresh native FRI proofs, setup summaries, CPU/GPU verification keys, stock GPU wrapping/SNARK proving, independent native verification and normal-profile EVM acceptance are qualified offline for the retained two-batch input. Live verifier deployment, service acceptance and broader workload qualification remain pending."
 }

@@ -43,6 +43,7 @@ jobs:
           "$RUNNER_TEMP/serverless-sdk/bin/python" -m pip install --only-binary=:all: --require-hashes -r scripts/prover-rental/requirements-serverless.txt
           "$RUNNER_TEMP/serverless-sdk/bin/python" -m pip check
           "$RUNNER_TEMP/serverless-sdk/bin/python" -c 'import runpod; import backports.zstd; from importlib.metadata import version; assert version("runpod") == "1.12.0"'
+          sudo "$RUNNER_TEMP/serverless-sdk/bin/python" scripts/prover-rental/check-trust-store.py --refresh-system
       - name: Test lifecycle, queue scheduling, and offline SDK contracts
         run: |
           "$RUNNER_TEMP/prover-rental/bin/python" - <<'PY'

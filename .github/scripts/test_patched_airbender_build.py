@@ -36,6 +36,24 @@ def parent_lock_bytes():
     if raw.count(wrapper_fork) != 2:
         raise AssertionError("canonical wrapper fork lock fixture changed")
     raw = raw.replace(wrapper_fork, HELPER.WRAPPER_LOCK_SOURCE.encode())
+    current_webpki = (b'name = "rustls-webpki"\nversion = "0.103.16"\n'
+                      b'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                      b'checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"')
+    parent_webpki = current_webpki.replace(b'0.103.16', b'0.103.6').replace(
+        b'4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281',
+        b'8572f3c2cb9934231157b45499fc41e1f58c589fdfb81a844ba873265e80f8eb')
+    if raw.count(current_webpki) != 1:
+        raise AssertionError("canonical TLS lock fixture changed")
+    raw = raw.replace(current_webpki, parent_webpki)
+    current_rustls = (b'name = "rustls"\nversion = "0.23.46"\n'
+                      b'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                      b'checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"')
+    parent_rustls = current_rustls.replace(b'0.23.46', b'0.23.32').replace(
+        b'48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf',
+        b'cd3c25631629d034ce7cd9940adc9d45762d46de2b0f57193c4443b92c6d4d40')
+    if raw.count(current_rustls) != 1:
+        raise AssertionError("canonical rustls lock fixture changed")
+    raw = raw.replace(current_rustls, parent_rustls)
     for name, removed in (
         ("zksync_os_fri_prover", (b' "sha2 0.10.9",\n',)),
         ("zksync_os_snark_prover", (
