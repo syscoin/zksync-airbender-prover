@@ -6,6 +6,8 @@ FROM ${PROVER_BASE_IMAGE}
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+COPY check-trust-store.py /opt/zksys-rental/check-trust-store.py
+RUN python3 /opt/zksys-rental/check-trust-store.py --refresh-system --system-only
 COPY runpod.py job.py worker.py entrypoint.py release.json /opt/zksys-rental/
 RUN python3 /opt/zksys-rental/worker.py --validate-image
 ENTRYPOINT ["python3", "/opt/zksys-rental/entrypoint.py"]

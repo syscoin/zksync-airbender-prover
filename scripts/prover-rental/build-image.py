@@ -74,11 +74,12 @@ def main():
     source = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="zksys-rental-image-") as temporary:
         context = Path(temporary)
+        shutil.copyfile(source / "check-trust-store.py", context / "check-trust-store.py")
         if args.serverless_fri:
             shutil.copyfile(source / "runpod.py", context / "rental_provider.py")
             for name in ("job.py", "worker.py", "warm_protocol.py", "fri_session.py", "serverless_worker.py"):
                 stage_serverless_module(source / name, context / name)
-            for name in ("serverless_runner.py", "requirements-serverless.txt", "check-trust-store.py"):
+            for name in ("serverless_runner.py", "requirements-serverless.txt"):
                 shutil.copyfile(source / name, context / name)
         else:
             for name in ("runpod.py", "job.py", "worker.py", "entrypoint.py"):

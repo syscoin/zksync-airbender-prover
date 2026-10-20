@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject the distrusted emSign root in each Serverless TLS trust source."""
+"""Reject the distrusted emSign root in rental image TLS trust sources."""
 
 import argparse
 import hashlib
@@ -61,27 +61,31 @@ def system_fingerprints():
     return values
 
 
-def check_stores():
-    import botocore
-    import certifi
+def check_stores(system_only=False):
+    if not system_only:
+        import botocore
+        import certifi
 
-    if tuple(map(int, version("certifi").split("."))) < (2026, 10, 19):
-        raise ValueError("certifi 2026.10.19 or newer is required")
-    for name, path in (("certifi", Path(certifi.where())),
-                       ("botocore", Path(botocore.__file__).with_name("cacert.pem"))):
-        check_fingerprints(name, fingerprints(path.read_text()))
+        if tuple(map(int, version("certifi").split("."))) < (2026, 10, 19):
+            raise ValueError("certifi 2026.10.19 or newer is required")
+        for name, path in (("certifi", Path(certifi.where())),
+                           ("botocore", Path(botocore.__file__).with_name("cacert.pem"))):
+            check_fingerprints(name, fingerprints(path.read_text()))
     check_fingerprints("default SSL", system_fingerprints())
-    print("certifi, botocore and default SSL trust stores exclude the distrusted emSign root")
+    sources = "default SSL" if system_only else "certifi, botocore and default SSL"
+    print(f"{sources} trust stores exclude the distrusted emSign root")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--refresh-system", action="store_true",
                         help="disable only the distrusted root in the Debian image CA configuration")
+    parser.add_argument("--system-only", action="store_true",
+                        help="check the system CA store without requiring the Serverless SDK")
     args = parser.parse_args()
     if args.refresh_system:
         refresh_debian_store()
-    check_stores()
+    check_stores(system_only=args.system_only)
 
 
 if __name__ == "__main__":

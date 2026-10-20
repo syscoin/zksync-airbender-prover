@@ -1,5 +1,7 @@
 import importlib.util
+import builtins
 from pathlib import Path
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -13,6 +15,42 @@ FIXTURES = Path(__file__).with_name("test-data") / "trust"
 
 
 class TrustStoreTests(unittest.TestCase):
+    def test_system_only_cli_needs_no_sdk_and_still_refreshes_and_checks(self):
+        real_import = builtins.__import__
+
+        def without_sdk(name, *args, **kwargs):
+            if name in ("botocore", "certifi"):
+                raise AssertionError("system-only mode imported the SDK")
+            return real_import(name, *args, **kwargs)
+
+        good = trust.fingerprints((FIXTURES / "emsign-g1.pem").read_text())
+        with patch.object(sys, "argv", ["check-trust-store.py", "--refresh-system", "--system-only"]), \
+                patch.object(builtins, "__import__", side_effect=without_sdk), \
+                patch.object(trust, "refresh_debian_store") as refresh, \
+                patch.object(trust, "system_fingerprints", return_value=good) as check:
+            trust.main()
+            refresh.assert_called_once_with()
+            check.assert_called_once_with()
+
+    def test_system_only_rejects_distrusted_root(self):
+        bad = trust.fingerprints((FIXTURES / "emsign-g3.pem").read_text())
+        with patch.object(trust, "system_fingerprints", return_value=bad), \
+                self.assertRaisesRegex(ValueError, "distrusted emSign"):
+            trust.check_stores(system_only=True)
+
+    def test_default_mode_keeps_both_sdk_bundle_checks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            good = root / "certifi.pem"
+            good.write_bytes((FIXTURES / "emsign-g1.pem").read_bytes())
+            (root / "cacert.pem").write_bytes((FIXTURES / "emsign-g3.pem").read_bytes())
+            modules = {"certifi": SimpleNamespace(where=lambda: str(good)),
+                       "botocore": SimpleNamespace(__file__=str(root / "__init__.py"))}
+            with patch.dict(sys.modules, modules), patch.object(trust, "version", return_value="2026.10.19"), \
+                    patch.object(trust, "system_fingerprints", return_value=set()), \
+                    self.assertRaisesRegex(ValueError, "botocore.*distrusted emSign"):
+                trust.check_stores()
+
     def test_compromised_root_is_rejected_but_unaffected_emsign_is_retained(self):
         with self.assertRaisesRegex(ValueError, "distrusted emSign"):
             trust.check_fingerprints("old bundle", trust.fingerprints((FIXTURES / "emsign-g3.pem").read_text()))
