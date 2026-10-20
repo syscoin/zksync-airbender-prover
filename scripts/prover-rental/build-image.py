@@ -78,7 +78,7 @@ def main():
             shutil.copyfile(source / "runpod.py", context / "rental_provider.py")
             for name in ("job.py", "worker.py", "warm_protocol.py", "fri_session.py", "serverless_worker.py"):
                 stage_serverless_module(source / name, context / name)
-            for name in ("serverless_runner.py", "requirements-serverless.txt"):
+            for name in ("serverless_runner.py", "requirements-serverless.txt", "check-trust-store.py"):
                 shutil.copyfile(source / name, context / name)
         else:
             for name in ("runpod.py", "job.py", "worker.py", "entrypoint.py"):

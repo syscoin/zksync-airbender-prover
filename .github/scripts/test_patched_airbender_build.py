@@ -36,6 +36,15 @@ def parent_lock_bytes():
     if raw.count(wrapper_fork) != 2:
         raise AssertionError("canonical wrapper fork lock fixture changed")
     raw = raw.replace(wrapper_fork, HELPER.WRAPPER_LOCK_SOURCE.encode())
+    current_webpki = (b'name = "rustls-webpki"\nversion = "0.103.16"\n'
+                      b'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                      b'checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"')
+    parent_webpki = current_webpki.replace(b'0.103.16', b'0.103.6').replace(
+        b'4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281',
+        b'8572f3c2cb9934231157b45499fc41e1f58c589fdfb81a844ba873265e80f8eb')
+    if raw.count(current_webpki) != 1:
+        raise AssertionError("canonical TLS lock fixture changed")
+    raw = raw.replace(current_webpki, parent_webpki)
     for name, removed in (
         ("zksync_os_fri_prover", (b' "sha2 0.10.9",\n',)),
         ("zksync_os_snark_prover", (

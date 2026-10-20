@@ -8,11 +8,13 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements-serverless.txt /opt/zksys-serverless/requirements.txt
+COPY check-trust-store.py /opt/zksys-serverless/check-trust-store.py
 RUN python3 -m venv /opt/zksys-serverless/venv \
     && /opt/zksys-serverless/venv/bin/python -m pip install --no-cache-dir --only-binary=:all: \
        --require-hashes -r /opt/zksys-serverless/requirements.txt \
     && /opt/zksys-serverless/venv/bin/python -m pip check \
-    && /opt/zksys-serverless/venv/bin/python -c "import runpod; from importlib.metadata import version; assert version('runpod') == '1.12.0'"
+    && /opt/zksys-serverless/venv/bin/python -c "import runpod; from importlib.metadata import version; assert version('runpod') == '1.12.0'" \
+    && /opt/zksys-serverless/venv/bin/python /opt/zksys-serverless/check-trust-store.py --refresh-system
 COPY rental_provider.py job.py worker.py warm_protocol.py fri_session.py serverless_worker.py release.json /opt/zksys-rental/
 COPY serverless_runner.py /opt/zksys-serverless/
 RUN python3 /opt/zksys-rental/worker.py --validate-image

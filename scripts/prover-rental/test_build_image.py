@@ -129,6 +129,7 @@ class BuildImageTests(unittest.TestCase):
         self.assertIn("RUNPOD_LOG_LEVEL=INFO", recipe)
         self.assertIn("RUNPOD_INIT_TIMEOUT=610", recipe)
         self.assertIn("RUNPOD_REALTIME_CONCURRENCY=1", recipe)
+        self.assertIn("check-trust-store.py --refresh-system", recipe)
         self.assertNotIn("setup_compact.key", recipe)
         self.assertNotIn("git clone", recipe)
         self.assertNotIn("cargo build", recipe)
