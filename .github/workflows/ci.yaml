@@ -71,6 +71,9 @@ jobs:
       - name: Check image and GPU backend provenance
         run: python3 -B .github/scripts/test_image_sbom_identity.py
 
+      - name: Check Dependency Track configuration policy
+        run: python3 -B .github/scripts/test_dependency_track_config.py
+
       - name: Check hosted image release workflow
         run: python3 -B .github/scripts/test_hosted_image_workflow.py
 

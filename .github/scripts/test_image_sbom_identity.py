@@ -153,6 +153,25 @@ class ImageIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already contains build identity"):
             identity.bind_sbom(bound, record)
 
+    def test_source_sbom_binds_exact_source_and_preserves_scanner_data(self):
+        scanner = {"bomFormat": "CycloneDX", "specVersion": "1.6", "components": [],
+                   "metadata": {"component": {"name": "source"},
+                                "properties": [{"name": "scanner", "value": "syft"}]}}
+        path = self.directory / "source.json"
+        path.write_text(json.dumps(scanner))
+        bound = json.loads(self.cli("bind-source", str(path)))
+        self.assertEqual(bound["metadata"]["component"], scanner["metadata"]["component"])
+        properties = {p["name"]: p["value"] for p in bound["metadata"]["properties"]}
+        self.assertEqual(properties["scanner"], "syft")
+        self.assertEqual(properties["io.syscoin.prover.source-build.source_sha"], self.env["SOURCE_SHA"])
+        self.assertEqual(properties["io.syscoin.prover.source-build.tooling_sha"], self.env["TOOLING_SHA"])
+        self.assertEqual(properties["io.syscoin.prover.source-build.run_attempt"], self.env["BUILD_RUN_ATTEMPT"])
+        self.assertEqual(properties["io.syscoin.prover.source-build.schema"], "syscoin-prover-source-sbom-v1")
+        with self.assertRaisesRegex(ValueError, "already contains source identity"):
+            identity.bind_source_sbom(bound, self.context)
+        with self.assertRaisesRegex(ValueError, "CycloneDX"):
+            identity.bind_source_sbom({"bomFormat": "CycloneDX", "specVersion": "1.4"}, self.context)
+
     def test_cli_manifest_to_scan_to_evidence_ignores_reused_version_tag(self):
         digests = self.cli("collect", str(self.inventory()))
         matrix = json.loads(self.cli("matrix", IMAGE_DIGESTS=digests))
