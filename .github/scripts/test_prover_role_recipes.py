@@ -148,6 +148,24 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertIn('role: [combined, fri, snark, snark-cpu]', release)
         self.assertIn('uses: ./.release-tooling/.github/actions/build-release-role', release)
 
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_release_tooling_sparse_checkouts_use_cone_directories(self):
+        for path in (".github/workflows/release-bins.yml", ".github/workflows/release-build-check.yml"):
+            with self.subTest(workflow=path), tempfile.TemporaryDirectory() as temporary:
+                workflow = (ROOT / path).read_text()
+                match = re.search(r"(?m)^          sparse-checkout: \|\n((?:            [^\n]+\n)+)", workflow)
+                self.assertIsNotNone(match, "missing tooling sparse checkout")
+                entries = [line.strip() for line in match.group(1).splitlines()]
+                self.assertIn("docker", entries)
+                self.assertTrue(all((ROOT / entry).is_dir() for entry in entries), entries)
+                clone = Path(temporary) / "checkout"
+                subprocess.run(["git", "clone", "--quiet", "--no-hardlinks", str(ROOT), str(clone)],
+                               check=True, capture_output=True)
+                result = subprocess.run(["git", "-C", str(clone), "sparse-checkout", "set", "--cone", *entries],
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((clone / "docker/prover-build-pins.json").is_file())
+
     def test_documented_worker_commands_select_their_package(self):
         for path, expected in (
             ("README.md", set(ROLES)),
