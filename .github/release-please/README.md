@@ -45,3 +45,17 @@ gate runs in PR CI and again before creating a release. It deliberately does
 not authorize or automate the scope review. Release PR creation also depends on
 the repository setting above; an installation-owned GitHub App can replace
 `GITHUB_TOKEN` later if automatic PR check execution is desired.
+
+## Recovering publication
+
+If a release exists but the binary or image build fails, first rerun its failed
+job in the original workflow run so it can use the existing build artifacts.
+For a manual recovery, dispatch `Release binaries` and/or `Docker build and
+release` from `main`, supplying the existing release tag and the exact commit
+SHA obtained by peeling that tag. Both workflows validate this binding.
+
+Binary publication downloads and hashes existing assets before it uploads any
+missing assets. Matching files are retained; a different file with the same name
+causes a failure without replacement. A rebuilt binary archive may not be
+byte-identical, so an operator must investigate any mismatch and decide how to
+resolve the existing release asset instead of overwriting it automatically.

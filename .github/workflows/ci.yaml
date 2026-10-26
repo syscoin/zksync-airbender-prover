@@ -34,6 +34,7 @@ jobs:
         run: |
           python3 -B .github/scripts/check_release_inputs.py
           python3 -B .github/scripts/test_release_inputs.py
+          python3 -B .github/scripts/test_publish_release_assets.py
 
       - name: Setup runner
         uses: ./.github/actions/runner-setup

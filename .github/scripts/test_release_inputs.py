@@ -32,6 +32,11 @@ class ReleaseInputTests(unittest.TestCase):
     def write_json(self, path, value):
         (self.root / path).write_text(json.dumps(value, indent=2) + "\n")
 
+    def test_release_automation_is_bound_to_main(self):
+        workflow = (RELEASE.ROOT / ".github/workflows/release-please.yaml").read_text()
+        self.assertIn("if: ${{ github.ref == 'refs/heads/main' }}", workflow)
+        self.assertIn("target-branch: main", workflow)
+
     def test_checked_in_inputs_pass(self):
         RELEASE.validate(self.root)
 

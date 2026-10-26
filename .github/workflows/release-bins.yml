@@ -297,12 +297,27 @@ jobs:
             printf '%s\n' "${attestation_url}" > "dist/${role}-attestation-url.txt"
           done
 
+      - name: Checkout release publication tooling
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .release-publication-tooling
+          sparse-checkout: .github/scripts
+          fetch-depth: '1'
+          persist-credentials: false
+
       - name: Upload artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        # SYSCOIN: Release assets are immutable; an existing filename aborts instead of overwriting.
-        run: gh release upload "${RELEASE_TAG}" dist/*.tar.gz
+          TOOLING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .release-publication-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .release-publication-tooling status --porcelain --untracked-files=all)" ]]
+          python3 -B .release-publication-tooling/.github/scripts/publish-release-assets.py "${RELEASE_TAG}" dist/*.tar.gz
 
       - name: Update release
         env:
