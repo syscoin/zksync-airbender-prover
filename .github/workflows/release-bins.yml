@@ -90,6 +90,9 @@ jobs:
           # SYSCOIN: Do not leave even a read token available to build scripts or dependencies.
           persist-credentials: false
 
+      - name: Trust checked out release source
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
       - name: Verify release source identity
         run: |
           # SYSCOIN: GITHUB_SHA identifies the workflow invocation, which can legitimately be the

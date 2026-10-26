@@ -149,6 +149,29 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertIn('uses: ./.release-tooling/.github/actions/build-release-role', release)
 
     @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_container_git_trust_and_source_paths_are_workspace_scoped(self):
+        recipe = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
+        workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
+        block = recipe.split("    - name: Trust checked out source directories\n", 1)[1].split("    - name:", 1)[0]
+        commands = block.split("      run: |\n", 1)[1]
+        commands = "\n".join(line[8:] for line in commands.splitlines())
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            workspace = home / "runtime workspace"
+            workspace.mkdir()
+            subprocess.run(["bash", "-euc", commands], env={**os.environ, "HOME": str(home),
+                           "GITHUB_WORKSPACE": str(workspace)}, check=True)
+            dirs = subprocess.check_output(["git", "config", "--global", "--get-all", "safe.directory"],
+                                           env={**os.environ, "HOME": str(home)}, text=True).splitlines()
+            self.assertEqual(dirs, [str(workspace), str(workspace / ".release-tooling")])
+        self.assertIn('export PROVER_SOURCE_DIR="${GITHUB_WORKSPACE}"', recipe)
+        self.assertIn('export BELLMAN_CUDA_DIR="${GITHUB_WORKSPACE}/bellman-cuda"', recipe)
+        self.assertNotIn('PROVER_SOURCE_DIR: ${{ github.workspace }}', recipe)
+        self.assertLess(workflow.index("      - name: Trust checked out release source"),
+                        workflow.index("      - name: Verify release source identity"))
+        self.assertIn('git config --global --add safe.directory "${GITHUB_WORKSPACE}"', workflow)
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
     def test_release_tooling_sparse_checkouts_use_cone_directories(self):
         for path in (".github/workflows/release-bins.yml", ".github/workflows/release-build-check.yml"):
             with self.subTest(workflow=path), tempfile.TemporaryDirectory() as temporary:
@@ -239,7 +262,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
             self.assertIn('"${ROLE}-airbender-build-inputs.json"', recipe)
         self.assertIn(".cargo_exit_code == 0 and .inputs_reverified == true", recipe)
         self.assertIn("roleInputRecords: $airbender_records", release)
-        self.assertIn("PROVER_SOURCE_DIR: ${{ github.workspace }}", recipe)
+        self.assertIn('export PROVER_SOURCE_DIR="${GITHUB_WORKSPACE}"', recipe)
         cpu = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
         self.assertIn("AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-cpu-airbender-build-inputs.json", cpu)
         self.assertIn("COPY --from=cpu-builder /usr/src/zksync/snark-cpu-airbender-build-inputs.json "
