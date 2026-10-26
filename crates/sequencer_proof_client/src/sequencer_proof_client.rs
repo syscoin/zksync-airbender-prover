@@ -1269,7 +1269,7 @@ mod tests {
         DeclaredBody(&'static str, usize),
         // SYSCOIN: Exercise a complete critical-pick JSON response, not only declared lengths.
         Body(&'static str, Vec<u8>),
-        GzipBody(Vec<u8>),
+        EncodedBody(&'static str, Vec<u8>),
         // SYSCOIN: Exercise the streaming bound when no trustworthy Content-Length exists.
         ChunkedBody(&'static str, Vec<Vec<u8>>),
         Redirect(String),
@@ -1374,9 +1374,9 @@ mod tests {
                         stream.write_all(&body).unwrap();
                         stream.flush().unwrap();
                     }
-                    ScriptedHttpReply::GzipBody(body) => {
+                    ScriptedHttpReply::EncodedBody(encoding, body) => {
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: {encoding}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         stream.write_all(response.as_bytes()).unwrap();
@@ -2349,8 +2349,10 @@ mod tests {
             18, 72, 11, 0, 4, 0, 0,
         ];
         for limit in [1_023, 1_024] {
-            let (endpoint, _, server) =
-                scripted_http_server(vec![ScriptedHttpReply::GzipBody(GZIP_JSON.to_vec())]);
+            let (endpoint, _, server) = scripted_http_server(vec![ScriptedHttpReply::EncodedBody(
+                "gzip",
+                GZIP_JSON.to_vec(),
+            )]);
             let client =
                 SequencerProofClient::new(endpoint, "snark-prover".to_owned(), None, vec![])
                     .unwrap();
@@ -2368,6 +2370,95 @@ mod tests {
             }
             server.join().unwrap();
         }
+    }
+
+    const ZSTD_JSON: &[u8] = &[
+        40, 181, 47, 253, 96, 0, 3, 85, 0, 0, 24, 34, 97, 34, 1, 0, 250, 43, 128, 5,
+    ];
+
+    #[tokio::test]
+    async fn bounded_reader_limits_single_and_concatenated_zstd_frames() {
+        // Both fixtures decode to the same 1,024-byte JSON string, split across frames in the second.
+        let concatenated = [
+            40, 181, 47, 253, 96, 0, 1, 77, 0, 0, 16, 34, 97, 1, 0, 251, 42, 192, 2, 40, 181, 47,
+            253, 96, 0, 1, 85, 0, 0, 24, 97, 97, 34, 1, 0, 250, 42, 192, 2,
+        ];
+        for body in [ZSTD_JSON, concatenated.as_slice()] {
+            for limit in [1_023, 1_024] {
+                let (endpoint, _, server) =
+                    scripted_http_server(vec![ScriptedHttpReply::EncodedBody(
+                        "zstd",
+                        body.to_vec(),
+                    )]);
+                let client =
+                    SequencerProofClient::new(endpoint, "snark-prover".to_owned(), None, vec![])
+                        .unwrap();
+                let response = client
+                    .client
+                    .get(client.build_url("SNARK/pick").unwrap())
+                    .send()
+                    .await
+                    .unwrap();
+                let result = read_json_bounded::<String>(response, limit, "SNARK").await;
+                if limit == 1_024 {
+                    assert_eq!(result.unwrap(), "a".repeat(1_022));
+                } else {
+                    assert!(format!("{:#}", result.unwrap_err()).contains("exceeds 1023 bytes"));
+                }
+                server.join().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn zstd_pick_failures_remain_post_acquisition() {
+        let bodies = [
+            b"not a zstd frame".to_vec(),
+            ZSTD_JSON[..ZSTD_JSON.len() - 1].to_vec(),
+            ZSTD_JSON.to_vec(),
+        ];
+        for body in bodies {
+            for fri in [true, false] {
+                let (endpoint, _, server) =
+                    scripted_http_server(vec![ScriptedHttpReply::EncodedBody(
+                        "zstd",
+                        body.clone(),
+                    )]);
+                let mut client =
+                    SequencerProofClient::new(endpoint, "prover".to_owned(), None, vec![]).unwrap();
+                client.max_fri_pick_response_bytes = 1_023;
+                client.max_snark_pick_response_bytes = 1_023;
+                let error = if fri {
+                    client.pick_fri_job().await.unwrap_err()
+                } else {
+                    client.pick_snark_job().await.unwrap_err()
+                };
+                assert!(crate::error_follows_job_acquisition(&error));
+                server.join().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn zstd_fri_pick_preserves_input_and_lease() {
+        let body = vec![
+            40, 181, 47, 253, 32, 203, 149, 2, 0, 162, 4, 17, 23, 144, 89, 7, 251, 98, 123, 205,
+            246, 83, 14, 139, 17, 73, 199, 62, 189, 14, 114, 14, 49, 99, 183, 151, 205, 143, 196,
+            122, 181, 184, 13, 185, 147, 235, 137, 194, 24, 126, 30, 165, 99, 200, 190, 158, 237,
+            185, 235, 17, 47, 192, 207, 21, 100, 181, 107, 94, 3, 225, 252, 53, 82, 36, 91, 149,
+            34, 163, 51, 1, 3, 0, 203, 5, 147, 13, 237, 211, 146, 220, 19,
+        ];
+        let (endpoint, _, server) =
+            scripted_http_server(vec![ScriptedHttpReply::EncodedBody("zstd", body)]);
+        let client =
+            SequencerProofClient::new(endpoint, "prover".to_owned(), None, vec![valid_vk_hash()])
+                .unwrap();
+        let job = client.pick_fri_job().await.unwrap().unwrap();
+        assert_eq!(job.batch_number, 41);
+        assert_eq!(job.vk_hash, valid_vk_hash());
+        assert_eq!(job.lease_token, valid_lease_token());
+        assert_eq!(job.prover_input, vec![1, 2, 3]);
+        server.join().unwrap();
     }
 
     // SYSCOIN: The authority-free peek path still rejects before reading an advertised body above

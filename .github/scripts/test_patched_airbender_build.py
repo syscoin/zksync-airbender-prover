@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,13 @@ CRYPTO_PINS = HELPER.load_crypto_pins()
 def parent_lock_bytes():
     """Exact lock from parent488f70ac, reconstructed without requiring Git history in CI."""
     raw = (ROOT / "Cargo.lock").read_bytes()
+    registry_fixture = (ROOT / ".github/tests/fixtures/parent-registry.Cargo.lock").read_bytes()
+    restored_names = HELPER.tomllib.loads(registry_fixture.decode())["restore"]["remove_names"]
+    blocks = re.split(rb"(?m)(?=^\[\[package\]\]\n)", raw)
+    package_name = lambda block: HELPER.tomllib.loads(block.decode())["package"][0]["name"]
+    packages = [block for block in blocks[1:] if package_name(block) not in restored_names]
+    packages.extend(re.split(rb"(?m)(?=^\[\[package\]\]\n)", registry_fixture)[1:])
+    raw = blocks[0] + b"".join(sorted(packages, key=package_name))
     fork = HELPER.fork_lock_source(PINS).encode()
     upstream = PINS["upstream_lock_source"].encode()
     if raw.count(fork) != 46:
