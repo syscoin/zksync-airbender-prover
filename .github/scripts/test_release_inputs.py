@@ -41,6 +41,15 @@ class ReleaseInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "release manifest and workspace version differ"):
             RELEASE.validate(self.root)
 
+    def test_release_please_bump_needs_lock_updates(self):
+        self.write_json(".github/release-please/manifest.json", {".": "0.8.99"})
+        cargo = self.root / "Cargo.toml"
+        original = cargo.read_text()
+        self.assertEqual(original.count('version = "0.8.2"'), 1)
+        cargo.write_text(original.replace('version = "0.8.2"', 'version = "0.8.99"'))
+        with self.assertRaisesRegex(ValueError, "workspace package version differs"):
+            RELEASE.validate(self.root)
+
     def test_changed_lock_with_stale_hash_fails(self):
         for path in ("Cargo.lock", "patches/airbender.Cargo.lock"):
             with self.subTest(path=path):

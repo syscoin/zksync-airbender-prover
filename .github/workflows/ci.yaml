@@ -70,6 +70,9 @@ jobs:
       - name: Check image and GPU backend provenance
         run: python3 -B .github/scripts/test_image_sbom_identity.py
 
+      - name: Check hosted image release workflow
+        run: python3 -B .github/scripts/test_hosted_image_workflow.py
+
       # SYSCOIN: This public CPU lane explicitly disables the default GPU SNARK
       # feature. It tests source/overlay policy, not a CUDA build or service proof.
       - name: Run Clippy
