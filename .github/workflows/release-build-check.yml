@@ -6,10 +6,15 @@ on:
       - '.github/workflows/release-bins.yml'
       - '.github/workflows/release-build-check.yml'
       - '.github/actions/build-release-role/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
       - 'docker/prover-build-pins.json'
       - 'scripts/cargo-with-patched-airbender.sh'
       - 'scripts/prepare-patched-airbender.py'
       - 'scripts/prepare-patched-gpu-backends.py'
+      - 'scripts/pinned_source_checkout.py'
       - 'patches/**'
   workflow_dispatch:
 
@@ -54,7 +59,7 @@ jobs:
           path: .release-tooling
           sparse-checkout: |
             .github/actions/build-release-role
-            docker/prover-build-pins.json
+            docker
             .github/scripts
             scripts
             patches

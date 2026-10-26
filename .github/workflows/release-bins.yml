@@ -114,7 +114,7 @@ jobs:
           path: .release-tooling
           sparse-checkout: |
             .github/actions/build-release-role
-            docker/prover-build-pins.json
+            docker
             .github/scripts
             scripts
             patches
