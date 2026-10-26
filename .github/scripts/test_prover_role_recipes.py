@@ -119,25 +119,34 @@ class ProverRoleRecipeTests(unittest.TestCase):
                     self.assertIn("--locked", command)
 
     def test_release_builds_match_docker_roles(self):
-        workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
-        commands = cargo_commands(workflow, "build")
-        self.assertEqual(len(commands), len(ROLES) + 1)
-        seen = []
-        for tokens in commands:
-            bins = option_values(tokens, "--bin")
-            self.assertEqual(len(bins), 1)
-            binary = RELEASE_BINS.get(bins[0], bins[0])
-            self.assertIn(binary, ROLES)
-            cpu = binary == "zksync_os_snark_prover" and "--no-default-features" in tokens
-            self.assert_role(tokens, binary, False if cpu else ROLES[binary][2])
-            self.assertIn("--locked", tokens)
-            seen.append(binary)
-        self.assertCountEqual(seen, [*ROLES, "zksync_os_snark_prover"])
-        self.assertIn('CARGO_TARGET_DIR="${PWD}/target/snark-gpu"', workflow)
-        for suffix in ("gpu", "cpu"):
-            self.assertEqual(workflow.count(
-                '${{ env.ZKSYNC_OS_SNARK_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-'
-                + suffix + '.tar.gz'), 2)
+        release = (ROOT / ".github/workflows/release-bins.yml").read_text()
+        recipe = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
+        block = recipe.split('        case "${ROLE}" in\n', 2)[2].split('        AIRBENDER_BUILD_ATTESTATION=', 1)[0]
+        block = 'case "${ROLE}" in\n' + "\n".join(line[8:] for line in block.splitlines())
+        expected = {
+            "fri": ("zksync_os_fri_prover", "gpu", "--features gpu", ""),
+            "combined": ("zksync-os-prover-service", "gpu", "--features gpu", "--gpu32"),
+            "snark": ("zksync_os_snark_prover", "gpu", "--features gpu", "--gpu32"),
+            "snark-cpu": ("zksync_os_snark_prover", "cpu", "--no-default-features", ""),
+        }
+        for role, (binary, kind, features, overlay) in expected.items():
+            with self.subTest(role=role):
+                env = {**os.environ, "ROLE": role, "GPU_CUDAARCHS": "80;89;90;120",
+                       "ZKSYNC_OS_PROVER_BIN": "zksync-os-prover-service",
+                       "ZKSYNC_OS_FRI_PROVER_BIN": "zksync_os_fri_prover",
+                       "ZKSYNC_OS_SNARK_PROVER_BIN": "zksync_os_snark_prover"}
+                run = subprocess.run(["bash", "-euc", block +
+                    '\nprintf "%s|%s|%s|%s|%s" "$package" "$binary" "$kind" "${features[*]}" "${overlay[*]-}"'],
+                    env=env, text=True, capture_output=True)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                package, actual_binary, actual_kind, actual_features, actual_overlay = run.stdout.split("|")
+                self.assertEqual((actual_binary, actual_kind, actual_features, actual_overlay),
+                                 (binary, kind, features, overlay))
+                self.assertEqual(package, ROLES[binary][0])
+        self.assertIn('cargo build --locked', recipe)
+        self.assertIn('--target "${TARGET}" -p "${package}" --bin "${binary}" "${features[@]}"', recipe)
+        self.assertIn('role: [combined, fri, snark, snark-cpu]', release)
+        self.assertIn('uses: ./.release-tooling/.github/actions/build-release-role', release)
 
     def test_documented_worker_commands_select_their_package(self):
         for path, expected in (
@@ -200,6 +209,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
 
     def test_every_role_retains_its_success_record(self):
         release = (ROOT / ".github/workflows/release-bins.yml").read_text()
+        recipe = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
         for role, image in (("fri", "zksync-os-prover-fri"),
                             ("snark", "zksync-os-prover-snark"),
                             ("combined", "zksync-airbender-prover")):
@@ -208,16 +218,16 @@ class ProverRoleRecipeTests(unittest.TestCase):
             self.assertIn(f"AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/{record}", docker)
             self.assertIn(f"COPY --from=builder /usr/src/zksync/{record} "
                           "/usr/share/syscoin-prover/airbender-build-inputs.json", docker)
-            self.assertRegex(release, rf'tar -czf [^\n]+\\\n[^\n]+{record}')
-        self.assertIn(".cargo_exit_code == 0 and .inputs_reverified == true", release)
+            self.assertIn('"${ROLE}-airbender-build-inputs.json"', recipe)
+        self.assertIn(".cargo_exit_code == 0 and .inputs_reverified == true", recipe)
         self.assertIn("roleInputRecords: $airbender_records", release)
-        self.assertIn("PROVER_SOURCE_DIR: ${{ github.workspace }}", release)
+        self.assertIn("PROVER_SOURCE_DIR: ${{ github.workspace }}", recipe)
         cpu = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
         self.assertIn("AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-cpu-airbender-build-inputs.json", cpu)
         self.assertIn("COPY --from=cpu-builder /usr/src/zksync/snark-cpu-airbender-build-inputs.json "
                       "/usr/share/syscoin-prover/airbender-build-inputs.json", cpu)
         self.assertIn('for role in combined fri snark snark-cpu; do', release)
-        self.assertRegex(release, r'tar -czf [^\n]+-cpu\.tar\.gz" \\\n[^\n]+snark-cpu-airbender-build-inputs\.json')
+        self.assertIn('tar -czf "${archive}" -C release-role "${binary}" "${ROLE}-airbender-build-inputs.json"', recipe)
 
     def test_gpu32_default_and_explicit_cpu_image_cannot_mix(self):
         source = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
@@ -286,11 +296,11 @@ class ProverRoleRecipeTests(unittest.TestCase):
             self.assertIn(f"PROVER_GPU_ROLE={role}", source)
 
     def test_release_rejects_old_or_unknown_nvcc_before_backend_build(self):
-        workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
-        block = workflow.split("      - name: Check CUDA version\n", 1)[1].split("      - name:", 1)[0]
-        command = block.split("        run: |\n", 1)[1]
-        command = "\n".join(line[10:] for line in command.splitlines())
-        self.assertLess(workflow.index("GPU32 SNARK requires NVCC"), workflow.index("--prepare-bellman"))
+        recipe = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
+        command = recipe.split('            nvcc_release=', 1)[1].split('            python3 .release-tooling/scripts/prepare-patched-gpu-backends.py', 1)[0]
+        lines = command.splitlines()
+        command = 'nvcc_release=' + lines[0] + "\n" + "\n".join(line[12:] for line in lines[1:])
+        self.assertLess(recipe.index('nvcc_release='), recipe.index('--prepare-bellman'))
         for version, valid in (("11.8", False), ("12.6", False), ("12.8", False),
                                ("12.9", True), ("13.0", True), ("unknown", False)):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
@@ -304,11 +314,11 @@ class ProverRoleRecipeTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "Git is required")
     def test_release_selected_lock_matches_git_blob_before_build_and_role_validation(self):
-        release = (ROOT / ".github/workflows/release-bins.yml").read_text()
+        release = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
         guard = '[[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]'
         self.assertEqual(release.count(guard), 2)
-        build = release.index('AIRBENDER_BUILD_ATTESTATION="${PWD}/combined-airbender-build-inputs.json"')
-        last_build = release.index('--bin "${ZKSYNC_OS_SNARK_PROVER_BIN}" --no-default-features')
+        build = release.index('AIRBENDER_BUILD_ATTESTATION="${PWD}/${ROLE}-airbender-build-inputs.json"')
+        last_build = release.index('cargo build --locked')
         records = release.index('airbender_pins="$(python3 .release-tooling/')
         positions = [match.start() for match in re.finditer(re.escape(guard), release)]
         self.assertLess(positions[0], build)
