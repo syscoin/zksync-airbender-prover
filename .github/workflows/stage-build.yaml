@@ -1,6 +1,16 @@
 name: Docker build and release
 
 on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: "Existing Git tag for the exact release source."
+        type: string
+        required: true
+      source_sha:
+        description: "Exact 40-character commit SHA peeled from tag_name."
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       tag_name:
@@ -45,7 +55,7 @@ jobs:
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+          if [[ -n "${REQUESTED_TAG}" || -n "${REQUESTED_SOURCE_SHA}" || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ ! "${REQUESTED_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
               echo "Invalid image source tag: ${REQUESTED_TAG}" >&2
               exit 1
@@ -83,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           checked_out="$(git rev-parse HEAD)"
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+          if [[ -n "${REQUESTED_TAG}" || -n "${REQUESTED_SOURCE_SHA}" || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             tag_commit="$(git rev-parse "refs/tags/${REQUESTED_TAG}^{commit}")"
             if [[ "${checked_out}" != "${tag_commit}" || "${checked_out}" != "${REQUESTED_SOURCE_SHA}" ]]; then
               echo "Image source mismatch: checkout=${checked_out} tag=${tag_commit} expected=${REQUESTED_SOURCE_SHA}" >&2
@@ -124,7 +134,7 @@ jobs:
   build-images:
     name: Build, push, and attest Docker images
     needs: [setup]
-    runs-on: matterlabs-ci-runner-high-performance
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -139,6 +149,14 @@ jobs:
           - zksync-os-prover-fri
           - zksync-os-prover-snark
     steps:
+      - name: Free space on the ephemeral GitHub runner
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          docker image prune --all --force
+          df -h /
+
       - name: Checkout bound application source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -231,15 +249,30 @@ jobs:
           echo "app_text_sha256=${app_text_sha256}" >> "${GITHUB_OUTPUT}"
           echo "app_text_size=${app_text_size}" >> "${GITHUB_OUTPUT}"
 
+      - name: Check optional Docker Hub credentials
+        id: docker-hub
+        shell: bash {0}
+        env:
+          HUB_USER: ${{ secrets.DOCKERHUB_USER }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${HUB_USER}" && -n "${HUB_TOKEN}" ]]; then
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          elif [[ -z "${HUB_USER}" && -z "${HUB_TOKEN}" ]]; then
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Docker Hub credentials must be supplied together" >&2
+            exit 1
+          fi
+
       - name: Login to Docker Hub for pinned base images
+        if: steps.docker-hub.outputs.enabled == 'true'
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Configure Google Artifact Registry
-        run: gcloud auth configure-docker us-docker.pkg.dev -q
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -254,10 +287,9 @@ jobs:
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}
-            us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ matrix.component }}
           tags: |
             type=raw,value=${{ needs.setup.outputs.image_tag }}
-            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && needs.setup.outputs.source_ref == 'refs/heads/main' }}
           labels: |
             org.opencontainers.image.revision=${{ needs.setup.outputs.source_sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -413,17 +445,6 @@ jobs:
           predicate-path: ${{ runner.temp }}/${{ matrix.component }}-provenance.json
           push-to-registry: true
 
-      - name: Attest Google Artifact Registry image digest
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        env:
-          NODE_OPTIONS: --max-http-header-size=32768
-        with:
-          subject-name: us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ matrix.component }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          predicate-type: https://slsa.dev/provenance/v1
-          predicate-path: ${{ runner.temp }}/${{ matrix.component }}-provenance.json
-          push-to-registry: true
-
       # SYSCOIN: A separate immutable artifact preserves every matrix result; shared job
       # outputs can retain only the last finishing component's digest.
       - name: Record exact built image identity
@@ -453,7 +474,6 @@ jobs:
             echo
             echo '```text'
             echo "ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}@${{ steps.build.outputs.digest }}"
-            echo "us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ matrix.component }}@${{ steps.build.outputs.digest }}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
 

@@ -1,0 +1,127 @@
+name: Build a release prover role
+description: Compile and package one prover role using the checked-out source and reviewed tooling.
+inputs:
+  role:
+    required: true
+    description: combined, fri, snark, or snark-cpu
+  target:
+    required: true
+    description: Rust target triple
+  release_tag:
+    required: true
+    description: Validated release tag or CI-only build label
+  tooling_sha:
+    required: true
+    description: Commit of the checked-out build tooling
+outputs:
+  airbender_pins:
+    value: ${{ steps.build.outputs.airbender_pins }}
+    description: Verified source identities
+  gpu_backend_pins:
+    value: ${{ steps.build.outputs.gpu_backend_pins }}
+    description: Verified GPU backend identities
+  airbender_records:
+    value: ${{ steps.build.outputs.airbender_records }}
+    description: Hash of the role-specific build record
+  archive:
+    value: ${{ steps.build.outputs.archive }}
+    description: Role-specific release archive
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends build-essential ca-certificates clang curl gcc g++ git jq libclang-dev libssl-dev pkg-config python3 python3-tomli
+        rm -rf /var/lib/apt/lists/*
+    - name: Trust checked out source directories
+      shell: bash
+      run: |
+        set -euo pipefail
+        git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+        git config --global --add safe.directory "${GITHUB_WORKSPACE}/.release-tooling"
+    - name: Install pinned Rust and CMake
+      shell: bash
+      run: |
+        set -euo pipefail
+        pins="${GITHUB_WORKSPACE}/.release-tooling/docker/prover-build-pins.json"
+        toolchain="$(jq -er '.rust_toolchain' "$pins")"
+        rustup_version="$(jq -er '.rustup_init.version' "$pins")"
+        rustup_hash="$(jq -er '.rustup_init.sha256' "$pins")"
+        cmake_version="$(jq -er '.cmake.version' "$pins")"
+        cmake_hash="$(jq -er '.cmake.sha256' "$pins")"
+        grep -Fqx "channel = \"${toolchain}\"" rust-toolchain.toml
+        curl --proto '=https' --tlsv1.2 --fail --location --retry 5 -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${rustup_version}/x86_64-unknown-linux-gnu/rustup-init"
+        echo "${rustup_hash}  /tmp/rustup-init" | sha256sum --check --strict
+        chmod 0755 /tmp/rustup-init
+        /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
+        rm /tmp/rustup-init
+        "${CARGO_HOME}/bin/rustup" toolchain install "${toolchain}" --profile minimal
+        curl --proto '=https' --tlsv1.2 --fail --location --retry 5 -o /tmp/cmake.tar.gz "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/cmake-${cmake_version}-linux-x86_64.tar.gz"
+        echo "${cmake_hash}  /tmp/cmake.tar.gz" | sha256sum --check --strict
+        mkdir -p /opt/cmake
+        tar -xzf /tmp/cmake.tar.gz --strip-components=1 -C /opt/cmake
+        rm /tmp/cmake.tar.gz
+        echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+        echo /opt/cmake/bin >> "$GITHUB_PATH"
+        echo /usr/local/cuda/bin >> "$GITHUB_PATH"
+    - name: Build role
+      id: build
+      shell: bash
+      env:
+        ROLE: ${{ inputs.role }}
+        TARGET: ${{ inputs.target }}
+        BUILD_TAG: ${{ inputs.release_tag }}
+        TOOLING_SHA: ${{ inputs.tooling_sha }}
+        CARGO_BUILD_JOBS: '2'
+        CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      run: |
+        set -euo pipefail
+        export PROVER_SOURCE_DIR="${GITHUB_WORKSPACE}"
+        export BELLMAN_CUDA_DIR="${GITHUB_WORKSPACE}/bellman-cuda"
+        [[ "${TARGET}" == x86_64-unknown-linux-gnu ]]
+        [[ "${BUILD_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+        [[ "$(git -C .release-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+        [[ -z "$(git -C .release-tooling status --porcelain --untracked-files=all)" ]]
+        [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
+        case "${ROLE}" in
+          combined|snark)
+            nvcc_release="$(nvcc --version | sed -nE 's/.*release ([0-9]+\.[0-9]+),.*/\1/p')"
+            [[ "${nvcc_release}" =~ ^([0-9]+)\.([0-9]+)$ ]]
+            (( BASH_REMATCH[1] > 12 || (BASH_REMATCH[1] == 12 && BASH_REMATCH[2] >= 9) ))
+            python3 .release-tooling/scripts/prepare-patched-gpu-backends.py --prepare-bellman "${BELLMAN_CUDA_DIR}"
+            cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES="${GPU_CUDAARCHS}"
+            cmake --build bellman-cuda/build/
+            ;;
+          fri|snark-cpu) ;;
+          *) echo 'Unknown release role' >&2; exit 1 ;;
+        esac
+        case "${ROLE}" in
+          combined) package=zksync_os_prover_service; binary="${ZKSYNC_OS_PROVER_BIN}"; kind=gpu; features=(--features gpu); overlay=(--gpu32); export CUDAARCHS="${GPU_CUDAARCHS}" ;;
+          fri) package=zksync_os_fri_prover; binary="${ZKSYNC_OS_FRI_PROVER_BIN}"; kind=gpu; features=(--features gpu); overlay=() ;;
+          snark) package=zksync_os_snark_prover; binary="${ZKSYNC_OS_SNARK_PROVER_BIN}"; kind=gpu; features=(--features gpu); overlay=(--gpu32); export CUDAARCHS="${GPU_CUDAARCHS}" ;;
+          snark-cpu) package=zksync_os_snark_prover; binary="${ZKSYNC_OS_SNARK_PROVER_BIN}"; kind=cpu; features=(--no-default-features); overlay=() ;;
+        esac
+        AIRBENDER_BUILD_ATTESTATION="${PWD}/${ROLE}-airbender-build-inputs.json" \
+          bash .release-tooling/scripts/cargo-with-patched-airbender.sh "${overlay[@]}" "release-${ROLE}" -- \
+          cargo build --locked --profile "${RELEASE_PROFILE}" --target "${TARGET}" -p "${package}" --bin "${binary}" "${features[@]}"
+        [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
+        airbender_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py airbender-pins .release-tooling/patches/airbender-fork-source.json --source-lock Cargo.lock)"
+        gpu_backend_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py gpu-backend-pins .release-tooling/patches/gpu32-memory.json --source-lock Cargo.lock)"
+        jq -e --argjson expected "${airbender_pins}" --arg role "release-${ROLE}" \
+          '.cargo_exit_code == 0 and .inputs_reverified == true and .label == $role and .pins == $expected.pins and .selected_lock == $expected.selected_lock and .zkos_wrapper.inputs == $expected.zkos_wrapper and .zksync_crypto.inputs == $expected.zksync_crypto and .application_inputs_sha256["Cargo.lock"] == $expected.selected_lock.canonical_lock_sha256' "${ROLE}-airbender-build-inputs.json" >/dev/null
+        if [[ "${ROLE}" == combined || "${ROLE}" == snark ]]; then
+          jq -e --argjson expected "${gpu_backend_pins}" '.gpu_backend_overlay.inputs == $expected' "${ROLE}-airbender-build-inputs.json" >/dev/null
+        else
+          jq -e '.gpu_backend_overlay == null' "${ROLE}-airbender-build-inputs.json" >/dev/null
+        fi
+        mkdir -p release-role
+        cp "target/${TARGET}/${RELEASE_PROFILE}/${binary}" "release-role/${binary}"
+        cp "${ROLE}-airbender-build-inputs.json" release-role/
+        archive="${binary}-${BUILD_TAG}-${TARGET}-${kind}.tar.gz"
+        tar -czf "${archive}" -C release-role "${binary}" "${ROLE}-airbender-build-inputs.json"
+        records="$(jq -cn --arg role "${ROLE}" --arg sha "$(sha256sum "${ROLE}-airbender-build-inputs.json" | awk '{print $1}')" '{($role): {sha256: $sha}}')"
+        printf 'archive=%s\nairbender_pins=%s\ngpu_backend_pins=%s\nairbender_records=%s\n' "$archive" "$airbender_pins" "$gpu_backend_pins" "$records" >> "$GITHUB_OUTPUT"

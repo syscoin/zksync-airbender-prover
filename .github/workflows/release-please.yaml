@@ -1,15 +1,8 @@
 name: Release-please
 
-# Give permissions to the release-please to open, update PRs
-# and commit to PRs the repository to update Cargo.lock
 permissions:
-  contents: write
-  pull-requests: write
-  id-token: write
-  attestations: write
-  issues: write # required for release-please labels
+  contents: read
 
-# Run the workflow on push to the main branch or manually
 on:
   push:
     branches:
@@ -17,29 +10,60 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Prepare the release PR with changelog updates and create github releases
   release-please:
-    uses: matter-labs/zksync-ci-common/.github/workflows/release-please.yaml@fcfe16cdf551d9a6b99d9e28d4c705faf0f4c27e
-    secrets:
-      slack_webhook: ${{ secrets.SLACK_WEBHOOK_RELEASES }}
-      # Org-level secrets of the GitHub App used to mint installation tokens.
-      # API commits are auto-signed.
-      MATTERLABS_BOTS_APP_ID: ${{ secrets.MATTERLABS_BOTS_APP_ID }}
-      MATTERLABS_BOTS_PRIVATE_KEY: ${{ secrets.MATTERLABS_BOTS_PRIVATE_KEY }}
-    with:
-      config: '.github/release-please/config.json'          # Path to the configuration file
-      manifest: '.github/release-please/manifest.json'      # Path to the manifest file
-      update-cargo-lock: true                               # Update Cargo.lock file in the release PR
-      publish-to-crates-io: false                           # Enable publishing to crates.io
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - name: Checkout release inputs
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      # Refuse to create a tag from an incomplete version bump. Release PRs
+      # must update both lockfiles and the reviewed dependency-exception scope.
+      - name: Verify release inputs
+        run: python3 .github/scripts/check_release_inputs.py
+      - name: Prepare release
+        id: release
+        uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
+        with:
+          token: ${{ github.token }}
+          target-branch: main
+          config-file: .github/release-please/config.json
+          manifest-file: .github/release-please/manifest.json
 
-  # Trigger workflow to generate artifacts
+  # A direct reusable-workflow call avoids relying on tag-push events suppressed
+  # for releases created with GITHUB_TOKEN.
   release-bins:
-    if: ${{ always() && needs.release-please.outputs.releases_created == 'true' }}
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     needs: release-please
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/release-bins.yml
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
-      # SYSCOIN: Use release-please's exact root-release `sha` output rather than assuming its tag
-      # targets the workflow event commit. The pinned reusable wrapper exposes all action outputs.
-      source_sha: ${{ fromJSON(needs.release-please.outputs.all).sha }}
+      source_sha: ${{ needs.release-please.outputs.sha }}
+
+  release-images:
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    needs: release-please
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/stage-build.yaml
     secrets: inherit
+    with:
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      source_sha: ${{ needs.release-please.outputs.sha }}

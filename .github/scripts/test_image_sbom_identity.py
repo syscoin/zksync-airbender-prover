@@ -153,6 +153,25 @@ class ImageIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already contains build identity"):
             identity.bind_sbom(bound, record)
 
+    def test_source_sbom_binds_exact_source_and_preserves_scanner_data(self):
+        scanner = {"bomFormat": "CycloneDX", "specVersion": "1.6", "components": [],
+                   "metadata": {"component": {"name": "source"},
+                                "properties": [{"name": "scanner", "value": "syft"}]}}
+        path = self.directory / "source.json"
+        path.write_text(json.dumps(scanner))
+        bound = json.loads(self.cli("bind-source", str(path)))
+        self.assertEqual(bound["metadata"]["component"], scanner["metadata"]["component"])
+        properties = {p["name"]: p["value"] for p in bound["metadata"]["properties"]}
+        self.assertEqual(properties["scanner"], "syft")
+        self.assertEqual(properties["io.syscoin.prover.source-build.source_sha"], self.env["SOURCE_SHA"])
+        self.assertEqual(properties["io.syscoin.prover.source-build.tooling_sha"], self.env["TOOLING_SHA"])
+        self.assertEqual(properties["io.syscoin.prover.source-build.run_attempt"], self.env["BUILD_RUN_ATTEMPT"])
+        self.assertEqual(properties["io.syscoin.prover.source-build.schema"], "syscoin-prover-source-sbom-v1")
+        with self.assertRaisesRegex(ValueError, "already contains source identity"):
+            identity.bind_source_sbom(bound, self.context)
+        with self.assertRaisesRegex(ValueError, "CycloneDX"):
+            identity.bind_source_sbom({"bomFormat": "CycloneDX", "specVersion": "1.4"}, self.context)
+
     def test_cli_manifest_to_scan_to_evidence_ignores_reused_version_tag(self):
         digests = self.cli("collect", str(self.inventory()))
         matrix = json.loads(self.cli("matrix", IMAGE_DIGESTS=digests))
@@ -385,9 +404,9 @@ class ImageIdentityTests(unittest.TestCase):
             self.assertNotIn("zksync-crypto-native-fri-query-count", workflow)
             self.assertIn("$airbender.zksync_crypto.manifest_sha256", workflow)
         self.assertIn(".zkos_wrapper.inputs == $expected.zkos_wrapper",
-                      (ROOT / ".github/workflows/release-bins.yml").read_text())
+                      (ROOT / ".github/actions/build-release-role/action.yaml").read_text())
         self.assertIn(".zksync_crypto.inputs == $expected.zksync_crypto",
-                      (ROOT / ".github/workflows/release-bins.yml").read_text())
+                      (ROOT / ".github/actions/build-release-role/action.yaml").read_text())
         self.assertIn("airbenderBuild: $airbender", stage)
         for workflow in (stage, (ROOT / ".github/workflows/release-bins.yml").read_text()):
             self.assertIn("$airbender.selected_lock.canonical_lock_sha256", workflow)
@@ -416,15 +435,14 @@ class ImageIdentityTests(unittest.TestCase):
         lock = self.directory / "Cargo.lock"
         lock.write_bytes(LOCK_FIXTURE.parent_lock_bytes())
         pins = identity.airbender_build_pins(ROOT / "patches/airbender-fork-source.json", lock)
-        records = {role: {"sha256": str(index) * 64}
-                   for index, role in enumerate(("combined", "fri", "snark", "snark-cpu"), 1)}
+        records = {"fri": {"sha256": "2" * 64}}
         gpu = identity.gpu_backend_build_pins(ROOT / "patches/gpu32-memory.json", lock)
         source_uri = "git+https://example.invalid/source@refs/tags/fixture"
         args = ["jq", "-ce", "--arg", "source_uri", source_uri,
                 "--arg", "source_sha", "a" * 40, "--arg", "tooling_uri", "git+https://example.invalid/tooling",
                 "--arg", "tooling_sha", "b" * 40, "--argjson", "airbender", json.dumps(pins),
                 "--argjson", "airbender_records", json.dumps(records),
-                "--argjson", "gpu_backend", json.dumps(gpu), expression]
+                "--argjson", "gpu_backend", json.dumps(gpu), "--arg", "role", "fri", expression]
         base = {"buildDefinition": {"buildType": "https://actions.github.io/buildtypes/workflow/v1",
                                    "externalParameters": {"workflow": {}}, "internalParameters": {},
                                    "resolvedDependencies": []},
@@ -435,7 +453,7 @@ class ImageIdentityTests(unittest.TestCase):
         self.assertEqual(definition["internalParameters"]["syscoinAirbenderBuild"],
                          {"inputs": pins, "roleInputRecords": records, "cargoLocked": True})
         self.assertEqual(definition["internalParameters"]["syscoinGpuBackendBuild"],
-                         {"inputs": gpu, "roles": ["combined", "snark"]})
+                         {"inputs": gpu, "roles": []})
         digests = [entry["digest"] for entry in definition["resolvedDependencies"]]
         self.assertIn({"gitCommit": pins["pins"]["upstream_commit"]}, digests)
         self.assertIn({"gitCommit": pins["pins"]["fork_commit"]}, digests)
@@ -459,6 +477,18 @@ class ImageIdentityTests(unittest.TestCase):
         for value in (gpu["manifest_sha256"], gpu["pins"]["crypto"]["patch_sha256"],
                       gpu["pins"]["bellman"]["patch_sha256"], gpu["selected_lock"]["combined_overlay_lock_sha256"]):
             self.assertIn({"sha256": value}, digests)
+        for index, role in enumerate(("combined", "fri", "snark", "snark-cpu"), 1):
+            with self.subTest(role=role):
+                role_records = {role: {"sha256": str(index) * 64}}
+                role_args = args.copy()
+                role_args[role_args.index("--argjson", role_args.index("airbender_records") - 1) + 2] = json.dumps(role_records)
+                role_args[role_args.index("role") + 1] = role
+                role_run = subprocess.run(role_args, input=json.dumps(base), capture_output=True, text=True)
+                self.assertEqual(role_run.returncode, 0, role_run.stderr)
+                parameters = json.loads(role_run.stdout)["buildDefinition"]["internalParameters"]
+                self.assertEqual(parameters["syscoinAirbenderBuild"]["roleInputRecords"], role_records)
+                self.assertEqual(parameters["syscoinGpuBackendBuild"]["roles"],
+                                 [role] if role in ("combined", "snark") else [])
         base["buildDefinition"]["resolvedDependencies"] = [
             {"uri": source_uri, "digest": {"gitCommit": "c" * 40}}]
         self.assertNotEqual(subprocess.run(args, input=json.dumps(base), capture_output=True,
@@ -466,9 +496,8 @@ class ImageIdentityTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("jq"), "jq is required")
     def test_release_role_validation_rejects_missing_or_different_common_crypto(self):
-        workflow = (ROOT / ".github/workflows/release-bins.yml").read_text()
-        validation = workflow.split("          for role in combined fri snark snark-cpu; do\n", 1)[1]
-        expression = re.search(r"\n              '(.*?)' \\\n", validation, re.S).group(1)
+        recipe = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
+        expression = re.search(r"\n          '(\.cargo_exit_code.*?)' ", recipe, re.S).group(1)
         pins = identity.airbender_build_pins(ROOT / "patches/airbender-fork-source.json",
                                              ROOT / "Cargo.lock")
         record = {"cargo_exit_code": 0, "inputs_reverified": True, "label": "release-fri",

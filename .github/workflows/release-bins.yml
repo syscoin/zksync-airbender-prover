@@ -42,36 +42,33 @@ env:
   # SYSCOIN: GPU SNARK/combined include the actual tested RTX5090 architecture;
   # the package-scoped FRI build retains its existing architecture selection.
   GPU_CUDAARCHS: '80;89;90;120'
+  CARGO_HOME: /tmp/prover-cargo
+  RUSTUP_HOME: /tmp/prover-rustup
 
 defaults:
   run:
     shell: 'bash -ex {0}'
 
 jobs:
-  # Build prover binary for all target platforms
+  # Separate jobs bound peak target-directory use and generate role-specific provenance.
   build-bins:
-    runs-on: ${{ matrix.runner }}
-    # SYSCOIN: Grant OIDC/attestation writes only to the job that builds the four
-    # subjects; it returns the resulting provenance URL to the publication job.
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.9.1-devel-ubuntu24.04@sha256:020bc241a628776338f4d4053fed4c38f6f7f3d7eb5919fecb8de313bb8ba47c
     permissions:
       contents: read
       id-token: write
       attestations: write
-    outputs:
-      attestation-url: ${{ steps.attestation.outputs.attestation-url }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # SYSCOIN: The combined service always runs the FRI phase, whose program
-          # commitment and proving backend require the gpu feature. CPU wrapping is
-          # provided by the separate zksync-os-snark-prover binary, never this service.
-          # Ubuntu-22.04 based high performance runner, GPU prover
-          - runner: matterlabs-ci-hetzner-rtx6000-gpu
-            target: x86_64-unknown-linux-gnu
-            gpu: true
-
+        role: [combined, fri, snark, snark-cpu]
     steps:
+      - name: Install checkout prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git
+          rm -rf /var/lib/apt/lists/*
       - name: Validate release tag
         run: |
           # SYSCOIN: Exclude shell metacharacters, path separators, and ambiguous ref syntax.
@@ -92,6 +89,9 @@ jobs:
           ref: refs/tags/${{ env.RELEASE_TAG }}
           # SYSCOIN: Do not leave even a read token available to build scripts or dependencies.
           persist-credentials: false
+
+      - name: Trust checked out release source
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Verify release source identity
         run: |
@@ -116,136 +116,22 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .release-tooling
           sparse-checkout: |
-            .github/actions/runner-setup
+            .github/actions/build-release-role
+            docker
             .github/scripts
             scripts
             patches
           fetch-depth: '1'
           persist-credentials: false
 
-      - name: Setup runner
-        uses: ./.release-tooling/.github/actions/runner-setup
-        with:
-          # SYSCOIN: Production builds never consume shared compiler/workspace caches or install
-          # unrelated mutable development binaries.
-          enable_cache: 'false'
-          enable_sccache: 'false'
-          minimal_rust: 'true'
-
-      - name: Check CUDA version
-        if: matrix.gpu
-        run: |
-          nvcc_output="$(nvcc --version)"
-          printf '%s\n' "${nvcc_output}"
-          nvcc_release="$(sed -nE 's/.*release ([0-9]+\.[0-9]+),.*/\1/p' <<< "${nvcc_output}")"
-          if [[ ! "${nvcc_release}" =~ ^([0-9]+)\.([0-9]+)$ ]] \
-              || (( BASH_REMATCH[1] < 12 || (BASH_REMATCH[1] == 12 && BASH_REMATCH[2] < 9) )); then
-            echo "GPU32 SNARK requires NVCC >=12.9 for SM120; found ${nvcc_release:-unknown}" >&2
-            exit 1
-          fi
-
-      - name: Prepare pinned GPU32 Bellman CUDA source
-        if: matrix.gpu
-        run: python3 .release-tooling/scripts/prepare-patched-gpu-backends.py --prepare-bellman "${PWD}/bellman-cuda"
-
-      - name: Build bellman-cuda
-        shell: 'bash -ex {0}'
-        if: matrix.gpu
-        run: |
-          # SYSCOIN: Always compile the pinned CUDA source in this attested run. A restored build
-          # directory is not bound to nvcc/CMake/compiler versions, CUDAARCHS, or build flags.
-          cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES="${GPU_CUDAARCHS}"
-          cmake --build bellman-cuda/build/
-
-      - name: Build
+      - name: Build and package role
         id: build
-        env:
-          BELLMAN_CUDA_DIR: ${{ github.workspace }}/bellman-cuda
-          PROVER_SOURCE_DIR: ${{ github.workspace }}
-          TOOLING_SHA: ${{ job.workflow_sha }}
-        run: |
-          # SYSCOIN: Publish the canonical production topology from the same pinned source: GPU
-          # FRI workers, a default GPU SNARK worker, its explicit CPU fallback,
-          # and the optional combined GPU service, each with its own build record.
-          # Scope packages as well as binaries so workspace feature unification cannot pull the
-          # SNARK GPU backend into the standalone FRI role.
-          [[ "$(git -C .release-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
-          [[ -z "$(git -C .release-tooling status --porcelain --untracked-files=all)" ]]
-          # Bind the selected lock to the verified release commit, not a dirty runner file.
-          [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
-          CUDAARCHS="${GPU_CUDAARCHS}" \
-          AIRBENDER_BUILD_ATTESTATION="${PWD}/combined-airbender-build-inputs.json" \
-            bash .release-tooling/scripts/cargo-with-patched-airbender.sh --gpu32 release-combined -- \
-            cargo build --locked --profile "${RELEASE_PROFILE}" \
-            --target "${{ matrix.target }}" -p zksync_os_prover_service \
-            --bin "${ZKSYNC_OS_PROVER_BIN}" --features gpu
-          AIRBENDER_BUILD_ATTESTATION="${PWD}/fri-airbender-build-inputs.json" \
-            bash .release-tooling/scripts/cargo-with-patched-airbender.sh release-fri -- \
-            cargo build --locked --profile "${RELEASE_PROFILE}" \
-            --target "${{ matrix.target }}" -p zksync_os_fri_prover \
-            --bin "${ZKSYNC_OS_FRI_PROVER_BIN}" --features gpu
-          CUDAARCHS="${GPU_CUDAARCHS}" CARGO_TARGET_DIR="${PWD}/target/snark-gpu" \
-          AIRBENDER_BUILD_ATTESTATION="${PWD}/snark-airbender-build-inputs.json" \
-            bash .release-tooling/scripts/cargo-with-patched-airbender.sh --gpu32 release-snark -- \
-            cargo build --locked --profile "${RELEASE_PROFILE}" \
-            --target "${{ matrix.target }}" -p zksync_os_snark_prover \
-            --bin "${ZKSYNC_OS_SNARK_PROVER_BIN}" --features gpu
-          AIRBENDER_BUILD_ATTESTATION="${PWD}/snark-cpu-airbender-build-inputs.json" \
-            bash .release-tooling/scripts/cargo-with-patched-airbender.sh release-snark-cpu -- \
-            cargo build --locked --profile "${RELEASE_PROFILE}" \
-            --target "${{ matrix.target }}" -p zksync_os_snark_prover \
-            --bin "${ZKSYNC_OS_SNARK_PROVER_BIN}" --no-default-features
-          # SYSCOIN: Successful role records accompany the binaries and are bound into the
-          # archive attestation; compatible older source tags use these exact tooling pins.
-          [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
-          airbender_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
-            .release-tooling/patches/airbender-fork-source.json --source-lock Cargo.lock)"
-          gpu_backend_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py gpu-backend-pins \
-            .release-tooling/patches/gpu32-memory.json --source-lock Cargo.lock)"
-          for role in combined fri snark snark-cpu; do
-            jq -e --argjson expected "${airbender_pins}" --arg role "release-${role}" \
-              '.cargo_exit_code == 0 and .inputs_reverified == true and .label == $role
-               and .pins == $expected.pins and .selected_lock == $expected.selected_lock
-               and .zkos_wrapper.inputs == $expected.zkos_wrapper
-               and .zksync_crypto.inputs == $expected.zksync_crypto
-               and .application_inputs_sha256["Cargo.lock"] == $expected.selected_lock.canonical_lock_sha256' \
-              "${role}-airbender-build-inputs.json" >/dev/null
-            if [[ "${role}" == combined || "${role}" == snark ]]; then
-              jq -e --argjson expected "${gpu_backend_pins}" \
-                '.gpu_backend_overlay.inputs == $expected' "${role}-airbender-build-inputs.json" >/dev/null
-            else
-              jq -e '.gpu_backend_overlay == null' "${role}-airbender-build-inputs.json" >/dev/null
-            fi
-          done
-          airbender_records="$(jq -cn \
-            --arg combined "$(sha256sum combined-airbender-build-inputs.json | awk '{print $1}')" \
-            --arg fri "$(sha256sum fri-airbender-build-inputs.json | awk '{print $1}')" \
-            --arg snark "$(sha256sum snark-airbender-build-inputs.json | awk '{print $1}')" \
-            --arg snark_cpu "$(sha256sum snark-cpu-airbender-build-inputs.json | awk '{print $1}')" \
-            '{combined: {sha256: $combined}, fri: {sha256: $fri}, snark: {sha256: $snark}, "snark-cpu": {sha256: $snark_cpu}}')"
-          echo "airbender_pins=${airbender_pins}" >> "${GITHUB_OUTPUT}"
-          echo "gpu_backend_pins=${gpu_backend_pins}" >> "${GITHUB_OUTPUT}"
-          echo "airbender_records=${airbender_records}" >> "${GITHUB_OUTPUT}"
-
-      - name: Prepare tarballs
-        run: |
-          # SYSCOIN: Keep GPU and CPU binaries distinct, despite their common executable name.
-          mv "./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_PROVER_BIN}" "./${ZKSYNC_OS_PROVER_BIN}"
-          mv "./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_FRI_PROVER_BIN}" "./${ZKSYNC_OS_FRI_PROVER_BIN}"
-          mv "./target/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_SNARK_PROVER_BIN}" "./${ZKSYNC_OS_SNARK_PROVER_BIN}"
-          mkdir release-snark-gpu
-          cp "./target/snark-gpu/${{ matrix.target }}/${RELEASE_PROFILE}/${ZKSYNC_OS_SNARK_PROVER_BIN}" \
-              "release-snark-gpu/${ZKSYNC_OS_SNARK_PROVER_BIN}"
-          cp snark-airbender-build-inputs.json release-snark-gpu/
-          tar -czf "${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-gpu.tar.gz" \
-              "${ZKSYNC_OS_PROVER_BIN}" combined-airbender-build-inputs.json
-          tar -czf "${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-gpu.tar.gz" \
-              "${ZKSYNC_OS_FRI_PROVER_BIN}" fri-airbender-build-inputs.json
-          tar -czf "${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-gpu.tar.gz" \
-              -C release-snark-gpu "${ZKSYNC_OS_SNARK_PROVER_BIN}" snark-airbender-build-inputs.json
-          tar -czf "${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-${{ matrix.target }}-cpu.tar.gz" \
-              "${ZKSYNC_OS_SNARK_PROVER_BIN}" snark-cpu-airbender-build-inputs.json
+        uses: ./.release-tooling/.github/actions/build-release-role
+        with:
+          role: ${{ matrix.role }}
+          target: x86_64-unknown-linux-gnu
+          release_tag: ${{ inputs.tag }}
+          tooling_sha: ${{ job.workflow_sha }}
 
       - name: Generate GitHub build provenance predicate
         id: build-provenance
@@ -264,6 +150,7 @@ jobs:
           AIRBENDER_PINS: ${{ steps.build.outputs.airbender_pins }}
           AIRBENDER_RECORDS: ${{ steps.build.outputs.airbender_records }}
           GPU_BACKEND_PINS: ${{ steps.build.outputs.gpu_backend_pins }}
+          RELEASE_ROLE: ${{ matrix.role }}
         run: |
           # SYSCOIN: The stock predicate binds the builder invocation. Add the validated tag source
           # as a distinct resolved dependency so a manual old-tag rebuild remains honest.
@@ -279,6 +166,7 @@ jobs:
             --argjson airbender "${AIRBENDER_PINS}" \
             --argjson airbender_records "${AIRBENDER_RECORDS}" \
             --argjson gpu_backend "${GPU_BACKEND_PINS}" \
+            --arg role "${RELEASE_ROLE}" \
             '
               if .buildDefinition.buildType != "https://actions.github.io/buildtypes/workflow/v1"
                   or (.buildDefinition.externalParameters.workflow | type) != "object"
@@ -324,35 +212,34 @@ jobs:
                   inputs: $airbender, roleInputRecords: $airbender_records, cargoLocked: true
                 }
               | .buildDefinition.internalParameters.syscoinGpuBackendBuild = {
-                  inputs: $gpu_backend, roles: ["combined", "snark"]
+                  inputs: $gpu_backend, roles: (if ($role == "combined" or $role == "snark") then [$role] else [] end)
                 }
             ' <<< "${BASE_PROVENANCE}" > "${RUNNER_TEMP}/release-provenance.json"
 
-      - name: Binaries attestation
+      - name: Attest role archive
         id: attestation
-        # SYSCOIN: Sign the exact four artifacts with both builder and release-source identities.
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         env:
           NODE_OPTIONS: "--max-http-header-size=32768"
         with:
-          subject-path: |
-            ${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
-            ${{ env.ZKSYNC_OS_FRI_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
-            ${{ env.ZKSYNC_OS_SNARK_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
-            ${{ env.ZKSYNC_OS_SNARK_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-cpu.tar.gz
+          subject-path: ${{ steps.build.outputs.archive }}
           predicate-type: 'https://slsa.dev/provenance/v1'
           predicate-path: ${{ runner.temp }}/release-provenance.json
 
-      - name: Upload binaries
-        # SYSCOIN: Keep the four role-specific archives together for one release attestation.
+      - name: Record attestation URL
+        env:
+          ATTESTATION_URL: ${{ steps.attestation.outputs.attestation-url }}
+        run: |
+          [[ "${ATTESTATION_URL}" == "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/attestations/"* ]]
+          printf '%s\n' "${ATTESTATION_URL}" > attestation-url.txt
+
+      - name: Upload role archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: zksync-os-provers-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz
+          name: release-${{ matrix.role }}-${{ env.RELEASE_TAG }}
           path: |
-            ${{ env.ZKSYNC_OS_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
-            ${{ env.ZKSYNC_OS_FRI_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
-            ${{ env.ZKSYNC_OS_SNARK_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-gpu.tar.gz
-            ${{ env.ZKSYNC_OS_SNARK_PROVER_BIN }}-${{ env.RELEASE_TAG }}-${{ matrix.target }}-cpu.tar.gz
+            ${{ steps.build.outputs.archive }}
+            attestation-url.txt
           if-no-files-found: error
           retention-days: 1
 
@@ -365,6 +252,7 @@ jobs:
     # attestation authority; provenance was already created by the builder.
     permissions:
       contents: write
+      attestations: read
     steps:
 
       - name: Validate release tag
@@ -383,25 +271,67 @@ jobs:
         # SYSCOIN: Collect the complete role-specific artifact set produced above.
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          pattern: zksync-os-provers-${{ env.RELEASE_TAG }}-*.tar.gz
-          path: dist
-          merge-multiple: true
+          pattern: release-*-${{ env.RELEASE_TAG }}
+          path: role-artifacts
+
+      - name: Verify and collect the four signed roles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOLING_SHA: ${{ job.workflow_sha }}
+        run: |
+          mkdir dist
+          for role in combined fri snark snark-cpu; do
+            case "${role}" in
+              combined) binary="${ZKSYNC_OS_PROVER_BIN}"; kind=gpu ;;
+              fri) binary="${ZKSYNC_OS_FRI_PROVER_BIN}"; kind=gpu ;;
+              snark) binary="${ZKSYNC_OS_SNARK_PROVER_BIN}"; kind=gpu ;;
+              snark-cpu) binary="${ZKSYNC_OS_SNARK_PROVER_BIN}"; kind=cpu ;;
+            esac
+            directory="role-artifacts/release-${role}-${RELEASE_TAG}"
+            archive="${binary}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-${kind}.tar.gz"
+            test -f "${directory}/${archive}"
+            test "$(find "${directory}" -maxdepth 1 -type f | wc -l)" -eq 2
+            attestation_url="$(cat "${directory}/attestation-url.txt")"
+            [[ "${attestation_url}" == "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/attestations/"* ]]
+            gh attestation verify "${directory}/${archive}" --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-bins.yml" \
+              --signer-digest "${TOOLING_SHA}" --deny-self-hosted-runners
+            cp "${directory}/${archive}" dist/
+            printf '%s\n' "${attestation_url}" > "dist/${role}-attestation-url.txt"
+          done
+
+      - name: Checkout release publication tooling
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .release-publication-tooling
+          sparse-checkout: .github/scripts
+          fetch-depth: '1'
+          persist-credentials: false
 
       - name: Upload artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        # SYSCOIN: Release assets are immutable; an existing filename aborts instead of overwriting.
-        run: gh release upload "${RELEASE_TAG}" dist/*
+          TOOLING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .release-publication-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .release-publication-tooling status --porcelain --untracked-files=all)" ]]
+          python3 -B .release-publication-tooling/.github/scripts/publish-release-assets.py "${RELEASE_TAG}" dist/*.tar.gz
 
       - name: Update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           REPOSITORY: ${{ github.repository }}
-          ATTESTATION_URL: ${{ needs.build-bins.outputs.attestation-url }}
         run: |
-          # SYSCOIN: Publish explicit links for combined, FRI, GPU SNARK and CPU fallback.
+          COMBINED_ATTESTATION="$(cat dist/combined-attestation-url.txt)"
+          FRI_ATTESTATION="$(cat dist/fri-attestation-url.txt)"
+          SNARK_ATTESTATION="$(cat dist/snark-attestation-url.txt)"
+          SNARK_CPU_ATTESTATION="$(cat dist/snark-cpu-attestation-url.txt)"
           RELEASE_BODY=$(gh release view "${RELEASE_TAG}" --json body -q '.body')
           BINARIES_SECTION=$(cat <<- ENDBODY
           <!-- syscoin-prover-binaries:start -->
@@ -409,10 +339,10 @@ jobs:
 
           | System | Architecture | Binary | Attestation |
           |:---:|:---:|:---:|:---|
-          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU) | [${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${ATTESTATION_URL}) |
-          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU FRI) | [${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${ATTESTATION_URL}) |
-          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU SNARK, default) | [${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${ATTESTATION_URL}) |
-          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (CPU SNARK) | [${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-cpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-cpu.tar.gz) | [Attestation](${ATTESTATION_URL}) |
+          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU) | [${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${COMBINED_ATTESTATION}) |
+          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU FRI) | [${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_FRI_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${FRI_ATTESTATION}) |
+          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (GPU SNARK, default) | [${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-gpu.tar.gz) | [Attestation](${SNARK_ATTESTATION}) |
+          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | x86_64 (CPU SNARK) | [${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-cpu.tar.gz](https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}/${ZKSYNC_OS_SNARK_PROVER_BIN}-${RELEASE_TAG}-x86_64-unknown-linux-gnu-cpu.tar.gz) | [Attestation](${SNARK_CPU_ATTESTATION}) |
           <!-- syscoin-prover-binaries:end -->
           ENDBODY
           )

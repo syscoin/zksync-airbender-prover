@@ -1,0 +1,68 @@
+name: Hosted prover image build
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/image-build-smoke.yaml'
+      - '.github/workflows/stage-build.yaml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'multiblock_batch.bin'
+      - 'multiblock_batch.text'
+      - 'crates/**'
+      - 'docker/**'
+      - 'patches/**'
+      - 'scripts/cargo-with-patched-airbender.sh'
+      - 'scripts/prepare-patched-airbender.py'
+      - 'scripts/prepare-patched-gpu-backends.py'
+      - 'scripts/pinned_source_checkout.py'
+      - '.dockerignore'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.component }} without publishing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - zksync-airbender-prover
+          - zksync-os-prover-fri
+          - zksync-os-prover-snark
+    steps:
+      - name: Free space on the ephemeral GitHub runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          docker image prune --all --force
+          df -h /
+
+      - name: Check out proposed source and tooling
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Prepare the same bounded build context as release images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker/prepare-prover-image-context.sh . . "${RUNNER_TEMP}/prover-image-context"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Build without registry credentials
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: ${{ runner.temp }}/prover-image-context
+          file: ${{ runner.temp }}/prover-image-context/docker/${{ matrix.component }}/Dockerfile
+          platforms: linux/amd64
+          push: false
+          no-cache: true

@@ -1,30 +1,23 @@
 # Reusable workflow: generates SBOMs (Software Bill of Materials) for both source
-# code and container images, then uploads them to Dependency Track for vulnerability
-# tracking.
+# code and container images. GitHub retains the evidence; Dependency Track upload
+# runs when configured.
 #
 # An SBOM is a machine-readable inventory of every library and component that goes
 # into a software artifact.
-# It records each dependency's name, version, license, origin, and known
-# vulnerabilities at the time of the build, in a standardised format (CycloneDX
-# here). Having it continuously updated lets us:
+# It records dependency metadata in CycloneDX format. When configured,
+# Dependency Track analyzes these inventories for known vulnerabilities. This
+# retained evidence lets us:
 #   - detect newly disclosed CVEs in our dependencies without re-scanning manually;
 #   - satisfy security audits and compliance frameworks (SOC 2, ISO 27001, etc.)
 #     that require evidence of third-party component oversight;
 #   - respond quickly to supply-chain incidents (e.g. log4shell-style events) by
 #     knowing exactly which builds are affected.
 #
-# Structure:
-#   create-parent-project  — ensures a collection project exists in DT that will
-#                            aggregate vulnerabilities from all child projects below.
-#   sbom-code              — scans the source tree with Syft, produces a CycloneDX
-#                            SBOM, and uploads it as a child project "<repo>-code".
-#   sbom-image             — (matrix) pulls each container image from GHCR, scans it
-#                            with Syft, and uploads it as "<repo>-<app>-image".
-#
-# All three child projects are parented to the collection project so the DT dashboard
-# shows a single rolled-up view per version.
+# Image identity validation is independent of optional external tracking. Both source
+# and image evidence are retained in GitHub even if Dependency Track is absent or
+# its configured upload fails.
 
-name: SBOM generation and upload to Dependency Track
+name: SBOM generation and evidence
 
 on:
   workflow_call:
@@ -49,7 +42,7 @@ on:
 
 jobs:
   create-parent-project:
-    name: Create or verify Dependency Track collection project
+    name: Validate the image inventory
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,8 +52,7 @@ jobs:
       - name: Checkout hardened SBOM tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # SYSCOIN: This helper receives the Dependency-Track credential. Keep it bound to the
-          # exact reusable-workflow revision, independently of the source commit being scanned.
+          # Keep the digest validator bound to this workflow's tooling revision.
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .sbom-tooling
@@ -86,6 +78,59 @@ jobs:
           image_matrix="$(python3 .sbom-tooling/.github/scripts/image-sbom-identity.py matrix)"
           echo "image_matrix=${image_matrix}" >> "${GITHUB_OUTPUT}"
 
+  dependency-track-config:
+    name: Check Dependency Track configuration
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.config.outputs.enabled }}
+    steps:
+      - name: Checkout trusted configuration checker
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .sbom-config-tooling
+          sparse-checkout: .github/scripts
+          fetch-depth: '1'
+          persist-credentials: false
+      - name: Check complete configuration without exposing credentials
+        id: config
+        shell: bash
+        env:
+          TOOLING_SHA: ${{ job.workflow_sha }}
+          DT_HOSTNAME: ${{ vars.DEPENDENCY_TRACK_SERVER_HOSTNAME }}
+          DT_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
+          DT_PARENT_UUID: ${{ vars.DEPENDENCY_TRACK_PARENT_PROJECT_UUID }}
+        run: |
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .sbom-config-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .sbom-config-tooling status --porcelain --untracked-files=all)" ]]
+          enabled="$(python3 .sbom-config-tooling/.github/scripts/dependency-track-config.py)"
+          echo "enabled=${enabled}" >> "${GITHUB_OUTPUT}"
+          if [[ "${enabled}" == false ]]; then
+            echo "Dependency Track is not configured. SBOMs are retained as GitHub artifacts; external vulnerability tracking was not run." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  dependency-track-project:
+    name: Create or verify Dependency Track collection project
+    needs: [create-parent-project, dependency-track-config]
+    if: ${{ needs.dependency-track-config.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted Dependency Track tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .sbom-tooling
+          sparse-checkout: .github/scripts
+          fetch-depth: '1'
+          persist-credentials: false
       - name: Create or verify Dependency Track collection project
         shell: bash
         run: |
@@ -104,12 +149,21 @@ jobs:
 
   sbom-code:
     name: Generate and upload SBOM of the source code for analysis
-    # Must run after the parent collection project is guaranteed to exist.
-    needs: create-parent-project
+    needs: [create-parent-project, dependency-track-config, dependency-track-project]
+    if: ${{ !cancelled() && needs.create-parent-project.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
+      - name: Checkout bound SBOM identity tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .sbom-tooling
+          sparse-checkout: .github/scripts
+          fetch-depth: '1'
+          persist-credentials: false
       - name: Checkout exact source to scan
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -137,7 +191,30 @@ jobs:
           upload-artifact: 'false'
           upload-release-assets: 'false'
 
+      - name: Bind exact source and build identity to source SBOM
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TOOLING_SHA: ${{ job.workflow_sha }}
+          VERSION: ${{ inputs.version }}
+          BUILD_RUN_ATTEMPT: ${{ inputs.build_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "${TOOLING_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git -C .sbom-tooling rev-parse HEAD)" == "${TOOLING_SHA}" ]]
+          [[ -z "$(git -C .sbom-tooling status --porcelain --untracked-files=all)" ]]
+          [[ "$(git -C .sbom-source rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ -z "$(git -C .sbom-source status --porcelain --untracked-files=all)" ]]
+          python3 .sbom-tooling/.github/scripts/image-sbom-identity.py bind-source bom-code.cdx.json > bom-code.bound.cdx.json
+
+      - name: Preserve source SBOM evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: code-sbom-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bom-code.bound.cdx.json
+          if-no-files-found: error
+
       - name: Upload CycloneDX file to Dependency Track
+        if: ${{ needs.dependency-track-project.result == 'success' }}
         uses: DependencyTrack/gh-upload-sbom@b717d6595efa77a7ff1b18b57ac28597afc75d77 # v4.0.0
         with:
           serverhostname: ${{ vars.DEPENDENCY_TRACK_SERVER_HOSTNAME }}
@@ -145,15 +222,16 @@ jobs:
           projectname: "${{ github.event.repository.name }}-code"
           projectversion: ${{ inputs.version }}
           isLatest: true
-          bomfilename: "bom-code.cdx.json"
+          bomfilename: "bom-code.bound.cdx.json"
           autocreate: true
           parentname: ${{ github.event.repository.name }}
           parentversion: ${{ inputs.version }}
 
   sbom-image:
     name: Generate and upload SBOM of the container images for analysis
-    # Runs in parallel with sbom-code; one job per image in the matrix.
-    needs: create-parent-project
+    # Scan even if external tracking setup failed; its failed job still fails the workflow.
+    needs: [create-parent-project, dependency-track-config, dependency-track-project]
+    if: ${{ !cancelled() && needs.create-parent-project.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -245,6 +323,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload CycloneDX file to Dependency Track
+        if: ${{ needs.dependency-track-project.result == 'success' }}
         uses: DependencyTrack/gh-upload-sbom@b717d6595efa77a7ff1b18b57ac28597afc75d77 # v4.0.0
         with:
           serverhostname: ${{ vars.DEPENDENCY_TRACK_SERVER_HOSTNAME }}

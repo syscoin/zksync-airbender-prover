@@ -30,6 +30,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Check release input guard
+        run: |
+          python3 -B .github/scripts/check_release_inputs.py
+          python3 -B .github/scripts/test_release_inputs.py
+          python3 -B .github/scripts/test_publish_release_assets.py
+
       - name: Setup runner
         uses: ./.github/actions/runner-setup
         with:
@@ -64,6 +70,12 @@ jobs:
 
       - name: Check image and GPU backend provenance
         run: python3 -B .github/scripts/test_image_sbom_identity.py
+
+      - name: Check Dependency Track configuration policy
+        run: python3 -B .github/scripts/test_dependency_track_config.py
+
+      - name: Check hosted image release workflow
+        run: python3 -B .github/scripts/test_hosted_image_workflow.py
 
       # SYSCOIN: This public CPU lane explicitly disables the default GPU SNARK
       # feature. It tests source/overlay policy, not a CUDA build or service proof.

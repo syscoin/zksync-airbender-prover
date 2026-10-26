@@ -179,6 +179,22 @@ def bind_sbom(bom, record, airbender=None, gpu_backend=None):
     return bom
 
 
+def bind_source_sbom(bom, identity):
+    require(isinstance(bom, dict) and bom.get("bomFormat") == "CycloneDX"
+            and bom.get("specVersion") == "1.6", "expected a CycloneDX 1.6 SBOM")
+    metadata = bom.setdefault("metadata", {})
+    require(isinstance(metadata, dict), "invalid SBOM metadata")
+    properties = metadata.setdefault("properties", [])
+    require(isinstance(properties, list), "invalid SBOM metadata properties")
+    record = {**identity, "schema": "syscoin-prover-source-sbom-v1"}
+    for key, value in record.items():
+        name = f"io.syscoin.prover.source-build.{key}"
+        require(not any(isinstance(prop, dict) and prop.get("name") == name for prop in properties),
+                f"SBOM already contains source identity: {key}")
+        properties.append({"name": name, "value": value})
+    return bom
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -188,6 +204,8 @@ def main():
     collect = commands.add_parser("collect")
     collect.add_argument("directory", type=Path)
     commands.add_parser("matrix")
+    source = commands.add_parser("bind-source")
+    source.add_argument("bom", type=Path)
     bind = commands.add_parser("bind")
     bind.add_argument("component")
     bind.add_argument("digest")
@@ -209,7 +227,9 @@ def main():
         print(json.dumps(gpu_backend_build_pins(args.manifest, args.source_lock), separators=(",", ":"), sort_keys=True))
         return
     identity = build_identity(os.environ)
-    if args.command == "record":
+    if args.command == "bind-source":
+        result = bind_source_sbom(parse_json(args.bom.read_text()), identity)
+    elif args.command == "record":
         result = image_record(identity, args.component, args.digest)
     elif args.command == "collect":
         result = collect_digests(args.directory, identity)
