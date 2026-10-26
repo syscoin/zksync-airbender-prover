@@ -1,0 +1,68 @@
+name: Release build qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release-bins.yml'
+      - '.github/workflows/release-build-check.yml'
+      - '.github/actions/build-release-role/**'
+      - 'docker/prover-build-pins.json'
+      - 'scripts/cargo-with-patched-airbender.sh'
+      - 'scripts/prepare-patched-airbender.py'
+      - 'scripts/prepare-patched-gpu-backends.py'
+      - 'patches/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZKSYNC_OS_PROVER_BIN: zksync-os-prover-service
+  ZKSYNC_OS_FRI_PROVER_BIN: zksync_os_fri_prover
+  ZKSYNC_OS_SNARK_PROVER_BIN: zksync_os_snark_prover
+  RELEASE_PROFILE: release
+  CUDAARCHS: '80;89;90'
+  GPU_CUDAARCHS: '80;89;90;120'
+  CARGO_HOME: /tmp/prover-cargo
+  RUSTUP_HOME: /tmp/prover-rustup
+
+jobs:
+  build-role:
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.9.1-devel-ubuntu24.04@sha256:020bc241a628776338f4d4053fed4c38f6f7f3d7eb5919fecb8de313bb8ba47c
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [combined, fri, snark, snark-cpu]
+    steps:
+      - name: Install checkout prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git
+          rm -rf /var/lib/apt/lists/*
+      - name: Checkout proposed source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Checkout proposed build tooling
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          sparse-checkout: |
+            .github/actions/build-release-role
+            docker/prover-build-pins.json
+            .github/scripts
+            scripts
+            patches
+          persist-credentials: false
+      - name: Build and package role
+        uses: ./.release-tooling/.github/actions/build-release-role
+        with:
+          role: ${{ matrix.role }}
+          target: x86_64-unknown-linux-gnu
+          release_tag: ci-qualification
+          tooling_sha: ${{ github.sha }}
