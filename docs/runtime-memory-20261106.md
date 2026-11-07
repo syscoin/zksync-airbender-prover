@@ -153,6 +153,11 @@ The removed CPU LDE arrays are public power caches. Proof-supplied evaluations,
 Merkle openings and terminal coefficients continue through the unchanged verifier,
 which derives its geometry, challenges and degree bounds independently. The
 direct-constant regression verifies equivalence with the old cache construction.
+The low-level circuit verifier returns the supplied setup caps with its verified
+proof state. Binding those caps to the expected setup and program belongs to the
+full-statement and caller layers. These runs exercised `verify_artifact`, including
+its expected-program recursion-chain checks, and the app-bound SNARK wrapper with
+auxiliary-parameter checks enabled.
 The completed offline proof jobs exercised successful execution. Job-abort and
 simulator-reset recovery remain outside this runtime measurement.
 
