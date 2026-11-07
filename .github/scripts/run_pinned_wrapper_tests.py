@@ -29,6 +29,9 @@ SPEC.loader.exec_module(BASE)
 TEST_FILTERS = ("buffered_os_rng::tests", "wrapper::tests::precomputed_commitment",
                 "degree_lift_")
 WRAPPER_WORKSPACE_PACKAGES = {**BASE.WRAPPER_PACKAGES, "wrapper_generator": "0.1.0"}
+# The immutable wrapper retains this declaration while its test overlay uses
+# the separately authenticated current Airbender tree.
+WRAPPER_AIRBENDER_COMMIT = "0d8c852954afcae1f160151a17fe80886f1755b0"
 
 
 def relative_path(value):
@@ -127,7 +130,8 @@ def lock_overlay(raw, selected, air, crypto):
                        if name != "zksync_solidity_vk_codegen"}
     BASE.require(len(air_packages) == 44 and len(crypto_packages) == 10,
                  "unknown wrapper proving package closure")
-    groups = ((BASE.fork_lock_source(air), air_packages),
+    wrapper_air = {**air, "fork_commit": WRAPPER_AIRBENDER_COMMIT}
+    groups = ((BASE.fork_lock_source(wrapper_air), air_packages),
               (crypto["upstream_lock_source"], crypto_packages))
     reviewed = {name: (source, version) for source, packages in groups
                 for name, version in packages.items()}
@@ -242,7 +246,8 @@ def run(record_path, expected_label="ci-test"):
     for alias in ("unified_reduced_machine_verifier", "blake_verifier", "execution_utils",
                   "setups", "mersenne_field", "zkos_verifier_generator", "prover"):
         spec = wrapper_deps[alias]
-        BASE.require(spec.get("git") == air["fork_url"] and spec.get("rev") == air["fork_commit"]
+        BASE.require(spec.get("git") == air["fork_url"]
+                     and spec.get("rev") == WRAPPER_AIRBENDER_COMMIT
                      and not any(key in spec for key in ("tag", "branch")),
                      "wrapper direct Airbender source differs from reviewed fork")
     raw = (roots["wrapper"] / "Cargo.lock").read_bytes()

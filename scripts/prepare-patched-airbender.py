@@ -66,15 +66,15 @@ AIRBENDER_UPSTREAM = (
 )
 AIRBENDER_FORK = (
     "https://github.com/syscoin/zksync-airbender",
-    "0d8c852954afcae1f160151a17fe80886f1755b0",
-    "a41a4a18eeb102b405bcb63ad7ca85e9b6b13213",
+    "b91eeaecc4d1b9a42ea6843432bb3e014899b303",
+    "ce3d73c3901e0aada9dfca1319eea8a1e5fddbb5",
 )
 WRAPPER_AIRBENDER_ROOTS = (
     "unified_reduced_machine_verifier", "blake2_with_compression_verifier",
     "execution_utils", "setups", "field", "verifier_generator", "prover",
 )
 PREPARED_SOURCE_MARKER = ".syscoin-proving-sources-prepared"
-PREPARED_BUILD_GUARD_SHA256 = "a379aad278c27a645c0087172cc75b2f488fb70e09d9d7785dbc446f51c31a97"
+PREPARED_BUILD_GUARD_SHA256 = "db7ae581d3e22e760a775781b40f5a5d3429b79385655d09f504d6cd5b279e2c"
 CRYPTO_UPSTREAM = (
     "https://github.com/matter-labs/zksync-crypto.git",
     "bf2797e4ca13475bf797aa43e085389cdd6732f9",

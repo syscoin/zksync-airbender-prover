@@ -399,11 +399,12 @@ The combined binary SHA-256 is
 `4324e19759a4dd777df29926303eb51593fe989f40d1deba2e164d6445da5823`;
 the standalone SNARK binary SHA-256 is
 `9d9b8f7b6d7b8cfb348e09c669e9d52bdb9cb65210e3a9cd74890f968f8dc0ac`.
-All 53 attested GPU application/tooling input hashes match the current executable
-inputs; later test/documentation changes do not relabel these as new binary builds.
-No proof or worker was started by the loader/build runs. Normal producer build/loader
-qualification is complete, while CI completion, final release promotion and live
-verifier/service adoption remain separate gates.
+Those 53 attested GPU application/tooling inputs describe that source snapshot.
+No proof or worker was started by those loader/build runs. The subsequent
+Airbender runtime-memory revision has its own
+[resource measurements and qualification record](docs/runtime-memory-20261106.md).
+CI completion, final release promotion and live verifier/service adoption remain
+separate gates.
 The measurements below belong to the preceding source snapshot and are not measurements
 of the new candidate.
 

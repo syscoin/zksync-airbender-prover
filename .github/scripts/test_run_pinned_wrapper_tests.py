@@ -35,6 +35,7 @@ class WrapperTests(unittest.TestCase):
             directory.mkdir()
         self.air, self.wrapper, self.crypto = (BASE.load_airbender_pins(), BASE.load_wrapper_pins(),
                                               BASE.load_crypto_pins())
+        self.wrapper_air = {**self.air, "fork_commit": RUNNER.WRAPPER_AIRBENDER_COMMIT}
         self.overlay, self.selected = BASE.selected_lock_overlay(
             ROOT / "Cargo.lock", BASE.PIN_PATH.parent / self.air["overlay_lock_file"],
             self.air, self.wrapper, self.crypto)
@@ -54,7 +55,7 @@ class WrapperTests(unittest.TestCase):
         wrapper_source = self.roots["wrapper"] / "wrapper/src"
         wrapper_source.mkdir()
         (wrapper_source / "lib.rs").write_text("// pinned wrapper source fixture\n")
-        dependencies = "".join(f'{alias} = {{ git = "{self.air["fork_url"]}", rev = "{self.air["fork_commit"]}" }}\n'
+        dependencies = "".join(f'{alias} = {{ git = "{self.air["fork_url"]}", rev = "{RUNNER.WRAPPER_AIRBENDER_COMMIT}" }}\n'
                                for alias in ("unified_reduced_machine_verifier", "blake_verifier", "execution_utils",
                                              "setups", "mersenne_field", "zkos_verifier_generator", "prover"))
         (self.roots["wrapper"] / "Cargo.toml").write_text(
@@ -108,7 +109,7 @@ class WrapperTests(unittest.TestCase):
 
     def canonical_wrapper_lock(self):
         raw = '# wrapper lock fixture retains all package edges and versions\nversion = 4\n'
-        for group, pins in (("air", self.air), ("crypto", self.crypto)):
+        for group, pins in (("air", self.wrapper_air), ("crypto", self.crypto)):
             for name, version in sorted(self.groups[group].items()):
                 raw += '\n[[package]]\nname = ' + json.dumps(name) + '\nversion = ' + json.dumps(version)
                 source = BASE.fork_lock_source(pins) if group == "air" else pins["upstream_lock_source"]
@@ -152,7 +153,7 @@ class WrapperTests(unittest.TestCase):
     def test_overlay_changes_only_exact_proving_source_assignments(self):
         overlay, groups = RUNNER.lock_overlay(self.raw, self.selected, self.air, self.crypto)
         expected = self.raw
-        for source in (BASE.fork_lock_source(self.air), self.crypto["upstream_lock_source"]):
+        for source in (BASE.fork_lock_source(self.wrapper_air), self.crypto["upstream_lock_source"]):
             expected = expected.replace(('source = ' + json.dumps(source) + '\n').encode(), b"")
         self.assertEqual(overlay, expected)
         self.assertEqual(groups, self.groups)
@@ -162,10 +163,12 @@ class WrapperTests(unittest.TestCase):
 
     def test_mixed_unknown_partial_unpatched_and_qualified_graphs_rejected(self):
         first = next(iter(sorted(self.groups["air"])))
-        air_line = ('source = ' + json.dumps(BASE.fork_lock_source(self.air)) + '\n').encode()
+        air_line = ('source = ' + json.dumps(BASE.fork_lock_source(self.wrapper_air)) + '\n').encode()
         source_block = f'\n[[package]]\nname = "{first}"\nversion = "0.1.0"\n'.encode() + air_line
         cases = {
-            "mixed": self.raw.replace(self.air["fork_commit"].encode(), b"f" * 40, 1),
+            "mixed": self.raw.replace(RUNNER.WRAPPER_AIRBENDER_COMMIT.encode(), b"f" * 40, 1),
+            "current": self.raw.replace(RUNNER.WRAPPER_AIRBENDER_COMMIT.encode(),
+                                        self.air["fork_commit"].encode()),
             "unknown": self.raw.replace(('name = "' + first + '"').encode(), b'name = "unknown-air"', 1),
             "partial": self.raw.replace(source_block, b"", 1),
             "unpatched": self.raw.replace(air_line, b"", 1),
@@ -174,6 +177,24 @@ class WrapperTests(unittest.TestCase):
         for name, raw in cases.items():
             with self.subTest(name=name), self.assertRaises(ValueError):
                 RUNNER.lock_overlay(raw, self.selected, self.air, self.crypto)
+
+    def test_wrapper_declaration_drift_is_rejected_before_cargo(self):
+        self.authenticated()
+        manifest = self.roots["wrapper"] / "Cargo.toml"
+        original = manifest.read_text()
+        for name, changed in (
+            ("current", original.replace(RUNNER.WRAPPER_AIRBENDER_COMMIT, self.air["fork_commit"])),
+            ("unknown", original.replace(RUNNER.WRAPPER_AIRBENDER_COMMIT, "f" * 40)),
+            ("url", original.replace(self.air["fork_url"], "https://example.com/airbender")),
+            ("branch", original.replace('rev = "', 'branch = "')),
+        ):
+            with self.subTest(name=name):
+                manifest.write_text(changed)
+                with self.assertRaisesRegex(ValueError, "wrapper direct Airbender source"), \
+                        patch.object(RUNNER.subprocess, "run") as cargo:
+                    RUNNER.run(self.record_path)
+                cargo.assert_not_called()
+        manifest.write_text(original)
 
     def test_extra_fork_git_source_is_rejected_in_lock_and_cargo_metadata(self):
         self.authenticated()

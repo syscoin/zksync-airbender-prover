@@ -2,9 +2,9 @@
 
 Worker builds use `scripts/cargo-with-patched-airbender.sh LABEL -- cargo ... --locked`.
 Airbender comes from the immutable Syscoin fork commit
-`0d8c852954afcae1f160151a17fe80886f1755b0`. It descends from the pinned Matter Labs
+`b91eeaecc4d1b9a42ea6843432bb3e014899b303`. It descends from the pinned Matter Labs
 `v0.6.0-rc.2` commit `03454c7a41053a4b88bb421e97fb9efe893a92f5`, and its tree is
-`a41a4a18eeb102b405bcb63ad7ca85e9b6b13213`. It carries the former cumulative
+`ce3d73c3901e0aada9dfca1319eea8a1e5fddbb5`. It carries the former cumulative
 Airbender overlay and subsequent randomized FRI degree-lift hardening. The fork owns the
 related native and recursive verifier changes, rebuilt Security100 recursion binaries,
 Security100 sizing, diagnostics, compact setup summaries, and streamed empty unified
@@ -63,11 +63,12 @@ passed all 70 tests (4 protocol, 12 FRI and 54 SNARK); the current qualification
 section in the README records the exact source tree and build-attestation hash.
 Normal locked GPU combined and standalone SNARK worker builds from that same source
 snapshot also completed; the README records their exact attestation and binary hashes.
-All 53 attested GPU application/tooling input hashes match the current executable
-inputs. No proof or worker was started by the loader/build runs. Normal producer
-build/loader qualification is complete; CI completion, final release promotion and
-live verifier/service adoption remain separate gates. Earlier measurements belong
-to `4f1e95bf`, not this source.
+Those 53 attested GPU application/tooling inputs describe that source snapshot.
+No proof or worker was started by those loader/build runs. The subsequent
+Airbender runtime-memory revision has its own
+[resource measurements and qualification record](runtime-memory-20261106.md).
+CI completion, final release promotion and live verifier/service adoption remain
+separate gates. Earlier measurements belong to `4f1e95bf`.
 The source manifests retain their attested pre-build `purpose` descriptions; the
 completed checks above supersede those descriptions' pending-qualification wording.
 `patches/zksync-crypto-fork-source.json` binds the common source identity;
