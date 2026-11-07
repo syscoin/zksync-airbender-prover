@@ -2,9 +2,9 @@
 
 Worker builds use `scripts/cargo-with-patched-airbender.sh LABEL -- cargo ... --locked`.
 Airbender comes from the immutable Syscoin fork commit
-`7f68838bf1b7d0c8f6b4848cf3a6c93cb3c2bc02`. It descends from the pinned Matter Labs
+`a4484a145fdc1062f2df9b8d3a4b0697c9b18e0c`. It descends from the pinned Matter Labs
 `v0.6.0-rc.2` commit `03454c7a41053a4b88bb421e97fb9efe893a92f5`, and its tree is
-`2f2d38a11020844883d0e617bf476dd2430d3c2e`. It carries the former cumulative
+`991263739a869619d54d883d3235156298f07c9d`. It carries the former cumulative
 Airbender overlay and subsequent randomized FRI degree-lift hardening. The fork owns the
 related native and recursive verifier changes, rebuilt Security100 recursion binaries,
 Security100 sizing, diagnostics, compact setup summaries, and streamed empty unified
