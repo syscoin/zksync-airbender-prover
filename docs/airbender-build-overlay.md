@@ -63,11 +63,12 @@ passed all 70 tests (4 protocol, 12 FRI and 54 SNARK); the current qualification
 section in the README records the exact source tree and build-attestation hash.
 Normal locked GPU combined and standalone SNARK worker builds from that same source
 snapshot also completed; the README records their exact attestation and binary hashes.
-All 53 attested GPU application/tooling input hashes match the current executable
-inputs. No proof or worker was started by the loader/build runs. Normal producer
-build/loader qualification is complete; CI completion, final release promotion and
-live verifier/service adoption remain separate gates. Earlier measurements belong
-to `4f1e95bf`, not this source.
+Those 53 attested GPU application/tooling inputs describe that source snapshot.
+No proof or worker was started by those loader/build runs. The subsequent
+Airbender runtime-memory revision has its own
+[resource measurements and qualification record](runtime-memory-20261106.md).
+CI completion, final release promotion and live verifier/service adoption remain
+separate gates. Earlier measurements belong to `4f1e95bf`.
 The source manifests retain their attested pre-build `purpose` descriptions; the
 completed checks above supersede those descriptions' pending-qualification wording.
 `patches/zksync-crypto-fork-source.json` binds the common source identity;
