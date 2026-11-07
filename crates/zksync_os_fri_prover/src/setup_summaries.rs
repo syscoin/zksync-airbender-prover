@@ -24,12 +24,12 @@ const BUNDLED_ARTIFACT: &[u8] =
     include_bytes!("../artifacts/syscoin-v32-security100-fri-setups.json");
 // Updated only after independent CPU derivation and a complete equality check.
 const BUNDLED_ARTIFACT_SHA256: &str =
-    "b157ac11ccb7b32d98bcf489a90c5b8d27dbfaee8f28d2d91698093fe8b0c05e";
+    "5220ff615ce3d3b09a9cdde766557b55ef73515ecbc0b1e9666308762dac0d86";
 const MAX_ARTIFACT_BYTES: usize = 1024 * 1024;
 // The revision records the upstream origin; the reviewed patched tree binds the
 // effective circuit source, including generated relations and recursive guests.
 const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
-const AIRBENDER_PATCHED_TREE: &str = "169b0b599bd18c8f992e7e0cf168403b475588b2";
+const AIRBENDER_PATCHED_TREE: &str = "ce3d73c3901e0aada9dfca1319eea8a1e5fddbb5";
 const VK_HASH: &str = "0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153";
 const PROGRAM_COMMITMENT: &str =
     "0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975";
