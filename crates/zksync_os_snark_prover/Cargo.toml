@@ -18,8 +18,8 @@ zksync_sequencer_proof_client.workspace = true
 # zksync-airbender dependencies
 zksync_airbender_cli.workspace = true
 zksync_airbender_execution_utils.workspace = true
-riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "a4484a145fdc1062f2df9b8d3a4b0697c9b18e0c" }
-verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "a4484a145fdc1062f2df9b8d3a4b0697c9b18e0c" }
+riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "99c0b6d2d935828e1f4ff89acfc9e33d21d40f59" }
+verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "99c0b6d2d935828e1f4ff89acfc9e33d21d40f59" }
 
 # zkos-wrapper dependencies
 zkos_wrapper.workspace = true

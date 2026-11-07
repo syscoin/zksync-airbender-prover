@@ -8,7 +8,7 @@
     "proof_target": "recursion-unified",
     "setup_algorithm": "base-unrolled-unified-v1",
     "airbender_revision": "03454c7a41053a4b88bb421e97fb9efe893a92f5",
-    "airbender_patched_tree": "991263739a869619d54d883d3235156298f07c9d",
+    "airbender_patched_tree": "169b0b599bd18c8f992e7e0cf168403b475588b2",
     "circuit_identity": "rv32im-unsigned-base/reduced-unrolled/reduced-unified-v1",
     "cap_size": 64,
     "num_cosets": 2,
