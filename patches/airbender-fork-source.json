@@ -6,10 +6,10 @@
   "upstream_lock_source": "git+https://github.com/matter-labs/zksync-airbender?tag=v0.6.0-rc.2#03454c7a41053a4b88bb421e97fb9efe893a92f5",
   "upstream_package_count": 46,
   "fork_url": "https://github.com/syscoin/zksync-airbender",
-  "fork_commit": "0d8c852954afcae1f160151a17fe80886f1755b0",
-  "fork_tree": "a41a4a18eeb102b405bcb63ad7ca85e9b6b13213",
-  "canonical_lock_sha256": "7558bd3d20d8153824e872125a76e3aa59a8822a95bea4db93a051074e1bf33b",
+  "fork_commit": "7f68838bf1b7d0c8f6b4848cf3a6c93cb3c2bc02",
+  "fork_tree": "2f2d38a11020844883d0e617bf476dd2430d3c2e",
+  "canonical_lock_sha256": "b6db82dc70b90ac72a13bbe0d5248161ec86921df8778cc03b29c82468402025",
   "overlay_lock_file": "airbender.Cargo.lock",
   "overlay_lock_sha256": "593933f50cb500ed4dfd179687d23584403395529c90ed76e29931c3cb36eaf0",
-  "purpose": "Immutable Syscoin Airbender source for the v32 Security100 FRI degree lift. The fork descends from the reviewed v0.6.0-rc.2 base and carries the former cumulative overlay plus randomized FRI degree-lift hardening and rebuilt recursion verifier binaries. Fresh native FRI proofs, setup summaries, CPU/GPU verification keys, stock GPU wrapping/SNARK proving, independent native verification and normal-profile EVM acceptance are qualified offline for the retained two-batch input. Live verifier deployment, service acceptance and broader workload qualification remain pending."
+  "purpose": "Immutable Syscoin Airbender source for the v32 Security100 FRI degree lift and runtime memory/JIT fixes. The fork descends from the reviewed v0.6.0-rc.2 base and carries the former cumulative overlay, randomized FRI degree-lift hardening and rebuilt recursion verifier binaries. The preceding fork was qualified offline with the retained two-batch input. This runtime-only revision retains its circuit and verifier artifacts; fresh setup-commitment and GPU proof validation remain pending. Live verifier deployment, service acceptance and broader workload qualification remain separate gates."
 }
