@@ -1,73 +1,273 @@
-name: Release build qualification
+name: Verify published prover images
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/release-bins.yml'
-      - '.github/workflows/release-build-check.yml'
-      - '.github/actions/build-release-role/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'crates/**'
-      - 'docker/prover-build-pins.json'
-      - 'scripts/cargo-with-patched-airbender.sh'
-      - 'scripts/prepare-patched-airbender.py'
-      - 'scripts/prepare-patched-gpu-backends.py'
-      - 'scripts/pinned_source_checkout.py'
-      - 'patches/**'
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing release tag to verify
+        type: string
+        required: true
+      source_sha:
+        description: Expected 40-character release source commit
+        type: string
+        required: true
+      tooling_sha:
+        description: Expected 40-character image signing workflow commit
+        type: string
+        required: true
+      image_digests:
+        description: JSON object containing the three recorded image digests
+        type: string
+        required: true
 
 permissions:
   contents: read
-
-env:
-  ZKSYNC_OS_PROVER_BIN: zksync-os-prover-service
-  ZKSYNC_OS_FRI_PROVER_BIN: zksync_os_fri_prover
-  ZKSYNC_OS_SNARK_PROVER_BIN: zksync_os_snark_prover
-  RELEASE_PROFILE: release
-  CUDAARCHS: '80;89;90'
-  GPU_CUDAARCHS: '80;89;90;120'
-  CARGO_HOME: /tmp/prover-cargo
-  RUSTUP_HOME: /tmp/prover-rustup
+  packages: read
+  attestations: read
 
 jobs:
-  build-role:
-    runs-on: ubuntu-latest
-    container:
-      image: nvidia/cuda:12.9.1-devel-ubuntu24.04@sha256:020bc241a628776338f4d4053fed4c38f6f7f3d7eb5919fecb8de313bb8ba47c
-    strategy:
-      fail-fast: false
-      matrix:
-        role: [combined, fri, snark, snark-cpu]
-    steps:
-      - name: Install checkout prerequisites
+  verify-publication:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
         shell: bash
+    env:
+      EXPECTED_TAG: ${{ inputs.tag_name }}
+      EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+      EXPECTED_TOOLING_SHA: ${{ inputs.tooling_sha }}
+      EXPECTED_IMAGE_DIGESTS: ${{ inputs.image_digests }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Initialize ephemeral verifier paths
         run: |
           set -euo pipefail
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git
-          rm -rf /var/lib/apt/lists/*
-      - name: Checkout proposed source
+          echo "DOCKER_CONFIG=${RUNNER_TEMP}/prover-verification-docker" >> "${GITHUB_ENV}"
+          echo "EVIDENCE=${RUNNER_TEMP}/prover-publication-verification" >> "${GITHUB_ENV}"
+
+      - name: Validate expected release identity
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          def unique(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+          tag = os.environ["EXPECTED_TAG"]
+          assert re.fullmatch(r"v[0-9][A-Za-z0-9._-]{0,126}", tag), "invalid release tag"
+          for field in ("EXPECTED_SOURCE_SHA", "EXPECTED_TOOLING_SHA"):
+              assert re.fullmatch(r"[0-9a-f]{40}", os.environ[field]), f"invalid {field}"
+          digests = json.loads(os.environ["EXPECTED_IMAGE_DIGESTS"], object_pairs_hook=unique)
+          assert isinstance(digests, dict) and set(digests) == {
+              "zksync-airbender-prover", "zksync-os-prover-fri", "zksync-os-prover-snark"
+          }, "incomplete or unexpected image inventory"
+          assert all(isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+                     for value in digests.values()), "invalid image digest"
+          evidence = pathlib.Path(os.environ["EVIDENCE"])
+          evidence.mkdir()
+          (evidence / "expected.json").write_text(json.dumps({
+              "repository": os.environ["GITHUB_REPOSITORY"], "tag": tag,
+              "source_sha": os.environ["EXPECTED_SOURCE_SHA"],
+              "tooling_sha": os.environ["EXPECTED_TOOLING_SHA"], "digests": digests
+          }, indent=2) + "\n")
+          PY
+
+      - name: Checkout existing release tag
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          ref: refs/tags/${{ inputs.tag_name }}
+          path: .verification-source
+          fetch-depth: '1'
           persist-credentials: false
-      - name: Checkout proposed build tooling
+
+      - name: Checkout expected image tooling
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          ref: ${{ github.sha }}
-          path: .release-tooling
+          ref: ${{ inputs.tooling_sha }}
+          path: .verification-tooling
           sparse-checkout: |
-            .github/actions/build-release-role
-            docker
             .github/scripts
+            docker
             scripts
             patches
+          fetch-depth: '1'
           persist-credentials: false
-      - name: Build and package role
-        uses: ./.release-tooling/.github/actions/build-release-role
+
+      - name: Derive expected app and proving inputs without building
+        run: |
+          set -euo pipefail
+          [[ "$(git -C .verification-source rev-parse HEAD)" == "${EXPECTED_SOURCE_SHA}" ]]
+          [[ "$(git -C .verification-source rev-parse "refs/tags/${EXPECTED_TAG}^{commit}")" == "${EXPECTED_SOURCE_SHA}" ]]
+          [[ "$(git -C .verification-tooling rev-parse HEAD)" == "${EXPECTED_TOOLING_SHA}" ]]
+          [[ -z "$(git -C .verification-source status --porcelain --untracked-files=all)" ]]
+          [[ -z "$(git -C .verification-tooling status --porcelain --untracked-files=all)" ]]
+          python3 .verification-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
+            .verification-tooling/patches/airbender-fork-source.json \
+            --source-lock .verification-source/Cargo.lock > "${EVIDENCE}/airbender-pins.json"
+          python3 .verification-tooling/.github/scripts/image-sbom-identity.py gpu-backend-pins \
+            .verification-tooling/patches/gpu32-memory.json \
+            --source-lock .verification-source/Cargo.lock > "${EVIDENCE}/gpu-backend-pins.json"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Authenticate read-only registry access
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${DOCKER_CONFIG}"
+          printf '%s' "${GH_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Resolve tags and cryptographically verify both attestation copies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh version > "${EVIDENCE}/gh-version.txt"
+          docker buildx version > "${EVIDENCE}/buildx-version.txt"
+          while IFS=$'\t' read -r component digest; do
+            image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${component}"
+            docker buildx imagetools inspect --raw "${image}:${EXPECTED_TAG}" \
+              > "${EVIDENCE}/${component}.tag-manifest.json"
+            [[ "sha256:$(sha256sum "${EVIDENCE}/${component}.tag-manifest.json" | awk '{print $1}')" == "${digest}" ]]
+            docker buildx imagetools inspect --format '{{json .Image}}' "${image}@${digest}" \
+              > "${EVIDENCE}/${component}.image-config.json"
+            for origin in github registry; do
+              bundle_option=()
+              if [[ "${origin}" == registry ]]; then bundle_option=(--bundle-from-oci); fi
+              gh attestation verify "oci://${image}@${digest}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/stage-build.yaml" \
+                --signer-digest "${EXPECTED_TOOLING_SHA}" \
+                --predicate-type https://slsa.dev/provenance/v1 \
+                --cert-oidc-issuer https://token.actions.githubusercontent.com \
+                --deny-self-hosted-runners --format json "${bundle_option[@]}" \
+                > "${EVIDENCE}/${component}.${origin}.verified.json"
+            done
+          done < <(jq -r '.digests | to_entries[] | [.key, .value] | @tsv' "${EVIDENCE}/expected.json")
+
+      - name: Verify signed source, app, lockfile and proving identities
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          root = pathlib.Path(os.environ["EVIDENCE"])
+          def load(path):
+              return json.loads(path.read_text())
+          def require(condition, message):
+              if not condition:
+                  raise ValueError(message)
+          expected = load(root / "expected.json")
+          source = pathlib.Path(".verification-source")
+          tooling = pathlib.Path(".verification-tooling")
+          pins = load(tooling / "docker/prover-build-pins.json")
+          airbender = load(root / "airbender-pins.json")
+          gpu = load(root / "gpu-backend-pins.json")
+          require(gpu["zksync_crypto"] == airbender["zksync_crypto"], "common crypto pins disagree")
+          require(pins["schema"] == "syscoin-prover-image-build-pins-v1", "unexpected pin schema")
+          require(re.search(r'^channel = "' + re.escape(pins["rust_toolchain"]) + r'"$',
+                            (source / "rust-toolchain.toml").read_text(), re.M), "toolchain mismatch")
+          def file_identity(path):
+              data = path.read_bytes()
+              return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+          app = {kind: file_identity(source / f"multiblock_batch.{kind}") for kind in ("bin", "text")}
+          lock_sha = hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest()
+          require(airbender["selected_lock"]["canonical_lock_sha256"] == lock_sha, "source lock mismatch")
+          source_uri = f"git+https://github.com/{expected['repository']}@refs/tags/{expected['tag']}"
+          tooling_uri = f"git+https://github.com/{expected['repository']}@{expected['tooling_sha']}"
+          results = []
+          for component, digest in expected["digests"].items():
+              image = f"ghcr.io/{expected['repository'].split('/')[0].lower()}/{component}"
+              manifest_path = root / f"{component}.tag-manifest.json"
+              require("sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest() == digest,
+                      f"{component}: tag digest mismatch")
+              manifest = load(manifest_path)
+              require(manifest.get("schemaVersion") == 2, f"{component}: unexpected manifest schema")
+              require(manifest.get("mediaType") in {"application/vnd.oci.image.index.v1+json",
+                      "application/vnd.docker.distribution.manifest.list.v2+json"}, f"{component}: expected an image index")
+              platforms = []
+              for entry in manifest.get("manifests", []):
+                  platform = entry.get("platform", {})
+                  if platform.get("os") == "unknown" and platform.get("architecture") == "unknown":
+                      require(entry.get("annotations", {}).get("vnd.docker.reference.type") == "attestation-manifest",
+                              f"{component}: unexpected non-runtime manifest")
+                  else:
+                      platforms.append(platform)
+              require(len(platforms) == 1 and platforms[0].get("os") == "linux"
+                      and platforms[0].get("architecture") == "amd64", f"{component}: unexpected platform inventory")
+              config = load(root / f"{component}.image-config.json")
+              if isinstance(config, dict) and set(config) == {"linux/amd64"}:
+                  config = config["linux/amd64"]
+              require(isinstance(config, dict) and isinstance(config.get("config"), dict),
+                      f"{component}: unexpected Buildx image configuration shape")
+              require(config.get("os") == "linux" and config.get("architecture") == "amd64",
+                      f"{component}: image configuration platform mismatch")
+              labels = config["config"]["Labels"]
+              for label, value in {
+                  "org.opencontainers.image.revision": expected["source_sha"],
+                  "org.opencontainers.image.source": f"https://github.com/{expected['repository']}",
+                  "io.syscoin.prover.source-ref": f"refs/tags/{expected['tag']}",
+                  "io.syscoin.prover.tooling-revision": expected["tooling_sha"],
+                  "io.syscoin.prover.app-bin-sha256": app["bin"]["sha256"],
+                  "io.syscoin.prover.app-text-sha256": app["text"]["sha256"],
+                  "io.syscoin.prover.security-level": "100", "io.syscoin.prover.protocol": "v32-proving-v8"
+              }.items():
+                  require(labels.get(label) == value, f"{component}: label mismatch: {label}")
+              fri = component == "zksync-os-prover-fri"
+              identity = {
+                  "component": component, "source": {"ref": source_uri, "gitCommit": expected["source_sha"]},
+                  "tooling": {"repository": expected["repository"], "gitCommit": expected["tooling_sha"]},
+                  "cargoLocked": True, "airbenderBuild": airbender, "gpuBackendBuild": None if fri else gpu,
+                  "rustToolchain": pins["rust_toolchain"], "rustupInit": pins["rustup_init"], "cmake": pins["cmake"],
+                  "cudaArchitectures": pins["cuda_architectures" if fri else "snark_cuda_architectures"],
+                  "bellmanCudaCommit": None if fri else pins["bellman_cuda"]["commit"],
+                  "snarkBackend": None if fri else "gpu", "securityLevel": 100, "protocolLane": "v32-proving-v8",
+                  "app": app, "trustedSetup": None if fri else {key: pins["crs"][key] for key in ("sha256", "size")}
+              }
+              for origin in ("github", "registry"):
+                  verified = load(root / f"{component}.{origin}.verified.json")
+                  require(isinstance(verified, list) and verified, f"{component}: no {origin} verified attestations")
+                  matching = []
+                  for record in verified:
+                      statement = record["verificationResult"]["statement"]
+                      require(statement["predicateType"] == "https://slsa.dev/provenance/v1", "unexpected predicate")
+                      require(any(subject.get("name") == image and subject.get("digest", {}).get("sha256") == digest[7:]
+                                  for subject in statement["subject"]), f"{component}: signed subject mismatch")
+                      predicate = statement["predicate"]
+                      if predicate.get("buildDefinition", {}).get("internalParameters", {}).get("syscoinProverImage") != identity:
+                          continue
+                      deps = predicate["buildDefinition"]["resolvedDependencies"]
+                      for dependency in (
+                          {"uri": source_uri, "digest": {"gitCommit": expected["source_sha"]}},
+                          {"uri": tooling_uri, "digest": {"gitCommit": expected["tooling_sha"]}},
+                          {"uri": source_uri + "/Cargo.lock", "digest": {"sha256": lock_sha}}
+                      ):
+                          require(dependency in deps, f"{component}: missing signed source/lock dependency")
+                      matching.append(record)
+                  require(matching, f"{component}: {origin} attestation does not match exact build inputs")
+              results.append({"component": component, "image": image + "@" + digest,
+                              "platform": "linux/amd64", "attestation_copies": ["github", "registry"], "verified": True})
+          (root / "results.json").write_text(json.dumps({"expected": expected, "results": results}, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"Verified {expected['tag']} at `{expected['source_sha']}` using image tooling `{expected['tooling_sha']}`.\n\n")
+              for result in results:
+                  summary.write(f"- `{result['image']}`: linux/amd64, exact app/proving inputs, GitHub and registry attestations verified.\n")
+          PY
+
+      - name: Retain verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          role: ${{ matrix.role }}
-          target: x86_64-unknown-linux-gnu
-          release_tag: ci-qualification
-          tooling_sha: ${{ github.sha }}
+          name: prover-publication-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prover-publication-verification
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove ephemeral registry credentials
+        if: always()
+        run: rm -rf -- "${DOCKER_CONFIG}"
