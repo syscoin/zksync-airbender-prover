@@ -62,6 +62,12 @@ def parent_lock_bytes():
     if raw.count(current_rustls) != 1:
         raise AssertionError("canonical rustls lock fixture changed")
     raw = raw.replace(current_rustls, parent_rustls)
+    for name in ("protocol_version", "zksync_sequencer_proof_client", "zksync_os_fri_prover",
+                 "zksync_os_snark_prover", "zksync_os_prover_service"):
+        pattern = rb'(name = "' + name.encode() + rb'"\nversion = ")[^"]+("\n)'
+        raw, count = re.subn(pattern, rb'\g<1>0.8.2\2', raw)
+        if count != 1:
+            raise AssertionError("parent lock workspace package missing")
     for name, removed in (
         ("zksync_os_fri_prover", (b' "sha2 0.10.9",\n',)),
         ("zksync_os_snark_prover", (
