@@ -1,6 +1,6 @@
 # Registry records retained for the exact historical parent lock fixture.
 [restore]
-remove_names = ["addr2line", "alloc-no-stdlib", "alloc-stdlib", "async-compression", "backtrace", "brotli", "brotli-decompressor", "compression-codecs", "compression-core", "errno", "gimli", "io-uring", "libc", "mio", "object", "rustc-demangle", "rustix", "socket2", "tempfile", "tokio", "tokio-macros", "windows-sys", "zstd", "zstd-safe", "zstd-sys"]
+remove_names = ["addr2line", "alloc-no-stdlib", "alloc-stdlib", "async-compression", "backtrace", "brotli", "brotli-decompressor", "compression-codecs", "compression-core", "errno", "gimli", "io-uring", "libc", "mio", "object", "openssl", "openssl-sys", "rustc-demangle", "rustix", "socket2", "tempfile", "tokio", "tokio-macros", "windows-sys", "zstd", "zstd-safe", "zstd-sys"]
 
 [[package]]
 name = "addr2line"
@@ -145,6 +145,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "openssl"
+version = "0.10.73"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8505734d46c8ab1e19a1dce3aef597ad87dcb4c37e7188231769bd6bd51cebf8"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "foreign-types",
+ "libc",
+ "once_cell",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90096e2e47630d78b7d1c20952dc621f957103f8bc2c8359ec81290d75238571"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
