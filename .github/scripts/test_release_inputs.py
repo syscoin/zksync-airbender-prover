@@ -50,8 +50,9 @@ class ReleaseInputTests(unittest.TestCase):
         self.write_json(".github/release-please/manifest.json", {".": "0.8.99"})
         cargo = self.root / "Cargo.toml"
         original = cargo.read_text()
-        self.assertEqual(original.count('version = "0.8.2"'), 1)
-        cargo.write_text(original.replace('version = "0.8.2"', 'version = "0.8.99"'))
+        current = RELEASE.tomllib.loads(original)["workspace"]["package"]["version"]
+        self.assertEqual(original.count(f'version = "{current}"'), 1)
+        cargo.write_text(original.replace(f'version = "{current}"', 'version = "0.8.99"'))
         with self.assertRaisesRegex(ValueError, "workspace package version differs"):
             RELEASE.validate(self.root)
 
@@ -67,7 +68,10 @@ class ReleaseInputTests(unittest.TestCase):
     def test_rehashed_lock_with_wrong_local_package_version_fails(self):
         lock_path = "Cargo.lock"
         data = (self.root / lock_path).read_text()
-        data = data.replace('name = "protocol_version"\nversion = "0.8.2"',
+        current = self.read_json(".github/release-please/manifest.json")["."]
+        record = f'name = "protocol_version"\nversion = "{current}"'
+        self.assertEqual(data.count(record), 1)
+        data = data.replace(record,
                             'name = "protocol_version"\nversion = "0.8.99"')
         (self.root / lock_path).write_text(data)
         pins_path = "patches/airbender-fork-source.json"
