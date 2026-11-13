@@ -1,6 +1,6 @@
 # Registry records retained for the exact historical parent lock fixture.
 [restore]
-remove_names = ["addr2line", "alloc-no-stdlib", "alloc-stdlib", "async-compression", "backtrace", "brotli", "brotli-decompressor", "compression-codecs", "compression-core", "errno", "gimli", "io-uring", "libc", "mio", "object", "openssl", "openssl-sys", "rustc-demangle", "rustix", "socket2", "tempfile", "tokio", "tokio-macros", "windows-sys", "zstd", "zstd-safe", "zstd-sys"]
+remove_names = ["addr2line", "alloc-no-stdlib", "alloc-stdlib", "async-compression", "backtrace", "brotli", "brotli-decompressor", "compression-codecs", "compression-core", "errno", "gimli", "io-uring", "libc", "linux-raw-sys", "mio", "object", "openssl", "openssl-sys", "rustc-demangle", "rustix", "socket2", "tempfile", "tokio", "tokio-macros", "windows-sys", "zstd", "zstd-safe", "zstd-sys"]
 
 [[package]]
 name = "addr2line"
@@ -126,6 +126,12 @@ name = "libc"
 version = "0.2.176"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58f929b4d672ea937a23a1ab494143d968337a5f47e56d0815df1e0890ddf174"
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df1d3c3b53da64cf5760482273a98e575c651a67eec7f77df96b5b642de8f039"
 
 [[package]]
 name = "mio"
