@@ -8,8 +8,8 @@
   "fork_url": "https://github.com/syscoin/zksync-airbender",
   "fork_commit": "b91eeaecc4d1b9a42ea6843432bb3e014899b303",
   "fork_tree": "ce3d73c3901e0aada9dfca1319eea8a1e5fddbb5",
-  "canonical_lock_sha256": "bec8d64b268bab0d5136519afc697931ecf7f1c52f8aa3fbdccd780a6cd30f15",
+  "canonical_lock_sha256": "a1b62ba6f8dcb45460741909e3d856bac22706ab2843aaef24d8bc31da6c6c96",
   "overlay_lock_file": "airbender.Cargo.lock",
-  "overlay_lock_sha256": "575d299814ea569dd9a7b18821276e44f35fd9cef9c96e00c7c4d634680e676b",
+  "overlay_lock_sha256": "2cc5a5f3a07321b39034b3c174833b8671ce82345ec4a5032ff494d913071d90",
   "purpose": "Immutable Syscoin Airbender source for the v32 Security100 FRI degree lift, compact GPU setup storage, scalar LDE precomputation, bounded JIT callbacks and alias-safe teardown traversal. The fork descends from the reviewed v0.6.0-rc.2 base and carries the former cumulative overlay, randomized FRI degree-lift hardening and rebuilt recursion verifier binaries. The preceding fork was qualified offline with the retained two-batch input. Compact setup storage is initialized before its length is published. This runtime-only revision retains its circuit and verifier artifacts; fresh setup-commitment and GPU proof validation remain pending. Live verifier deployment, service acceptance and broader workload qualification remain separate gates."
 }
