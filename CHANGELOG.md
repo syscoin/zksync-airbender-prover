@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.1](https://github.com/syscoin/zksync-airbender-prover/compare/v0.9.0...v0.9.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **deps:** update patched Rustix in prover locks ([16ce30d](https://github.com/syscoin/zksync-airbender-prover/commit/16ce30dc5b0e634323a96a554435708a396d508f))
+* **deps:** update patched Rustix in prover locks ([c4b0d7e](https://github.com/syscoin/zksync-airbender-prover/commit/c4b0d7ee1fa861d261b5db89cd5101a01b3d7ff3))
+* **serverless:** update patched OpenTelemetry cohort ([f2e20e4](https://github.com/syscoin/zksync-airbender-prover/commit/f2e20e43682383603b33a7a49958e49ca152fd4e))
+* **serverless:** update patched OpenTelemetry cohort ([b944314](https://github.com/syscoin/zksync-airbender-prover/commit/b944314d55ad00971387b729e2c3e425c43372b9))
+
 ## [0.9.0](https://github.com/syscoin/zksync-airbender-prover/compare/v0.8.2...v0.9.0) (2026-11-09)
 
 
