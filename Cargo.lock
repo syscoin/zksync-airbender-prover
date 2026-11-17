@@ -5699,6 +5699,7 @@ dependencies = [
  "clap",
  "cli",
  "execution_utils",
+ "gpu_prover",
  "protocol_version",
  "reqwest",
  "serde",

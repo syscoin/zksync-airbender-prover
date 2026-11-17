@@ -30,6 +30,7 @@ zksync_airbender_execution_utils = { package = "execution_utils", git = "https:/
 zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
 riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
 verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
+gpu_prover = { git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58", default-features = false }
 zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zksync-protocol", rev = "462cbf69d3e159e748c4daeb602991e107a43c41", default-features = false, features = ["security_100"] }
 crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/syscoin/zksync-protocol", rev = "462cbf69d3e159e748c4daeb602991e107a43c41" }
 

@@ -11,6 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+gpu_prover = { workspace = true, optional = true }
 # internal dependencies
 protocol_version.workspace = true
 zksync_sequencer_proof_client.workspace = true
@@ -37,6 +38,8 @@ url.workspace = true
 
 [features]
 gpu = ["zksync_airbender_cli/gpu"]
+# Opt-in diagnostics report suballocation inside the reserved device pool.
+gpu-memory-metrics = ["gpu", "dep:gpu_prover", "gpu_prover/log_gpu_mem_usage"]
 
 [dev-dependencies]
 # SYSCOIN: Validate the app commitment carried through unified recursion.
