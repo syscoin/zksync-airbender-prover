@@ -50,13 +50,20 @@ fn derive(args: Args) -> anyhow::Result<()> {
     if let (Some(output), Some(crs)) = (args.keys, args.trusted_setup) {
         anyhow::ensure!(!output.exists(), "choose a fresh key output directory");
         zkos_wrapper::interface::cmd_generate_vk(
-            output,
+            output.clone(),
             Some(args.app_bin),
             Some(args.app_text),
             Some(crs),
             true,
             None,
         )?;
+        let key = serde_json::from_reader(std::fs::File::open(output.join("snark_vk.json"))?)?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "app_bound_vk_hash": format!("{:#x}", zkos_wrapper::calculate_verification_key_hash(key))
+            })
+        );
     }
     Ok(())
 }
