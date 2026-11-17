@@ -527,8 +527,8 @@ class BuildLaneTests(unittest.TestCase):
 
     def source_fixture(self, temporary, edits=None):
         root = Path(temporary)
-        (root / "Cargo.toml").write_bytes((ROOT / ".github/tests/fixtures/v0.9.1/Cargo.toml").read_bytes())
-        for member in BASE.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.toml")["workspace"]["members"]:
+        (root / "Cargo.toml").write_bytes((ROOT / "Cargo.toml").read_bytes())
+        for member in BASE.read_toml(ROOT / "Cargo.toml")["workspace"]["members"]:
             path = root / member
             (path / "src").mkdir(parents=True)
             (path / "src/main.rs").write_text("fn main() {}\n")
