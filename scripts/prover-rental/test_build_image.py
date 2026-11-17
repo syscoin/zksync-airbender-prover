@@ -141,6 +141,10 @@ class BuildImageTests(unittest.TestCase):
         requirements = [line for line in path.read_text().splitlines() if line and not line.startswith("#")]
         for requirement in requirements:
             self.assertRegex(requirement, r"^[a-z0-9-]+==[^ ]+ --hash=sha256:[0-9a-f]{64}$")
+        dns = [requirement for requirement in requirements if requirement.startswith("dnspython==")]
+        self.assertEqual(len(dns), 1)
+        self.assertGreaterEqual(tuple(map(int, dns[0].split("==", 1)[1].split(" ", 1)[0].split("."))),
+                                (2, 9, 2))
         self.assertIn("runpod==1.12.0 --hash=sha256:2c52d5ad4268879bd4d8288f84a9861488abc756ffc5195d95f1cffe4c4f3454",
                       requirements)
 
