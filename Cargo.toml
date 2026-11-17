@@ -26,13 +26,13 @@ protocol_version = { path = "crates/protocol_version" }
 zksync_os_fri_prover = { path = "crates/zksync_os_fri_prover" }
 
 # One V2 source graph supplies the circuits, recursive verifier, host wrapper and GPU PLONK.
-zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
-zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
-riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
-verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
-gpu_prover = { git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58", default-features = false }
-zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zksync-protocol", rev = "462cbf69d3e159e748c4daeb602991e107a43c41", default-features = false, features = ["security_100"] }
-crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/syscoin/zksync-protocol", rev = "462cbf69d3e159e748c4daeb602991e107a43c41" }
+zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/syscoin/zksync-airbender", rev = "5cff603b014108adf172ad933add11edb5f54ffb" }
+zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "5cff603b014108adf172ad933add11edb5f54ffb" }
+riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "5cff603b014108adf172ad933add11edb5f54ffb" }
+verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "5cff603b014108adf172ad933add11edb5f54ffb" }
+gpu_prover = { git = "https://github.com/syscoin/zksync-airbender", rev = "5cff603b014108adf172ad933add11edb5f54ffb", default-features = false }
+zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zksync-protocol", rev = "0c1e920de67d8ffcfd6d33c59b578ad147e95319", default-features = false, features = ["security_100"] }
+crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/syscoin/zksync-protocol", rev = "0c1e920de67d8ffcfd6d33c59b578ad147e95319" }
 
 # external dependencies
 anyhow = "1.0.103"
