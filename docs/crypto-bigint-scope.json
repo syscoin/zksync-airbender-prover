@@ -46,7 +46,7 @@
     "scripts/cargo-with-patched-airbender.sh": "7892fe4cf6559107a24139c961ed0c11a79d26b6a208bb8adbbb527ee6008613",
     "scripts/pinned_source_checkout.py": "e8c51573f1204d775bac50512f2c8d4712759ae91759293a70a2ff7329e5ede3",
     "scripts/prepare-patched-airbender.py": "7d28a7a85eb0d48d3c3513e169c57e1b44e7b66ca53da75993ca1ae59eb774e9",
-    "scripts/prepare-v2-proving-sources.py": "b1e67c6e997acc6c56d84f3cfce36c003ef9d0c3277a646c83ee0dee7f24d40b"
+    "scripts/prepare-v2-proving-sources.py": "c52e7556c3c6b824610b2cc5ba03c34dc1c1a91d0cea149cf40e31cd7a825007"
   },
   "schema_version": 1
 }

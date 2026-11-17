@@ -272,6 +272,22 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertIn('for role in combined fri snark snark-cpu; do', release)
         self.assertIn('tar -czf "${archive}" -C release-role "${binary}" "${ROLE}-airbender-build-inputs.json"', recipe)
 
+    def test_images_and_release_archives_publish_the_attested_role_artifact(self):
+        for binary, (_, image, _) in ROLES.items():
+            recipe = (ROOT / f"docker/{image}/Dockerfile").read_text()
+            builders = ("builder", "cpu-builder") if image == "zksync-os-prover-snark" else ("builder",)
+            self.assertEqual(recipe.count("V2_BUILD_ARTIFACT_DIR=/usr/src/zksync/role-artifacts"), len(builders))
+            for builder in builders:
+                self.assertIn(f"COPY --from={builder} /usr/src/zksync/role-artifacts/{binary} /usr/bin/", recipe)
+
+        action = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
+        copy = action.index('cp "${artifact_dir}/${binary}" "release-role/${binary}"')
+        verification = action.index('echo "${binary_hash}  release-role/${binary}" | sha256sum --check --strict')
+        archive = action.index('tar -czf "${archive}" -C release-role')
+        self.assertIn(".artifact_sha256[$binary]", action[:copy])
+        self.assertLess(copy, verification)
+        self.assertLess(verification, archive)
+
     def test_gpu32_default_and_explicit_cpu_image_cannot_mix(self):
         source = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
         cpu, gpu = source.split("# SYSCOIN: Match the tested GPU32 backend's CUDA ABI", 1)
