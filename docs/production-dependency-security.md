@@ -99,13 +99,17 @@ The exception relies on these specific production call paths:
   an already-built input to the FRI simulator/prover; this host lockfile neither
   establishes nor changes that guest's timing properties.
 
-Review anchors, bound to the exact fork commits and trees in `patches/*-fork-source.json`:
+The V2 review uses the Airbender and protocol commits and trees recorded in
+`patches/v2-proving-sources.json`. The protocol repository supplies the wrapper and
+crypto crates. The settlement-calldata exporter serializes a saved proof and its
+public inputs. The identity generator derives keys and commitments from the public
+program and CRS.
 
 | Source | Locations |
 | --- | --- |
 | Boojum | `gadgets/non_native_field/implementations/mod.rs`; `implementation_u16.rs` witness multiplication, inversion and conversion |
 | zkos-wrapper | `wrapper/src/circuits/compression.rs`; `circuits/snark_wrapper.rs`; `gpu/risc_wrapper.rs`; `gpu/compression.rs`; `gpu/snark.rs`; CPU padding in `wrapper/src/lib.rs` |
-| Legacy protocol | `zk_evm_abstractions/src/precompiles/ecrecover.rs` and `secp256r1_verify.rs`; k256/p256 features in `zkevm_opcode_defs/Cargo.toml` |
+| Legacy protocol | `protocol/crates/zk_evm_abstractions/src/precompiles/{ecrecover,secp256r1_verify}/legacy_backend.rs` and k256/p256 features in `protocol/crates/zkevm_opcode_defs/Cargo.toml` |
 | Native adapters | `scripts/prover-rental/job.py`, `worker.py`, `fri_session.py`, `serverless_worker.py` |
 
 The reviewed production wrapper does not invoke an affected host-secret arithmetic
@@ -113,9 +117,9 @@ path. This is a static applicability conclusion, not a constant-time certificati
 of the entire dependency, CPU, guest program or prover.
 
 CI permits only this advisory under this conclusion. Before cargo-deny runs,
-`.github/scripts/check_crypto_bigint_scope.py` checks both exact locked package
-identities/parents and the reviewed application source/manifests, proving-fork pins,
-build overlay tools/patches and optional Cargo override configuration against
+`.github/scripts/check_crypto_bigint_scope.py` checks the exact locked package
+identity and parents, reviewed application sources and manifests, unified proving
+source pins, build preparation tools and optional Cargo override configuration against
 `docs/crypto-bigint-scope.json`. New source files or changed inputs fail closed.
 The guard has no automatic refresh command. Review the paths again before updating
 the scope record; remove the exception when upgrading the consumers to patched bigint.

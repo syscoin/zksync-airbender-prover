@@ -158,10 +158,10 @@ class CryptoBigintScopeTests(unittest.TestCase):
         self.record_scope()
         self.assert_rejected("unknown crypto-bigint dependency edge")
 
-    def test_crypto_fork_manifest_full_contents_are_bound(self):
-        path = self.root / "patches/zksync-crypto-fork-source.json"
+    def test_v2_proving_source_manifest_full_contents_are_bound(self):
+        path = self.root / "patches/v2-proving-sources.json"
         path.write_text('{"fork_commit": "changed", "purpose": "unreviewed source"}\n')
-        self.assert_rejected("scope inputs changed.*zksync-crypto-fork-source.json")
+        self.assert_rejected("scope inputs changed.*v2-proving-sources.json")
 
     def test_exact_advisory_ignore_is_required_even_after_recording_new_hashes(self):
         for ignores in ([], ["RUSTSEC-2026-0388"], [GUARD.ADVISORY, GUARD.ADVISORY],

@@ -19,21 +19,16 @@ CRYPTO_BIGINT_VERSION = "0.5.5"
 CRYPTO_BIGINT_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 CRYPTO_BIGINT_CHECKSUM = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
 DIRECT_PARENTS = {"boojum", "elliptic-curve"}
-LOCK_PATHS = ("Cargo.lock", "patches/airbender.Cargo.lock")
+LOCK_PATHS = ("Cargo.lock",)
 FIXED_INPUTS = (
     "Cargo.toml",
     *LOCK_PATHS,
     "deny.toml",
     "rust-toolchain.toml",
-    "patches/airbender-fork-source.json",
-    "patches/zkos-wrapper-fork-source.json",
-    "patches/zksync-crypto-fork-source.json",
-    "patches/gpu32-memory.json",
-    "patches/crypto-gpu32-memory.patch",
-    "patches/bellman-gpu32-memory.patch",
+    "patches/v2-proving-sources.json",
     "scripts/cargo-with-patched-airbender.sh",
+    "scripts/prepare-v2-proving-sources.py",
     "scripts/prepare-patched-airbender.py",
-    "scripts/prepare-patched-gpu-backends.py",
     "scripts/pinned_source_checkout.py",
 )
 DEFAULT_SCOPE = "docs/crypto-bigint-scope.json"
