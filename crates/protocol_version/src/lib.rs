@@ -83,10 +83,13 @@ struct BinMd5Sum(&'static str);
 // SYSCOIN: Keep the zero sentinel rejection even after binding this isolated candidate
 // to the reproducible guest and its successfully generated Security100 verification key.
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-// Set only after the app-bound V2 key agrees with the generated Gateway verifier.
-pub const SYSCOIN_VK_HASH: &str = ZERO_VK_HASH;
+pub const SYSCOIN_VK_HASH: &str =
+    "0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97";
 const SYSCOIN_APP_MD5: &str = "1bc285f1bbde995134d483c4e75ee204";
-pub const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([0; 8]);
+pub const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
+    0x05080df2, 0xee1edeb1, 0xd3d13f9a, 0x193a00a3, 0xbf5ca211, 0x5bfa675b, 0x29c1baae,
+    0xf289d7e9,
+]);
 
 /// SYSCOIN: The sole canonical lane is protocol V32, Execution V7, Proving V8.
 /// It uses the patched zksync-os v0.4.0 app with compact Bitcoin DA.
@@ -220,12 +223,15 @@ mod tests {
     }
 
     #[test]
-    fn unqualified_candidate_advertises_no_registered_lane() {
+    fn only_the_app_bound_v2_lane_is_registered() {
         let versions = SupportedProtocolVersions::default();
-        assert!(versions.ensure_syscoin_release_constants().is_err());
-        assert!(versions.vk_hashes().is_empty());
-        assert!(versions.program_commitment_for(SYSCOIN_VK_HASH).is_none());
-        assert!(!versions.supports_program(&SYSCOIN_PROGRAM_COMMITMENT));
+        versions.ensure_syscoin_release_constants().unwrap();
+        assert_eq!(versions.vk_hashes(), [SYSCOIN_VK_HASH]);
+        assert_eq!(
+            versions.program_commitment_for(SYSCOIN_VK_HASH),
+            Some(SYSCOIN_PROGRAM_COMMITMENT)
+        );
+        assert!(versions.supports_program(&SYSCOIN_PROGRAM_COMMITMENT));
         assert!(!versions
             .contains("0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153"));
         assert!(!versions.contains(ZERO_VK_HASH));
