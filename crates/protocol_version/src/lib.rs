@@ -87,8 +87,7 @@ pub const SYSCOIN_VK_HASH: &str =
     "0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97";
 const SYSCOIN_APP_MD5: &str = "1bc285f1bbde995134d483c4e75ee204";
 pub const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
-    0x05080df2, 0xee1edeb1, 0xd3d13f9a, 0x193a00a3, 0xbf5ca211, 0x5bfa675b, 0x29c1baae,
-    0xf289d7e9,
+    0x05080df2, 0xee1edeb1, 0xd3d13f9a, 0x193a00a3, 0xbf5ca211, 0x5bfa675b, 0x29c1baae, 0xf289d7e9,
 ]);
 
 /// SYSCOIN: The sole canonical lane is protocol V32, Execution V7, Proving V8.
