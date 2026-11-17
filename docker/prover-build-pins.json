@@ -1,6 +1,6 @@
 {
   "schema": "syscoin-prover-image-build-pins-v1",
-  "rust_toolchain": "nightly-2026-02-10",
+  "rust_toolchain": "nightly-2026-08-09",
   "rustup_init": {
     "version": "1.28.2",
     "sha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"

@@ -25,24 +25,13 @@ zksync_sequencer_proof_client = { path = "crates/sequencer_proof_client" }
 protocol_version = { path = "crates/protocol_version" }
 zksync_os_fri_prover = { path = "crates/zksync_os_fri_prover" }
 
-# zksync-airbender dependencies
-# SYSCOIN: Pin the reviewed degree-lift fork even for direct Cargo resolution.
-# The wrapper's rc.2 source is redirected to this same revision below.
-zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }
-zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }
-
-# zkos-wrapper dependencies
-# v0.6.0-rc.2 = rc.1 plus matter-labs/zkos-wrapper#77 (fold the unified layer into
-# `BinaryCommitment::aux_params`). Its Airbender refs are redirected below.
-# Level stated explicitly, not inherited from the wrapper's default, so it can't drift out
-# of lockstep with `PROVING_SECURITY_LEVEL`.
-zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zkos-wrapper.git", rev = "816a3598c60fac37d02cf1dcd1bc48b2e2c75de1", default-features = false, features = ["security_100"] }
-
-# zksync-crypto dependencies
-# NOTE: must use the same source spec as zkos-wrapper so cargo unifies the git deps
-# (not yet released to crates.io in a version compatible with zkos-wrapper dev).
-# TODO: Once zksync-crypto is released to crates.io - switch to using the crates.io version instead of the git version.
-crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/matter-labs/zksync-crypto.git", branch = "oh_for_wrapper" }
+# One V2 source graph supplies the circuits, recursive verifier, host wrapper and GPU PLONK.
+zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/syscoin/zksync-airbender", rev = "6f8aed003fcec5e6a67861243a94cffbbba4b026" }
+zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "6f8aed003fcec5e6a67861243a94cffbbba4b026" }
+riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "6f8aed003fcec5e6a67861243a94cffbbba4b026" }
+verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "6f8aed003fcec5e6a67861243a94cffbbba4b026" }
+zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zksync-protocol", rev = "b16e30641902ef87544fc44a9889f79915cc07fc", default-features = false, features = ["security_100"] }
+crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/syscoin/zksync-protocol", rev = "b16e30641902ef87544fc44a9889f79915cc07fc" }
 
 # external dependencies
 anyhow = "1.0.103"
@@ -99,14 +88,3 @@ overflow-checks = true
 lto = false
 # This is needed for zksync-airbender crates to compile in a reasonable time for x86-64-unknown-linux-gnu
 overflow-checks = true
-
-# zkos-wrapper rc.2 still names the Matter Labs Airbender source. Redirect its
-# seven external roots to the same pinned fork so direct resolution stays unified.
-[patch."https://github.com/matter-labs/zksync-airbender"]
-unified_reduced_machine_verifier = { git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }
-blake2_with_compression_verifier = { git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }
-execution_utils = { git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }
-setups = { git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }
-field = { git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }
-verifier_generator = { git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }
-prover = { git = "https://github.com/syscoin/zksync-airbender", rev = "b91eeaecc4d1b9a42ea6843432bb3e014899b303" }

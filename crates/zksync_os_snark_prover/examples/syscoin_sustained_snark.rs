@@ -43,7 +43,7 @@ const VK: &str = "0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a
 // Exact canonical GPU CRS in docker/prover-build-pins.json; never use CPU CRS here.
 const CRS_BYTES: u64 = 4_831_838_468;
 const CRS_SHA: &str = "90d1dea94da665d5741dcc6e9ffc1af23a29669f950a6d599a6ccfee4cfb81bd";
-const SNARK_N: usize = 33_554_431;
+const SNARK_N: usize = (1 << zkos_wrapper::L1_VERIFIER_DOMAIN_SIZE_LOG) - 1;
 const MAX_JSON: usize = 1024 * 1024;
 const MAX_RECEIPTS: usize = 128 * MAX_JSON;
 const MAX_PROOF: usize = 32 * MAX_JSON;

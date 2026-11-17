@@ -267,6 +267,7 @@ fn gpu_combiner(replay_threads: usize) -> Result<CarriedChainCombiner> {
                 replay_worker_threads_count: replay_threads,
                 // Upstream's combiner uses its measured 21,820-MiB Normal arena, not Auto.
                 memory_preset: GpuMemoryPreset::Normal,
+                ..GpuConfig::default()
             },
         ))
     }

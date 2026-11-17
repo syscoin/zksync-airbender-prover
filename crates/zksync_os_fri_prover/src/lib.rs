@@ -52,7 +52,7 @@ pub struct Args {
     /// Path to `app.bin`
     #[arg(long)]
     pub app_bin_path: Option<PathBuf>,
-    /// Use the authenticated release setup summaries, or explicitly rederive them on CPU.
+    /// Use the V2 embedded recursion setups, or explicitly check them against a CPU derivation.
     #[arg(
         long,
         value_enum,
@@ -120,7 +120,7 @@ pub fn create_prover(binary_path: &Path) -> anyhow::Result<ProgramProver> {
 }
 
 /// Create a prover with an explicit setup policy. The compatibility entry point
-/// [`create_prover`] uses authenticated bundled summaries; recomputation never
+/// [`create_prover`] uses the embedded V2 recursion setups; recomputation never
 /// happens as a silent fallback for an unknown or modified app.
 pub fn create_prover_with_setup_policy(
     binary_path: &Path,
@@ -154,25 +154,12 @@ pub fn create_prover_with_config_and_setup_policy(
     config: ProgramProverConfig,
     policy: FriSetupPolicy,
 ) -> anyhow::Result<ProgramProver> {
-    // Fail before setup instead of waiting for the first leased job.
-    for path in [&source.bin_path, &source.text_path] {
-        anyhow::ensure!(Path::new(path).is_file(), "program file not found: {path}");
+    let source = setup_summaries::authenticated_program(source)?;
+    if policy == FriSetupPolicy::Recompute {
+        setup_summaries::verify_recursion_snapshots()?;
     }
-    tracing::info!(%policy, "Initializing FRI prover setup");
-    let result = match policy {
-        FriSetupPolicy::Bundled => {
-            let (summaries, binary, text) =
-                setup_summaries::load_bundled_setup_summaries_and_program(
-                    Path::new(&source.bin_path),
-                    Path::new(&source.text_path),
-                )?;
-            ProgramProver::new_with_setup_summaries_and_program_bytes(
-                source, config, summaries, binary, text,
-            )
-        }
-        FriSetupPolicy::Recompute => ProgramProver::new(source, config),
-    };
-    result.map_err(|e| anyhow::anyhow!("failed to create prover: {e}"))
+    tracing::info!(%policy, "Initializing FRI prover from authenticated guest bytes");
+    ProgramProver::new(source, config).map_err(|e| anyhow::anyhow!("failed to create prover: {e}"))
 }
 
 /// The app program commitment, read off the prover's own setups (a map lookup).

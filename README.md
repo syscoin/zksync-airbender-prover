@@ -2,6 +2,14 @@
 
 This repo contains the Prover Service implementation for ZKsync OS Airbender prover.
 
+## Syscoin V2 candidate
+
+The candidate targets the Syscoin v32 guest, Security100 recursion and an app-bound
+PLONK wrapper with a 2²² domain. The worker's protocol registry stays inactive
+until the replacement key and commitment are independently qualified against the
+Gateway verifier. The released v0.9.1 worker remains available for the current
+testnet. [Candidate qualification](docs/v2-worker-qualification.md)
+
 ## Overview
 
 This repo contains 4 service crates:
@@ -85,28 +93,19 @@ bash scripts/cargo-with-patched-airbender.sh fri-run -- cargo run --locked --rel
 Specify optional `--iterations` argument to run FRI prover N times and then exit.
 Specify optional `--path` argument if you want to serialize FRI proof to file.
 
-Dedicated FRI and combined-service FRI startup default to `--fri-setup-policy bundled`
-(environment: `ZKSYNC_FRI_SETUP_POLICY`). The reviewed, embedded release artifact contains the compact
-base/unrolled/unified setup summaries, not full traces or secret setup material. Before GPU
-initialization it checks the artifact digest, exact app `.bin` and `.text` hashes, both embedded
-recursion programs, Security100/V32/circuit identities, cap geometry, derived end parameters,
-and the complete registered program commitment. GPU registration consumes those same validated
-byte snapshots without reopening the program paths. Unknown or changed inputs fail closed; there
-is no operator-supplied cache and no automatic recomputation fallback. Normal GPU registration,
-proof generation, and all program/queue checks remain in place. Explicit
-`--fri-setup-policy recompute` retains the original CPU derivation path.
-
-To independently derive and compare every bundled cap word and metadata field without GPU
-initialization, a CRS, or proof generation:
+Dedicated and combined-service FRI startup default to `--fri-setup-policy bundled`.
+The worker checks the configured guest binary and text against their released
+SHA-256 digests and passes those same bytes to Airbender. V2 obtains the base
+setup from resident GPU caps and embeds the two fixed recursion setups.
+Before taking a lease the worker checks its resulting program commitment
+against the protocol registry. To regenerate and compare every word of both
+fixed recursion setup snapshots on CPU, run:
 
 ```bash
-bash scripts/cargo-with-patched-airbender.sh fri-setup-verify -- \
+bash scripts/cargo-with-patched-airbender.sh --cpu fri-setup-verify -- \
   cargo run --locked --release -p zksync_os_fri_prover --example bundled_fri_setup -- --verify
 ```
 
-For release regeneration, replace `--verify` with `--output /absolute/new-fri-setups.json`.
-The output must not already exist. Review the complete artifact and its reported digest before
-updating the compiled release pin; generating a file alone never changes the runtime bundle.
 The offline FRI diagnostic accepts the same `--fri-setup-policy bundled|recompute` option and
 records the selection alongside its existing `setup_ms`/proof/verification timings.
 

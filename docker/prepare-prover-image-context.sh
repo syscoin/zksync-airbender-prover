@@ -31,6 +31,8 @@ readonly tooling_files=(
     docker/fetch-verified-crs.sh
     scripts/cargo-with-patched-airbender.sh
     scripts/prepare-patched-airbender.py
+    scripts/prepare-v2-proving-sources.py
+    patches/v2-proving-sources.json
     scripts/prepare-patched-gpu-backends.py
     scripts/pinned_source_checkout.py
     patches/airbender-fork-source.json
@@ -80,6 +82,8 @@ readonly tooling_executables=(
     docker/fetch-verified-crs.sh
     scripts/cargo-with-patched-airbender.sh
     scripts/prepare-patched-airbender.py
+    scripts/prepare-v2-proving-sources.py
+    patches/v2-proving-sources.json
     scripts/prepare-patched-gpu-backends.py
     scripts/pinned_source_checkout.py
     docker/zksync-airbender-prover/entrypoint.sh
