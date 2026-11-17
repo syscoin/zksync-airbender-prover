@@ -26,12 +26,12 @@ protocol_version = { path = "crates/protocol_version" }
 zksync_os_fri_prover = { path = "crates/zksync_os_fri_prover" }
 
 # One V2 source graph supplies the circuits, recursive verifier, host wrapper and GPU PLONK.
-zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/syscoin/zksync-airbender", rev = "b2e348faa46070dd1144bb66724565f1238282b9" }
-zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "b2e348faa46070dd1144bb66724565f1238282b9" }
-riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "b2e348faa46070dd1144bb66724565f1238282b9" }
-verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "b2e348faa46070dd1144bb66724565f1238282b9" }
-zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zksync-protocol", rev = "7e946383b21d641965bd3b9bc85f1177ceb4f8a0", default-features = false, features = ["security_100"] }
-crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/syscoin/zksync-protocol", rev = "7e946383b21d641965bd3b9bc85f1177ceb4f8a0" }
+zksync_airbender_execution_utils = { package = "execution_utils", git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
+zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
+riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
+verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "d8965007df1bd7f11a5279a10fe36bbfebaaac58" }
+zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zksync-protocol", rev = "462cbf69d3e159e748c4daeb602991e107a43c41", default-features = false, features = ["security_100"] }
+crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/syscoin/zksync-protocol", rev = "462cbf69d3e159e748c4daeb602991e107a43c41" }
 
 # external dependencies
 anyhow = "1.0.103"

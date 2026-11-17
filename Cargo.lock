@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "add_sub_lui_auipc_mop"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -17,7 +17,7 @@ dependencies = [
 [[package]]
 name = "add_sub_lui_auipc_mop_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -524,7 +524,7 @@ checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 [[package]]
 name = "bigint_with_control"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -536,7 +536,7 @@ dependencies = [
 [[package]]
 name = "bigint_with_control_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -633,7 +633,7 @@ dependencies = [
 [[package]]
 name = "blake2_with_compression"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -645,7 +645,7 @@ dependencies = [
 [[package]]
 name = "blake2_with_compression_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -666,7 +666,7 @@ dependencies = [
 [[package]]
 name = "blake2s_u32"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "unroll",
@@ -700,7 +700,7 @@ checksum = "8d696c370c750c948ada61c69a0ee2cbbb9c50b1019ddb86d9317157a99c2cae"
 [[package]]
 name = "boojum"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "arrayvec 0.7.6",
  "bincode 1.3.3",
@@ -730,7 +730,7 @@ dependencies = [
 [[package]]
 name = "boojum-cuda"
 version = "0.156.7"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "boojum",
  "cmake",
@@ -848,7 +848,7 @@ dependencies = [
 [[package]]
 name = "circuit_definitions"
 version = "0.153.17"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "circuit_encodings",
  "crossbeam",
@@ -861,7 +861,7 @@ dependencies = [
 [[package]]
 name = "circuit_encodings"
 version = "0.153.17"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "derivative",
  "serde",
@@ -872,7 +872,7 @@ dependencies = [
 [[package]]
 name = "circuit_mersenne_field"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "boojum",
  "field",
@@ -922,7 +922,7 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 [[package]]
 name = "cli"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "base64 0.21.7",
  "blake2s_u32",
@@ -963,7 +963,7 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 [[package]]
 name = "common_constants"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "seq-macro",
 ]
@@ -1166,7 +1166,7 @@ dependencies = [
 [[package]]
 name = "cs"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "bincode 1.3.3",
  "blake2s_u32",
@@ -1430,7 +1430,7 @@ dependencies = [
 [[package]]
 name = "era_cudart"
 version = "0.156.7"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "bitflags",
  "era_cudart_sys 0.156.7",
@@ -1449,7 +1449,7 @@ dependencies = [
 [[package]]
 name = "era_cudart_sys"
 version = "0.156.7"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "regex-lite",
 ]
@@ -1494,7 +1494,7 @@ dependencies = [
 [[package]]
 name = "execution_utils"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "clap",
  "full_statement_verifier",
@@ -1554,7 +1554,7 @@ dependencies = [
 [[package]]
 name = "fflonk"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "bincode 1.3.3",
  "byteorder",
@@ -1571,7 +1571,7 @@ dependencies = [
 [[package]]
 name = "fflonk-cuda"
 version = "0.156.7"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "bincode 1.3.3",
  "byteorder",
@@ -1587,7 +1587,7 @@ dependencies = [
 [[package]]
 name = "fft"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "seq-macro",
@@ -1600,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "field"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "rand 0.9.4",
  "seq-macro",
@@ -1674,7 +1674,7 @@ dependencies = [
 [[package]]
 name = "franklin-crypto"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "arr_macro",
  "bit-vec",
@@ -1708,7 +1708,7 @@ dependencies = [
 [[package]]
 name = "full_statement_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "add_sub_lui_auipc_mop_verifier",
  "bigint_with_control_verifier",
@@ -1882,7 +1882,7 @@ dependencies = [
 [[package]]
 name = "gpu_prover"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "blake2s_u32",
  "cmake",
@@ -2313,7 +2313,7 @@ dependencies = [
 [[package]]
 name = "inits_and_teardowns"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -2325,7 +2325,7 @@ dependencies = [
 [[package]]
 name = "inits_and_teardowns_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -2434,7 +2434,7 @@ dependencies = [
 [[package]]
 name = "jump_branch_slt"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -2446,7 +2446,7 @@ dependencies = [
 [[package]]
 name = "jump_branch_slt_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -2479,7 +2479,7 @@ dependencies = [
 [[package]]
 name = "keccak_special5"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -2491,7 +2491,7 @@ dependencies = [
 [[package]]
 name = "keccak_special5_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -2531,7 +2531,7 @@ checksum = "241eaef5fd12c88705a01fc1066c48c4b36e0dd4377dcdc7ec3942cea7a69956"
 [[package]]
 name = "load_store_subword_only"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -2543,7 +2543,7 @@ dependencies = [
 [[package]]
 name = "load_store_subword_only_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -2553,7 +2553,7 @@ dependencies = [
 [[package]]
 name = "load_store_word_only"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -2565,7 +2565,7 @@ dependencies = [
 [[package]]
 name = "load_store_word_only_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -2642,7 +2642,7 @@ dependencies = [
 [[package]]
 name = "mul_div"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -2654,7 +2654,7 @@ dependencies = [
 [[package]]
 name = "mul_div_unsigned"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -2666,7 +2666,7 @@ dependencies = [
 [[package]]
 name = "mul_div_unsigned_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -2676,7 +2676,7 @@ dependencies = [
 [[package]]
 name = "mul_div_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -2709,7 +2709,7 @@ checksum = "72ef4a56884ca558e5ddb05a1d1e7e1bfd9a68d9ed024c21704cc98872dae1bb"
 [[package]]
 name = "non_determinism_source"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 
 [[package]]
 name = "nu-ansi-term"
@@ -3266,7 +3266,7 @@ dependencies = [
 [[package]]
 name = "proof-compression"
 version = "0.156.7"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -3305,7 +3305,7 @@ dependencies = [
 [[package]]
 name = "prover"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "blake2s_u32",
  "common_constants",
@@ -3330,7 +3330,7 @@ dependencies = [
 [[package]]
 name = "prover_examples"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "bincode 1.3.3",
  "common_constants",
@@ -3498,7 +3498,7 @@ dependencies = [
 [[package]]
 name = "reduced_keccak"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 
 [[package]]
 name = "ref-cast"
@@ -3603,7 +3603,7 @@ dependencies = [
 [[package]]
 name = "rescue_poseidon"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "addchain",
  "arrayvec 0.7.6",
@@ -3659,7 +3659,7 @@ checksum = "68b59d645e392e041ad18f5e529ed13242d8405c66bb192f59703ea2137017d0"
 [[package]]
 name = "riscv_common"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "seq-macro",
@@ -3668,7 +3668,7 @@ dependencies = [
 [[package]]
 name = "riscv_transpiler"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "blake2s_u32",
  "capstone",
@@ -4019,7 +4019,7 @@ dependencies = [
 [[package]]
 name = "setups"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "add_sub_lui_auipc_mop",
  "bigint_with_control",
@@ -4113,7 +4113,7 @@ dependencies = [
 [[package]]
 name = "shift_binary_csr"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -4125,7 +4125,7 @@ dependencies = [
 [[package]]
 name = "shift_binary_csr_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -4135,7 +4135,7 @@ dependencies = [
 [[package]]
 name = "shivini"
 version = "0.156.7"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "bincode 1.3.3",
  "boojum",
@@ -4200,7 +4200,7 @@ dependencies = [
 [[package]]
 name = "snark_wrapper"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "derivative",
  "rand 0.8.6",
@@ -4626,7 +4626,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "trace_and_split"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -4640,7 +4640,7 @@ dependencies = [
 [[package]]
 name = "trace_holder"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "worker",
@@ -4711,7 +4711,7 @@ dependencies = [
 [[package]]
 name = "transcript"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "blake2s_u32",
  "unroll",
@@ -4806,7 +4806,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 [[package]]
 name = "unified_reduced_machine"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "common_constants",
  "prover",
@@ -4818,7 +4818,7 @@ dependencies = [
 [[package]]
 name = "unified_reduced_machine_verifier"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "field",
  "unroll",
@@ -4886,7 +4886,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "verifier_common"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "blake2s_u32",
  "cs",
@@ -4901,7 +4901,7 @@ dependencies = [
 [[package]]
 name = "verifier_generator"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "proc-macro2 1.0.101",
  "prover",
@@ -5368,7 +5368,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 [[package]]
 name = "worker"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-airbender?rev=b2e348faa46070dd1144bb66724565f1238282b9#b2e348faa46070dd1144bb66724565f1238282b9"
+source = "git+https://github.com/syscoin/zksync-airbender?rev=d8965007df1bd7f11a5279a10fe36bbfebaaac58#d8965007df1bd7f11a5279a10fe36bbfebaaac58"
 dependencies = [
  "num_cpus",
  "rayon",
@@ -5510,7 +5510,7 @@ dependencies = [
 [[package]]
 name = "zk_evm"
 version = "0.153.17"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -5524,7 +5524,7 @@ dependencies = [
 [[package]]
 name = "zk_evm_abstractions"
 version = "0.153.17"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "anyhow",
  "cfg-if",
@@ -5537,7 +5537,7 @@ dependencies = [
 [[package]]
 name = "zkevm_circuits"
 version = "0.153.17"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "arrayvec 0.7.6",
  "boojum",
@@ -5557,7 +5557,7 @@ dependencies = [
 [[package]]
 name = "zkevm_opcode_defs"
 version = "0.153.17"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "bitflags",
  "blake2 0.10.6",
@@ -5574,7 +5574,7 @@ dependencies = [
 [[package]]
 name = "zkos-wrapper"
 version = "0.1.0"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -5601,7 +5601,7 @@ dependencies = [
 [[package]]
 name = "zksync-gpu-ffi"
 version = "0.156.7"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "cmake",
  "crossbeam",
@@ -5615,7 +5615,7 @@ dependencies = [
 [[package]]
 name = "zksync-gpu-prover"
 version = "0.156.7"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "bit-vec",
  "cfg-if",
@@ -5630,7 +5630,7 @@ dependencies = [
 [[package]]
 name = "zksync_bellman"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "arrayvec 0.7.6",
  "bit-vec",
@@ -5654,7 +5654,7 @@ dependencies = [
 [[package]]
 name = "zksync_cs_derive"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "proc-macro-error",
  "proc-macro2 1.0.101",
@@ -5665,7 +5665,7 @@ dependencies = [
 [[package]]
 name = "zksync_ff"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "byteorder",
  "hex",
@@ -5678,7 +5678,7 @@ dependencies = [
 [[package]]
 name = "zksync_ff_derive"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "num-bigint 0.4.6",
  "num-integer",
@@ -5770,7 +5770,7 @@ dependencies = [
 [[package]]
 name = "zksync_pairing"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "byteorder",
  "cfg-if",
@@ -5808,7 +5808,7 @@ dependencies = [
 [[package]]
 name = "zksync_solidity_vk_codegen"
 version = "0.32.13"
-source = "git+https://github.com/syscoin/zksync-protocol?rev=7e946383b21d641965bd3b9bc85f1177ceb4f8a0#7e946383b21d641965bd3b9bc85f1177ceb4f8a0"
+source = "git+https://github.com/syscoin/zksync-protocol?rev=462cbf69d3e159e748c4daeb602991e107a43c41#462cbf69d3e159e748c4daeb602991e107a43c41"
 dependencies = [
  "ethereum-types",
  "franklin-crypto",
