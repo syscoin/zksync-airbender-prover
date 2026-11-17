@@ -8,7 +8,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zksync_airbender_cli::prover_utils::{
-    verify_artifact, CarriedChainCombiner, ProgramSource, ProofArtifact, ProofTarget, SecurityLevel,
+    verify_artifact, CarriedChainCombiner, CpuConfig, ProgramSource, ProofArtifact, ProofTarget,
+    ProverBackend, SecurityLevel,
 };
 #[cfg(feature = "gpu")]
 use zksync_airbender_cli::prover_utils::{GpuConfig, GpuMemoryPreset};
@@ -37,6 +38,9 @@ struct Args {
     output_dir: PathBuf,
     #[arg(long, default_value_t = 8)]
     gpu_replay_threads: usize,
+    /// Run the same verified combination on CPU or GPU.
+    #[arg(long, value_enum, default_value = "gpu")]
+    backend: ProverBackend,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -282,7 +286,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
     zksync_os_fri_prover::init_tracing();
     ensure!(
-        cfg!(feature = "gpu") && args.gpu_replay_threads > 0,
+        args.backend == ProverBackend::Cpu
+            || (cfg!(feature = "gpu") && args.gpu_replay_threads > 0),
         "GPU build and positive replay thread count required"
     );
     let manifest_bytes = read_bounded(&args.manifest, MAX_METADATA_BYTES)?;
@@ -379,7 +384,12 @@ fn main() -> Result<()> {
     );
     let verify_inputs_ms = verify_inputs.elapsed().as_millis();
     // Same real carried-chain flow as production merge_fris, without inventing a lease.
-    let mut combiner = gpu_combiner(args.gpu_replay_threads)?;
+    let mut combiner = match args.backend {
+        ProverBackend::Cpu => {
+            CarriedChainCombiner::new_cpu(SecurityLevel::Security100, CpuConfig::default())
+        }
+        ProverBackend::Gpu => gpu_combiner(args.gpu_replay_threads)?,
+    };
     let warm_up = Instant::now();
     combiner.warm_up();
     let warm_up_ms = warm_up.elapsed().as_millis();
@@ -420,7 +430,8 @@ fn main() -> Result<()> {
         "verify_inputs_ms": verify_inputs_ms, "warm_up_ms": warm_up_ms,
         "combine_ms": combine_ms, "verify_ms": verify_start.elapsed().as_millis(),
         "gpu_replay_threads": args.gpu_replay_threads,
-        "gpu_memory_policy": "upstream combiner fixed 21820-MiB Normal arena",
+        "backend": args.backend,
+        "gpu_memory_policy": (args.backend == ProverBackend::Gpu).then_some("Normal"),
         "artifact_timings_ms": combined.timings_ms, "proof_counts": combined.proof_counts,
         "combine_manifest": manifest, "input_metadata": metadata,
     });
