@@ -16,11 +16,16 @@ struct Args {
     app_bin: PathBuf,
     #[arg(long)]
     app_text: PathBuf,
+    /// Directory for new verification keys generated with the app-bound production wrapper.
+    #[arg(long, requires = "trusted_setup")]
+    keys: Option<PathBuf>,
+    #[arg(long, requires = "keys")]
+    trusted_setup: Option<PathBuf>,
 }
 
 fn derive(args: Args) -> anyhow::Result<()> {
-    let bin = std::fs::read(args.app_bin).context("reading guest binary")?;
-    let text = std::fs::read(args.app_text).context("reading guest instruction section")?;
+    let bin = std::fs::read(&args.app_bin).context("reading guest binary")?;
+    let text = std::fs::read(&args.app_text).context("reading guest instruction section")?;
     let load = |layer, kind| recursion_artifact(SecurityModel::Security100, layer, kind);
     let commitment = BinaryCommitment::from_binaries(
         &bin,
@@ -42,6 +47,17 @@ fn derive(args: Args) -> anyhow::Result<()> {
             "program_commitment": ProgramCommitment(commitment.aux_params).to_string(),
         }))?
     );
+    if let (Some(output), Some(crs)) = (args.keys, args.trusted_setup) {
+        anyhow::ensure!(!output.exists(), "choose a fresh key output directory");
+        zkos_wrapper::interface::cmd_generate_vk(
+            output,
+            Some(args.app_bin),
+            Some(args.app_text),
+            Some(crs),
+            true,
+            None,
+        )?;
+    }
     Ok(())
 }
 
