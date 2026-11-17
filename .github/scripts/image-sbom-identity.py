@@ -37,8 +37,36 @@ def parse_json(text):
     return json.loads(text, object_pairs_hook=unique_object)
 
 
+def v2_proving_pins(path, source_lock, *, native=False):
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+
+    require(path.is_file() and not path.is_symlink(), "invalid V2 source manifest")
+    require(source_lock is not None and source_lock.is_file() and not source_lock.is_symlink(),
+            "V2 source identity requires the selected Cargo.lock")
+    pins = parse_json(path.read_text())
+    require(set(pins) == {"airbender", "protocol", "bellman_cuda"}, "unexpected V2 pin set")
+    for name, pin in pins.items():
+        require(set(pin) == {"repository", "commit", "tree"} and pin["repository"].startswith("https://github.com/")
+                and SHA.fullmatch(pin["commit"]) and SHA.fullmatch(pin["tree"]), f"invalid {name} source")
+    expected = {f"git+{pins[name]['repository']}?rev={pins[name]['commit']}#{pins[name]['commit']}"
+                for name in ("airbender", "protocol")}
+    lock = source_lock.read_bytes()
+    actual = {pkg["source"] for pkg in tomllib.loads(lock.decode())["package"]
+              if pkg.get("source", "").startswith("git+")}
+    require(actual == expected, "selected Cargo.lock differs from the V2 source manifest")
+    names = ("protocol", "bellman_cuda") if native else ("airbender", "protocol")
+    return {"manifest_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "cargo_lock_sha256": hashlib.sha256(lock).hexdigest(),
+            **{name: pins[name] for name in names}}
+
+
 def airbender_build_pins(path, source_lock=None):
     """Read the tooling-bound manifests and verify their adjacent immutable inputs."""
+    if path.name == "v2-proving-sources.json":
+        return v2_proving_pins(path, source_lock)
     require(path.is_file() and not path.is_symlink(), "invalid Airbender pin manifest")
     raw = path.read_bytes()
     # SYSCOIN: Both CPU and GPU lanes use the same wrapper and common-crypto forks.
@@ -65,6 +93,8 @@ def airbender_build_pins(path, source_lock=None):
 
 def gpu_backend_build_pins(path, source_lock=None):
     """Use the backend preparer's pure, hash-checked metadata API; never build or clone."""
+    if path.name == "v2-proving-sources.json":
+        return v2_proving_pins(path, source_lock, native=True)
     wrapper = Path(__file__).resolve().parents[2] / "scripts/prepare-patched-gpu-backends.py"
     spec = importlib.util.spec_from_file_location("selected_gpu_backend_pins", wrapper)
     helper = importlib.util.module_from_spec(spec)
@@ -169,7 +199,8 @@ def bind_sbom(bom, record, airbender=None, gpu_backend=None):
         require(record["component"] in {"zksync-airbender-prover", "zksync-os-prover-snark"},
                 "GPU32 backend evidence cannot be attributed to the FRI-only image")
         if airbender is not None:
-            require(gpu_backend.get("zksync_crypto") == airbender["zksync_crypto"],
+            crypto = "protocol" if "protocol" in airbender else "zksync_crypto"
+            require(gpu_backend.get(crypto) == airbender[crypto],
                     "GPU and common proving inputs disagree on the common crypto fork")
         name = "io.syscoin.prover.gpu-backend-build.inputs"
         require(not any(isinstance(prop, dict) and prop.get("name") == name for prop in properties),

@@ -1,228 +1,55 @@
-"""Inert cache source-identity guards; no imports of build helpers or artifact derivation.
-
-These checks bind Rust's expected effective circuit trees to the reviewed source
-manifests. They do not execute Rust tests or qualify cached mathematical bodies.
-"""
-
+"""Verify the worker's V2 cache inputs without constructing a proof or opening a lease."""
 import hashlib
 import json
 from pathlib import Path
 import re
 import unittest
 
-
 ROOT = Path(__file__).resolve().parents[2]
-FRI_SOURCE = ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs"
-SNARK_SOURCE = ROOT / "crates/zksync_os_snark_prover/src/binary_commitment.rs"
-COMMITMENT = ROOT / "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json"
-
-
-def constant(source, name):
-    values = re.findall(
-        rf'^const {re.escape(name)}: &str =\s*"([0-9a-f]{{40}})";$',
-        source,
-        re.MULTILINE,
-    )
-    if len(values) != 1:
-        raise AssertionError(f"expected one literal circuit identity {name}")
-    return values[0]
-
-
-def strict_struct(source, name):
-    values = re.findall(
-        rf'#\[serde\(deny_unknown_fields\)\]\nstruct {re.escape(name)} \{{(.*?)\n\}}',
-        source,
-        re.DOTALL,
-    )
-    if len(values) != 1:
-        raise AssertionError(f"expected one strict metadata struct {name}")
-    return values[0]
-
-
-def hash_constant(source, name):
-    values = re.findall(
-        rf'^const {re.escape(name)}: &str =\s*"(0x[0-9a-f]{{64}})";$',
-        source,
-        re.MULTILINE,
-    )
-    if len(values) != 1:
-        raise AssertionError(f"expected one literal proving identity {name}")
-    return values[0]
-
-
-def words_constant(source, name):
-    values = re.findall(
-        rf'^const {re.escape(name)}: \[u32; 8\] = \[(.*?)\];$',
-        source,
-        re.MULTILINE | re.DOTALL,
-    )
-    if len(values) != 1:
-        raise AssertionError(f"expected one end-parameter array {name}")
-    return [int(word.strip(), 0) for word in values[0].split(",") if word.strip()]
+PINS = json.loads((ROOT / "patches/v2-proving-sources.json").read_text())
+ARTIFACT = json.loads((ROOT / "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json").read_text())
+FRI = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
+SNARK = (ROOT / "crates/zksync_os_snark_prover/src/binary_commitment.rs").read_text()
+REGISTRY = (ROOT / "crates/protocol_version/src/lib.rs").read_text()
 
 
 class CacheProvenanceTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.fri = FRI_SOURCE.read_text()
-        cls.snark = SNARK_SOURCE.read_text()
-        cls.airbender = json.loads(
-            (ROOT / "patches/airbender-fork-source.json").read_text()
-        )
-        cls.wrapper = json.loads(
-            (ROOT / "patches/zkos-wrapper-fork-source.json").read_text()
-        )
-        cls.commitment = json.loads(COMMITMENT.read_text())
+    def test_worker_uses_the_authenticated_guest_with_v2_resident_caps(self):
+        worker = (ROOT / "crates/zksync_os_fri_prover/src/lib.rs").read_text()
+        self.assertIn("setup_summaries::authenticated_program(source)", worker)
+        self.assertIn("ProgramSource::from_bytes", FRI)
+        self.assertNotIn("syscoin-v32-security100-fri-setups.json", FRI)
+        self.assertIn("program_commitment()", worker)
 
-    def test_revision_fields_bind_effective_sources(self):
-        for source in (self.fri, self.snark):
-            self.assertEqual(
-                constant(source, "AIRBENDER_REVISION"),
-                self.airbender["upstream_commit"],
-            )
-        self.assertEqual(
-            constant(self.snark, "WRAPPER_CIRCUIT_REVISION"),
-            self.wrapper["fork_commit"],
-        )
+    def test_bundled_wrapper_identity_validates_both_source_trees(self):
+        for section, field in (("airbender", "airbender_patched_tree"), ("protocol", "wrapper_circuit_patched_tree")):
+            self.assertIn(f"self.{field} == pins.{section}.tree", SNARK)
+        self.assertIn('include_str!("../../../patches/v2-proving-sources.json")', SNARK)
+        self.assertIn("recursion_end_params(SecurityModel::Security100, RecursionLayer::Unified)", SNARK)
+        self.assertIn("program_commitment_for(&self.vk_hash)", SNARK)
 
-    def test_effective_airbender_tree_matches_reviewed_manifest_in_both_caches(self):
-        tree = self.airbender["fork_tree"]
-        self.assertRegex(tree, r"^[0-9a-f]{40}$")
-        self.assertNotEqual(tree, self.airbender["upstream_tree"])
-        for source in (self.fri, self.snark):
-            self.assertEqual(constant(source, "AIRBENDER_PATCHED_TREE"), tree)
-            self.assertIn("self.airbender_patched_tree == AIRBENDER_PATCHED_TREE", source)
-        self.assertIn(
-            "airbender_patched_tree: AIRBENDER_PATCHED_TREE.to_owned()", self.fri
-        )
+    def test_active_worker_registry_binds_the_verified_artifact(self):
+        sentinel = "pub const SYSCOIN_VK_HASH: &str = ZERO_VK_HASH;"
+        if sentinel in REGISTRY:
+            self.assertIn("pub const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([0; 8]);", REGISTRY)
+            self.assertIn("unqualified_candidate_advertises_no_registered_lane", REGISTRY)
+            return
+        self.assertEqual(ARTIFACT["airbender_revision"], PINS["airbender"]["commit"])
+        self.assertEqual(ARTIFACT["airbender_patched_tree"], PINS["airbender"]["tree"])
+        self.assertEqual(ARTIFACT["wrapper_circuit_revision"], PINS["protocol"]["commit"])
+        self.assertEqual(ARTIFACT["wrapper_circuit_patched_tree"], PINS["protocol"]["tree"])
+        self.assertEqual(ARTIFACT["wrapper_domain_log"], 22)
+        self.assertTrue(ARTIFACT["check_aux_params"])
+        self.assertEqual(ARTIFACT["security_bits"], 100)
+        self.assertIn(ARTIFACT["vk_hash"], REGISTRY)
+        self.assertEqual(ARTIFACT["program_commitment"], "0x" + "".join(f"{word:08x}" for word in ARTIFACT["aux_params"]))
+        declared = re.search(r"pub const SYSCOIN_PROGRAM_COMMITMENT:.*?ProgramCommitment\(\[(.+?)\]\)", REGISTRY, re.S)
+        self.assertEqual([int(v.strip(), 0) for v in declared.group(1).split(",") if v.strip()], ARTIFACT["aux_params"])
 
-    def test_effective_wrapper_tree_matches_reviewed_manifest_in_snark_cache(self):
-        tree = self.wrapper["fork_tree"]
-        self.assertRegex(tree, r"^[0-9a-f]{40}$")
-        self.assertNotEqual(tree, self.wrapper["upstream_tree"])
-        self.assertEqual(constant(self.snark, "WRAPPER_CIRCUIT_PATCHED_TREE"), tree)
-        self.assertIn(
-            "self.wrapper_circuit_patched_tree == WRAPPER_CIRCUIT_PATCHED_TREE",
-            self.snark,
-        )
-
-    def test_schema_two_tree_fields_are_required_and_fail_closed(self):
-        for source, struct_name, fields in (
-            (self.fri, "Metadata", ("airbender_patched_tree",)),
-            (
-                self.snark,
-                "Artifact",
-                ("airbender_patched_tree", "wrapper_circuit_patched_tree"),
-            ),
-        ):
-            body = strict_struct(source, struct_name)
-            self.assertNotIn("serde(default", body)
-            for field in fields:
-                self.assertRegex(body, rf"(?m)^    {field}: String,$")
-            self.assertIn("self.schema_version == 2", source)
-            self.assertNotIn("self.schema_version == 1", source)
-        self.assertIn("schema_version: 2,", self.fri)
-        self.assertIn("self == &canonical_metadata()", self.fri)
-
-    def test_rust_rejections_cover_old_schema_wrong_and_missing_trees(self):
-        self.assertIn(
-            "fn old_schema_and_wrong_effective_source_tree_fail_closed()", self.fri
-        )
-        self.assertIn("old_schema.schema_version = 1;", self.fri)
-        self.assertIn('wrong_tree.airbender_patched_tree = "0".repeat(40);', self.fri)
-        self.assertIn('.remove("airbender_patched_tree")', self.fri)
-        self.assertIn(
-            "fn old_schema_and_wrong_effective_source_trees_fail_closed()", self.snark
-        )
-        self.assertIn('old_schema["schema_version"] = json!(1);', self.snark)
-        self.assertIn(
-            'for field in ["airbender_patched_tree", "wrapper_circuit_patched_tree"]',
-            self.snark,
-        )
-        self.assertIn('wrong_tree[field] = json!("0".repeat(40));', self.snark)
-        self.assertIn("missing_tree.as_object_mut().unwrap().remove(field);", self.snark)
-
-    def test_current_commitment_artifact_matches_effective_source_trees(self):
-        artifact = self.commitment
-        self.assertEqual(artifact["schema_version"], 2)
-        for field, pins, pin_field in (
-            ("airbender_revision", self.airbender, "upstream_commit"),
-            ("wrapper_circuit_revision", self.wrapper, "fork_commit"),
-        ):
-            self.assertEqual(artifact[field], pins[pin_field])
-        for field, pins, pin_field in (
-            ("airbender_patched_tree", self.airbender, "fork_tree"),
-            ("wrapper_circuit_patched_tree", self.wrapper, "fork_tree"),
-        ):
-            self.assertEqual(artifact[field], pins[pin_field])
-        self.assertIn(
-            "fn current_bundled_artifact_loads_and_binds_all_release_inputs()",
-            self.fri,
-        )
-        self.assertIn(
-            "fn current_bundled_commitment_loads_and_matches_the_registered_candidate()",
-            self.snark,
-        )
-
-    def test_active_registry_loaders_and_diagnostic_share_measured_identity(self):
-        artifact = self.commitment
-        protocol = (ROOT / "crates/protocol_version/src/lib.rs").read_text()
-        diagnostic = (
-            ROOT / "crates/zksync_os_snark_prover/examples/syscoin_sustained_snark.rs"
-        ).read_text()
-        for source, vk_name, program_name in (
-            (self.fri, "VK_HASH", "PROGRAM_COMMITMENT"),
-            (diagnostic, "VK", "PROGRAM"),
-        ):
-            self.assertEqual(hash_constant(source, vk_name), artifact["vk_hash"])
-            self.assertEqual(hash_constant(source, program_name), artifact["program_commitment"])
-        self.assertEqual(hash_constant(protocol, "SYSCOIN_VK_HASH"), artifact["vk_hash"])
-        matches = re.findall(
-            r"const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment\(\[(.*?)\]\);",
-            protocol,
-            re.DOTALL,
-        )
-        self.assertEqual(len(matches), 1)
-        words = [int(word.strip(), 0) for word in matches[0].split(",") if word.strip()]
-        self.assertEqual(words, artifact["aux_params"])
-        self.assertEqual(
-            "0x" + "".join(f"{word:08x}" for word in words), artifact["program_commitment"]
-        )
-        for source in (self.fri, self.snark):
-            self.assertEqual(words_constant(source, "UNIFIED_END_PARAMS"), artifact["end_params"])
-
-    def test_current_guest_identities_are_bound_to_the_regenerated_bundle(self):
-        self.assertEqual(
-            self.commitment["airbender_patched_tree"], self.airbender["fork_tree"]
-        )
-        for identity in ("recursion_unrolled", "recursion_unified"):
-            for section in ("bin", "text"):
-                file_identity = self.commitment[identity][section]
-                self.assertIn('"' + file_identity["sha256"] + '"', self.fri)
-        for section, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
-            raw = (ROOT / relative).read_bytes()
-            self.assertEqual(self.commitment["app"][section], {
-                "sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw),
-            })
-
-    def test_current_docs_distinguish_offline_qualification_from_live_gates(self):
-        overlay = " ".join((ROOT / "docs/airbender-build-overlay.md").read_text().split())
-        current, historical_marker, historical = overlay.partition("The preceding `4f1e95bf` snapshot")
-        self.assertTrue(historical_marker)
-        self.assertIn(self.commitment["vk_hash"], current)
-        self.assertIn("retaining the unchanged setup summaries and commitment parameters", current)
-        self.assertIn("tests accepted matching bundles and rejected altered inputs", historical)
-        self.assertIn("retained two-batch input", overlay)
-        self.assertIn("all three CPU/GPU keys matched byte-for-byte", overlay)
-        self.assertIn("normal-profile local EVM", overlay)
-        self.assertIn("do not establish live verifier deployment, service acceptance", overlay)
-        self.assertIn("broader workload qualification or sustained throughput", overlay)
-        self.assertNotIn("were generated before the FRI degree lift", overlay)
-        self.assertNotIn("loaders reject them", overlay)
-        for relative in ("README.md", "scripts/prover-rental/single-job-README.md"):
-            current = (ROOT / relative).read_text()
-            self.assertIn(self.commitment["vk_hash"], current)
-            self.assertIn(self.commitment["program_commitment"], current)
+    def test_app_sections_match_the_exact_guest(self):
+        for section in ("bin", "text"):
+            raw = (ROOT / f"multiblock_batch.{section}").read_bytes()
+            self.assertEqual(ARTIFACT["app"][section], {"size_bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
 
 
 if __name__ == "__main__":

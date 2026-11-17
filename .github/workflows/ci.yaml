@@ -57,7 +57,9 @@ jobs:
         run: python3 -B .github/scripts/test_verified_crs_roles.py
 
       - name: Check pinned Airbender source and selected lock
-        run: python3 -B .github/scripts/test_patched_airbender_build.py
+        run: |
+          python3 -B .github/scripts/test_patched_airbender_build.py
+          python3 -B .github/scripts/test_v2_proving_sources.py
 
       - name: Check pinned wrapper test graph
         run: python3 -B .github/scripts/test_run_pinned_wrapper_tests.py
@@ -90,66 +92,20 @@ jobs:
           AIRBENDER_BUILD_ATTESTATION="${RUNNER_TEMP}/ci-test-airbender-inputs.json" \
             bash scripts/cargo-with-patched-airbender.sh ci-test -- cargo test --locked --no-default-features
 
-      # Dependency unit tests are not run by the application workspace test command.
-      # Reuse its verified, pinned sources and target directory in a disposable
-      # wrapper-owned workspace so dev-dependencies and all reviewed patches
-      # resolve together. Production manifests, locks and policy stay unchanged.
+      # Cargo tests workspace members only. Bind dependency tests to the successful worker build.
       - name: Run pinned wrapper source tests
         env:
           RUST_MIN_STACK: "33554432"
           CARGO_PROFILE_DEV_DEBUG: "0"
-        run: |
-          python3 -B .github/scripts/run_pinned_wrapper_tests.py \
-            "${RUNNER_TEMP}/ci-test-airbender-inputs.json"
+        run: python3 -B .github/scripts/run_v2_protocol_regressions.py "${RUNNER_TEMP}/ci-test-airbender-inputs.json" wrapper
 
-      # The application test command does not run dependency unit tests.
       - name: Run pinned Boojum FRI and lookup regressions
         timeout-minutes: 20
         env:
           RUST_MIN_STACK: "33554432"
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_BUILD_JOBS: "1"
-        run: |
-          record="${RUNNER_TEMP}/ci-test-airbender-inputs.json"
-          workspace="$(jq -er '.workspace' "${record}")"
-          crypto="$(dirname -- "${workspace}")/zksync-crypto"
-          target="$(jq -er '.cargo_target_dir' "${record}")"
-          verify_crypto() {
-            python3 -B - "${crypto}" "${record}" <<'PY'
-          import importlib.util
-          import json
-          import sys
-          from pathlib import Path
-          spec = importlib.util.spec_from_file_location("patched_airbender", "scripts/prepare-patched-airbender.py")
-          helper = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(helper)
-          record = json.loads(Path(sys.argv[2]).read_text())
-          helper.require(record["cargo_exit_code"] == 0 and record["inputs_reverified"] is True
-                         and record["label"] == "ci-test", "CI application inputs were not verified")
-          helper.require(record["zksync_crypto"]["inputs"] == helper.crypto_pins_metadata(),
-                         "CI common crypto attestation differs from current pins")
-          helper.verify_crypto(Path(sys.argv[1]), helper.load_crypto_pins())
-          PY
-          }
-          verify_crypto
-          test_status=0
-          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
-            --locked -p boojum --lib cs::implementations::cs::test::prove_simple \
-            -- --exact --nocapture --test-threads=1 || test_status=$?
-          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
-            --locked -p boojum --lib cs::implementations::cs::test::prove_simple_specialized_with_lookups \
-            -- --exact --test-threads=1 || test_status=$?
-          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
-            --locked -p boojum --lib cs::implementations::prover::degree_lift_tests \
-            -- --test-threads=1 || test_status=$?
-          CARGO_TARGET_DIR="${target}" cargo test --manifest-path "${crypto}/Cargo.toml" \
-            --locked -p boojum --lib gadgets::recursion::recursive_verifier::test::test_recursive_verification_of_degree_lifted_proof \
-            -- --exact --test-threads=1 || test_status=$?
-          CARGO_TARGET_DIR="${target}" cargo check --manifest-path "${crypto}/Cargo.toml" \
-            --locked -p snark_wrapper || test_status=$?
-          verify_crypto
-          exit "${test_status}"
-
+        run: python3 -B .github/scripts/run_v2_protocol_regressions.py "${RUNNER_TEMP}/ci-test-airbender-inputs.json" boojum
 
   ###############################
   #  Mandatory CI status check  #

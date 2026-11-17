@@ -92,7 +92,7 @@ runs:
             nvcc_release="$(nvcc --version | sed -nE 's/.*release ([0-9]+\.[0-9]+),.*/\1/p')"
             [[ "${nvcc_release}" =~ ^([0-9]+)\.([0-9]+)$ ]]
             (( BASH_REMATCH[1] > 12 || (BASH_REMATCH[1] == 12 && BASH_REMATCH[2] >= 9) ))
-            python3 .release-tooling/scripts/prepare-patched-gpu-backends.py --prepare-bellman "${BELLMAN_CUDA_DIR}"
+            python3 .release-tooling/scripts/prepare-v2-proving-sources.py --prepare-bellman "${BELLMAN_CUDA_DIR}"
             cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES="${GPU_CUDAARCHS}"
             cmake --build bellman-cuda/build/
             ;;
@@ -109,14 +109,17 @@ runs:
           bash .release-tooling/scripts/cargo-with-patched-airbender.sh "${overlay[@]}" "release-${ROLE}" -- \
           cargo build --locked --profile "${RELEASE_PROFILE}" --target "${TARGET}" -p "${package}" --bin "${binary}" "${features[@]}"
         [[ "$(git hash-object -- Cargo.lock)" == "$(git rev-parse HEAD:Cargo.lock)" ]]
-        airbender_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py airbender-pins .release-tooling/patches/airbender-fork-source.json --source-lock Cargo.lock)"
-        gpu_backend_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py gpu-backend-pins .release-tooling/patches/gpu32-memory.json --source-lock Cargo.lock)"
-        jq -e --argjson expected "${airbender_pins}" --arg role "release-${ROLE}" \
-          '.cargo_exit_code == 0 and .inputs_reverified == true and .label == $role and .pins == $expected.pins and .selected_lock == $expected.selected_lock and .zkos_wrapper.inputs == $expected.zkos_wrapper and .zksync_crypto.inputs == $expected.zksync_crypto and .application_inputs_sha256["Cargo.lock"] == $expected.selected_lock.canonical_lock_sha256' "${ROLE}-airbender-build-inputs.json" >/dev/null
+        airbender_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py airbender-pins .release-tooling/patches/v2-proving-sources.json --source-lock Cargo.lock)"
+        gpu_backend_pins="$(python3 .release-tooling/.github/scripts/image-sbom-identity.py gpu-backend-pins .release-tooling/patches/v2-proving-sources.json --source-lock Cargo.lock)"
+        jq -e --argjson expected "${airbender_pins}" --arg role "release-${ROLE}" '
+          .schema == "syscoin-v2-worker-build-v1" and .cargo_exit_code == 0 and .inputs_reverified and
+          .label == $role and .sources.airbender == $expected.airbender and .sources.protocol == $expected.protocol and
+          .cargo_lock_sha256 == $expected.cargo_lock_sha256 and .application_input_sha256["Cargo.lock"] == $expected.cargo_lock_sha256
+        ' "${ROLE}-airbender-build-inputs.json" >/dev/null
         if [[ "${ROLE}" == combined || "${ROLE}" == snark ]]; then
-          jq -e --argjson expected "${gpu_backend_pins}" '.gpu_backend_overlay.inputs == $expected' "${ROLE}-airbender-build-inputs.json" >/dev/null
+          jq -e --argjson expected "${gpu_backend_pins}" '.sources.bellman_cuda == $expected.bellman_cuda and (.native.library_sha256 | test("^[0-9a-f]{64}$"))' "${ROLE}-airbender-build-inputs.json" >/dev/null
         else
-          jq -e '.gpu_backend_overlay == null' "${ROLE}-airbender-build-inputs.json" >/dev/null
+          jq -e '.native == null' "${ROLE}-airbender-build-inputs.json" >/dev/null
         fi
         mkdir -p release-role
         cp "target/${TARGET}/${RELEASE_PROFILE}/${binary}" "release-role/${binary}"

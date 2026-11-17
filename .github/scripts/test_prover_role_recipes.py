@@ -30,6 +30,8 @@ RELEASE_BINS = {
 OVERLAY_FILES = (
     "scripts/cargo-with-patched-airbender.sh",
     "scripts/prepare-patched-airbender.py",
+    "scripts/prepare-v2-proving-sources.py",
+    "patches/v2-proving-sources.json",
     "scripts/pinned_source_checkout.py",
     "patches/airbender-fork-source.json",
     "patches/airbender.Cargo.lock",
@@ -260,7 +262,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
             self.assertIn(f"COPY --from=builder /usr/src/zksync/{record} "
                           "/usr/share/syscoin-prover/airbender-build-inputs.json", docker)
             self.assertIn('"${ROLE}-airbender-build-inputs.json"', recipe)
-        self.assertIn(".cargo_exit_code == 0 and .inputs_reverified == true", recipe)
+        self.assertIn(".cargo_exit_code == 0 and .inputs_reverified", recipe)
         self.assertIn("roleInputRecords: $airbender_records", release)
         self.assertIn('export PROVER_SOURCE_DIR="${GITHUB_WORKSPACE}"', recipe)
         cpu = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
@@ -303,7 +305,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
         raw = (ROOT / path).read_bytes()
         self.assertEqual(raw.count(copy), 1)
         self.assertEqual(raw.count(crypto_copy), 1)
-        self.assertIn(b"COPY patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/\n", raw)
+        self.assertIn(b"COPY patches/v2-proving-sources.json patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/\n", raw)
         self.assertNotIn(b"patches/gpu32-memory.json", raw)
 
     def test_gpu_routes_require_opt_in_overlay_and_no_cpu_cache_argument(self):
@@ -338,7 +340,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
 
     def test_release_rejects_old_or_unknown_nvcc_before_backend_build(self):
         recipe = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
-        command = recipe.split('            nvcc_release=', 1)[1].split('            python3 .release-tooling/scripts/prepare-patched-gpu-backends.py', 1)[0]
+        command = recipe.split('            nvcc_release=', 1)[1].split('            python3 .release-tooling/scripts/prepare-v2-proving-sources.py', 1)[0]
         lines = command.splitlines()
         command = 'nvcc_release=' + lines[0] + "\n" + "\n".join(line[12:] for line in lines[1:])
         self.assertLess(recipe.index('nvcc_release='), recipe.index('--prepare-bellman'))
@@ -412,7 +414,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
             source = re.sub(r"\\\r?\n\s*", " ", source)
             for stage in re.split(r"(?m)^FROM ", source)[1:]:
                 imports = [match.start() for match in re.finditer(
-                    r"(?m)^RUN .*?(?:python3 scripts/prepare-patched-gpu-backends\.py|"
+                    r"(?m)^RUN .*?(?:python3 scripts/prepare-v2-proving-sources\.py|"
                     r"bash scripts/cargo-with-patched-airbender\.sh)", stage)]
                 if not imports:
                     continue

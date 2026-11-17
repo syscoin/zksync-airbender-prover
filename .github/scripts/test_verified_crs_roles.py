@@ -245,13 +245,13 @@ if mutation == 'curl-failure':
                                    "internalParameters": {}, "resolvedDependencies": []},
                 "runDetails": {"builder": {"id": "offline-test"}}}
         args = ["jq", "-ce", "--argjson", "build_pins", json.dumps(PINS)]
-        manifest = ROOT / "patches/airbender-fork-source.json"
+        manifest = ROOT / "patches/v2-proving-sources.json"
         spec = importlib.util.spec_from_file_location("gpu_image_identity", ROOT / ".github/scripts/image-sbom-identity.py")
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
         airbender = helper.airbender_build_pins(manifest, ROOT / "Cargo.lock")
         args += ["--argjson", "airbender", json.dumps(airbender)]
-        gpu = helper.gpu_backend_build_pins(ROOT / "patches/gpu32-memory.json", ROOT / "Cargo.lock")
+        gpu = helper.gpu_backend_build_pins(manifest, ROOT / "Cargo.lock")
         for name in ("source_uri", "source_sha", "tooling_uri", "tooling_repository", "tooling_sha",
                      "app_bin_sha256", "app_text_sha256"):
             args += ["--arg", name, "offline-fixture"]
@@ -290,9 +290,9 @@ if mutation == 'curl-failure':
                     self.assertEqual(crs_dependencies,
                                      [{"uri": crs["url"], "digest": {"sha256": crs["sha256"]}}])
                     gpu_digests = [dependency["digest"] for dependency in definition["resolvedDependencies"]]
-                    for value in (gpu["manifest_sha256"], gpu["pins"]["crypto"]["patch_sha256"],
-                                  gpu["pins"]["bellman"]["patch_sha256"], gpu["selected_lock"]["combined_overlay_lock_sha256"]):
-                        self.assertIn({"sha256": value}, gpu_digests)
+                    self.assertIn({"sha256": gpu["manifest_sha256"]}, gpu_digests)
+                    self.assertIn({"gitCommit": gpu["protocol"]["commit"]}, gpu_digests)
+                    self.assertIn({"gitCommit": gpu["bellman_cuda"]["commit"]}, gpu_digests)
                 # A missing GPU closure or falsely attributed FRI closure fails closed.
                 if component != "unknown":
                     wrong = None if crs is not None else gpu

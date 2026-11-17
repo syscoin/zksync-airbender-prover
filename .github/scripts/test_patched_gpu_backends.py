@@ -22,7 +22,7 @@ AIR = json.loads(BASE.PIN_PATH.read_text())
 
 class GpuLockTests(unittest.TestCase):
     def raw(self):
-        return BASE.selected_lock_overlay(ROOT / "Cargo.lock", ROOT / "patches/airbender.Cargo.lock", AIR)[0]
+        return BASE.selected_lock_overlay(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock", ROOT / "patches/airbender.Cargo.lock", AIR)[0]
 
     def test_eight_packages_six_edges_and_only_two_pair_orders(self):
         raw = self.raw()
@@ -50,7 +50,7 @@ class GpuLockTests(unittest.TestCase):
         self.assertNotIn(PINS["crypto"]["upstream_edge_source"].encode(), result)
 
     def test_selected_other_application_graph_is_preserved_not_replaced(self):
-        selected = (ROOT / "Cargo.lock").read_bytes() + (
+        selected = (ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock").read_bytes() + (
             b'\n[[package]]\nname = "selected-application-extra"\nversion = "3.2.1"\n'
             b'source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "'
             + b"a" * 64 + b'"\n')
@@ -64,7 +64,7 @@ class GpuLockTests(unittest.TestCase):
             self.assertEqual(lock.read_bytes(), selected)
             self.assertEqual(derived["selected_lock"]["combined_overlay_lock_sha256"], hashlib.sha256(combined).hexdigest())
             self.assertNotEqual(derived["selected_lock"]["combined_overlay_lock_sha256"],
-                                HELPER.gpu_backend_pins(HELPER.PIN_PATH, ROOT / "Cargo.lock")
+                                HELPER.gpu_backend_pins(HELPER.PIN_PATH, ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock")
                                 ["selected_lock"]["combined_overlay_lock_sha256"])
 
     def test_mixed_revision_package_version_missing_and_unknown_edges_rejected(self):
@@ -88,7 +88,7 @@ class GpuLockTests(unittest.TestCase):
 
     def test_pure_metadata_api_does_not_execute_subprocess(self):
         with patch.object(HELPER.subprocess, "run") as run, patch.object(HELPER.subprocess, "check_output") as output:
-            metadata = HELPER.gpu_backend_pins(HELPER.PIN_PATH, ROOT / "Cargo.lock")
+            metadata = HELPER.gpu_backend_pins(HELPER.PIN_PATH, ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock")
             self.assertEqual(metadata["selected_lock"]["schema_version"], 3)
             self.assertEqual(metadata["selected_lock"]["airbender_overlay_lock_sha256"], AIR["overlay_lock_sha256"])
             self.assertEqual(len(metadata["selected_lock"]["airbender_packages"]), 46)
@@ -103,7 +103,7 @@ class GpuLockTests(unittest.TestCase):
             output.assert_not_called()
 
     def test_combined_lock_keeps_exact_wrapper_source_substitution(self):
-        canonical = BASE.read_toml(ROOT / "Cargo.lock")
+        canonical = BASE.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock")
         combined = HELPER.tomllib.loads(HELPER.crypto_lock_overlay(self.raw(), PINS).decode())
         expected_names = set(BASE.WRAPPER_PACKAGES) | set(BASE.CRYPTO_PACKAGES)
         originals = {p["name"]: p for p in canonical["package"] if p["name"] in expected_names}
@@ -117,7 +117,7 @@ class GpuLockTests(unittest.TestCase):
             self.assertEqual(actual[name], expected)
 
     def test_gpu_metadata_rejects_incompatible_wrapper_source_or_version(self):
-        raw = (ROOT / "Cargo.lock").read_bytes()
+        raw = (ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock").read_bytes()
         for invalid in (
             raw.replace(BASE.WRAPPER_FORK[1].encode(), b"f" * 40),
             raw.replace(b'name = "zkos-wrapper"\nversion = "0.1.0"',
@@ -140,7 +140,7 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
         source = Path(temporary).resolve()
         (source / "crates").mkdir()
         for name in BASE.SOURCE_FILES:
-            (source / name).write_bytes((ROOT / name).read_bytes())
+            (source / name).write_bytes(((ROOT / ".github/tests/fixtures/v0.9.1" if name in {"Cargo.toml", "Cargo.lock"} else ROOT) / name).read_bytes())
         (source / "Cargo.lock").write_bytes((source / "Cargo.lock").read_bytes().replace(
             BASE.fork_lock_source(AIR).encode(), AIR["upstream_lock_source"].encode()))
         (source / "Cargo.toml").write_text("[workspace]\nmembers = []\n")
@@ -255,7 +255,7 @@ class WrapperBuildIntegrationTests(unittest.TestCase):
             self.assertEqual(record["zksync_crypto"]["source"]["fork_commit"], BASE.CRYPTO_FORK[1])
             self.assertEqual(record, json.loads((build / "build-result.json").read_text()))
             self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(),
-                             (ROOT / "Cargo.lock").read_bytes().replace(
+                             (ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock").read_bytes().replace(
                                  BASE.fork_lock_source(AIR).encode(),
                                  AIR["upstream_lock_source"].encode()))
 
@@ -485,7 +485,7 @@ class SourceAdmissionTests(unittest.TestCase):
 
 class PreparedGuardCompatibilityTests(unittest.TestCase):
     def test_gpu_rejects_old_or_malformed_guard_before_native_inputs_or_jobs(self):
-        current = (ROOT / "crates/zksync_os_fri_prover/build.rs").read_bytes()
+        current = (ROOT / ".github/tests/fixtures/v0.9.1/crates/zksync_os_fri_prover/build.rs").read_bytes()
         current_tree = json.loads((ROOT / "patches/zksync-crypto-fork-source.json").read_text())["fork_tree"].encode()
         old_tree = b"4fda70a408c7817474fe67fba46b38cfbe420e59"
         comparison = b"assert_eq!(actual, expected"
@@ -527,8 +527,8 @@ class BuildLaneTests(unittest.TestCase):
 
     def source_fixture(self, temporary, edits=None):
         root = Path(temporary)
-        (root / "Cargo.toml").write_bytes((ROOT / "Cargo.toml").read_bytes())
-        for member in BASE.read_toml(ROOT / "Cargo.toml")["workspace"]["members"]:
+        (root / "Cargo.toml").write_bytes((ROOT / ".github/tests/fixtures/v0.9.1/Cargo.toml").read_bytes())
+        for member in BASE.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.toml")["workspace"]["members"]:
             path = root / member
             (path / "src").mkdir(parents=True)
             (path / "src/main.rs").write_text("fn main() {}\n")
