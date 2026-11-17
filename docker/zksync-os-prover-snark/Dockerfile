@@ -16,7 +16,7 @@ COPY docker/install-build-toolchain.sh /usr/local/bin/install-build-toolchain
 RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 
 COPY docker/fetch-verified-crs.sh /usr/local/bin/fetch-verified-crs
-RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs cpu-snark /setup_2^25.key
+RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs cpu-snark /setup_2^22.key
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 COPY docker/zksync-os-prover-snark/entrypoint.sh /entrypoint.sh
-COPY --from=cpu-builder /setup_2^25.key /setup_2^25.key
+COPY --from=cpu-builder /setup_2^22.key /setup_2^22.key
 COPY --from=cpu-builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
 COPY --from=cpu-builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
 COPY --from=cpu-builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync_os_snark_prover /usr/bin/zksync_os_snark_prover

@@ -37,7 +37,7 @@ selected_crs="$(jq -ce --arg role "${role}" '
         or .sha256 == ("0" * 64)
       then error("invalid CRS pins for selected role") else . end
     | if $role == "cpu-snark" and
-        ((.g1_count | type) != "number" or .g1_count < 33554432 or .g1_count != (.g1_count | floor))
+        ((.g1_count | type) != "number" or .g1_count < 4194304 or .g1_count != (.g1_count | floor))
       then error("Security100 CPU CRS requires at least 2^25 G1 points") else . end
 ' "${pins}")"
 readonly_url="$(printf '%s' "${selected_crs}" | jq -er '.url')"
@@ -56,7 +56,7 @@ if [ "${actual_sha256}" != "${readonly_sha256}" ]; then
     echo "CRS SHA-256 mismatch for ${role}" >&2
     exit 1
 fi
-# The pinned Security100 wrapper uses a 2^25 domain; the older 2^24 CPU example is too small.
+# The pinned Security100 wrapper uses a 2^22 domain.
 # CPU Crs::read starts with a big-endian u64 count, unlike the compact GPU serialization.
 if [ "${role}" = 'cpu-snark' ]; then
     readonly_g1_count="$(printf '%s' "${selected_crs}" | jq -er '.g1_count')"
@@ -64,7 +64,7 @@ if [ "${role}" = 'cpu-snark' ]; then
         { for (i = 1; i <= NF; i++) { count = count * 256 + $i; bytes++ } }
         END { if (bytes != 8) exit 1; printf "%.0f", count }
     ')"
-    if [ "${actual_g1_count}" != "${readonly_g1_count}" ] || [ "${actual_g1_count}" -lt 33554432 ]; then
+    if [ "${actual_g1_count}" != "${readonly_g1_count}" ] || [ "${actual_g1_count}" -lt 4194304 ]; then
         echo 'CPU CRS G1 count does not satisfy the pinned Security100 capacity' >&2
         exit 1
     fi

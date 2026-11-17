@@ -60,7 +60,7 @@ prover_api_fake_fri_provers_enabled=false prover_api_fake_snark_provers_enabled=
 ```
 
 FRI does not need a trusted setup file. For SNARK proving, download the verified CRS for the
-chosen backend: Security100 CPU uses `crs/setup_2^25.key`, while GPU SNARK / the combined service use
+chosen backend: Security100 CPU uses `crs/setup_2^22.key`, while GPU SNARK / the combined service use
 `crs/setup_compact.key`. These serializations are not interchangeable; see [CRS instructions](crs/README.md).
 
 Sample usage for commands.
@@ -188,7 +188,7 @@ RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 sn
 RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124,http://localhost:3125,http://localhost:3126 --app-bin-path ./multiblock_batch.bin --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 
 # explicit CPU fallback: choose this before acquiring a job, not after a GPU error
-RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-cpu-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file 'crs/setup_2^25.key' --output-dir ./outputs --submission-dir "$PWD/output/snark-cpu-submissions"
+RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh snark-cpu-run -- cargo run --locked --release -p zksync_os_snark_prover --no-default-features --bin zksync_os_snark_prover -- run-prover --wrapper-cache-policy cpu-cold --sequencer-urls http://localhost:3124 --app-bin-path ./multiblock_batch.bin --trusted-setup-file 'crs/setup_2^22.key' --output-dir ./outputs --submission-dir "$PWD/output/snark-cpu-submissions"
 ```
 
 Specify optional `--iterations` argument to run SNARK prover N times and then exit.

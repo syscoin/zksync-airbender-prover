@@ -278,7 +278,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertNotIn("nvidia/cuda", cpu)
         self.assertNotIn("--gpu32", cpu)
         self.assertNotIn("setup_compact.key", cpu)
-        self.assertNotIn("setup_2^25.key", gpu)
+        self.assertNotIn("setup_2^22.key", gpu)
         self.assertIn("--gpu32 docker-snark", gpu)
         self.assertNotIn("--no-default-features", gpu)
         for image in ("zksync-os-prover-snark", "zksync-airbender-prover"):

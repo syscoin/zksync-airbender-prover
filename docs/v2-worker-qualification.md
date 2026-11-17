@@ -14,6 +14,8 @@ bash scripts/cargo-with-patched-airbender.sh --cpu v2-identity -- \
 
 Compare the app hashes with the retained witness manifests. Generate the app-bound VK using the same pinned wrapper and guest, then check the generated verifier reports that VK. Record the new commitment in a **copy** of the witness manifests before hashing each copy for the offline driver. Keep the execution statements and oracle words byte-for-byte intact.
 
+The CPU key-generation CRS uses the official log22 object at storage generation `1682086004975644`. Its SHA-256 is `f004b339bc9e05d81f87a82095e19984c2555826a5459e651b8b893aa5422ae5`. On the build server, all 4,194,304 uncompressed G1 encodings matched the corresponding prefix of the previously pinned log25 CRS, and the complete 264-byte two-G2 section matched (SHA-256 `2e43433b69004a905ab559d398f468cf973b88ce65a0881f762d6320d9c3782f`). The CPU download and point-decoding inputs shrink from 2,147,483,920 bytes to 268,435,728 bytes. GPU workers use the compact-format CRS.
+
 ## GPU rehearsal
 
 Build the native Bellman source with the rental GPU's compute architecture and release optimization. The repository's pinned compact CRS digest is recorded in docker/prover-build-pins.json. Use the normal source entry point to build the FRI driver, combiner and SNARK worker. The compact CRS is necessary for GPU SNARK key generation and proving.

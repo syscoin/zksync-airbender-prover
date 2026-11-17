@@ -39,7 +39,7 @@ class VerifiedCrsRoleTests(unittest.TestCase):
         self.bin_dir = self.directory / "bin"
         self.bin_dir.mkdir()
         self.fixture_pins = copy.deepcopy(PINS)
-        self.payloads = {"cpu-snark": (1 << 25).to_bytes(8, "big") + b"synthetic CPU CRS fixture\n",
+        self.payloads = {"cpu-snark": (1 << 22).to_bytes(8, "big") + b"synthetic CPU CRS fixture\n",
                          "gpu-snark": b"synthetic compact GPU fixture\n"}
         for role, payload in self.payloads.items():
             (self.directory / role).write_bytes(payload)
@@ -49,7 +49,7 @@ class VerifiedCrsRoleTests(unittest.TestCase):
                 "sha256": hashlib.sha256(payload).hexdigest(),
             }
             if role == "cpu-snark":
-                self.fixture_pins[key]["g1_count"] = 1 << 25
+                self.fixture_pins[key]["g1_count"] = 1 << 22
         self.pins_path = self.directory / "pins.json"
         self.save_pins()
         self.output = self.directory / "output.key"
@@ -127,8 +127,8 @@ if mutation == 'curl-failure':
                      ("size", 0), ("size", 1.5), ("size", "24"),
                      ("sha256", "a" * 63), ("sha256", "A" * 64),
                      ("sha256", "0" * 64), ("sha256", None),
-                     ("g1_count", 1 << 24), ("g1_count", None),
-                     ("g1_count", (1 << 25) + 0.5))
+                     ("g1_count", 1 << 21), ("g1_count", None),
+                     ("g1_count", (1 << 22) + 0.5))
         for field, value in mutations:
             with self.subTest(field=field, value=value):
                 self.fixture_pins = copy.deepcopy(original)
@@ -153,10 +153,10 @@ if mutation == 'curl-failure':
     def test_pinned_cpu_source_and_digest_are_distinct_from_compact(self):
         self.assertEqual(PINS["cpu_snark_crs"], {
             "url": "https://storage.googleapis.com/matterlabs-setup-keys-us/setup-keys/"
-                   "setup_2%5E25.key?generation=1682086010630627",
-            "size": 2147483920,
-            "sha256": "021fcc36428ff74352a94ff9ccdd6ef234e99e33e670c2507612994849aa1421",
-            "g1_count": 1 << 25,
+                   "setup_2%5E22.key?generation=1682086004975644",
+            "size": 268435728,
+            "sha256": "f004b339bc9e05d81f87a82095e19984c2555826a5459e651b8b893aa5422ae5",
+            "g1_count": 1 << 22,
         })
         self.assertEqual(PINS["crs"]["size"], 4831838468)
         self.assertEqual(PINS["crs"]["sha256"],
@@ -170,17 +170,17 @@ if mutation == 'curl-failure':
             source = (ROOT / "docker" / image / "Dockerfile").read_text()
             self.assertIn(f"fetch-verified-crs {role} /{filename}", source)
             self.assertIn(f"COPY --from=builder /{filename} /{filename}", source)
-            other = "setup_compact.key" if role == "cpu-snark" else "setup_2^25.key"
+            other = "setup_compact.key" if role == "cpu-snark" else "setup_2^22.key"
             if image == "zksync-os-prover-snark":
                 cpu, gpu = source.split("# SYSCOIN: Match the tested GPU32 backend's CUDA ABI", 1)
                 self.assertNotIn(other, gpu)
-                self.assertIn("fetch-verified-crs cpu-snark /setup_2^25.key", cpu)
-                self.assertIn("COPY --from=cpu-builder /setup_2^25.key /setup_2^25.key", cpu)
+                self.assertIn("fetch-verified-crs cpu-snark /setup_2^22.key", cpu)
+                self.assertIn("COPY --from=cpu-builder /setup_2^22.key /setup_2^22.key", cpu)
                 self.assertNotIn("setup_compact.key", cpu)
             else:
                 self.assertNotIn(other, source)
         fri = (ROOT / "docker/zksync-os-prover-fri/Dockerfile").read_text()
-        for forbidden in ("fetch-verified-crs", "setup_compact.key", "setup_2^25.key"):
+        for forbidden in ("fetch-verified-crs", "setup_compact.key", "setup_2^22.key"):
             self.assertNotIn(forbidden, fri)
 
     def test_readme_commands_match_crs_to_compiled_backend(self):
@@ -192,7 +192,7 @@ if mutation == 'curl-failure':
             tokens = shlex.split(line)
             path = tokens[tokens.index("--trusted-setup-file") + 1]
             if "--no-default-features" in tokens:
-                self.assertEqual(path, "crs/setup_2^25.key")
+                self.assertEqual(path, "crs/setup_2^22.key")
                 cpu_count += 1
             else:
                 self.assertIn("gpu", tokens)
@@ -213,7 +213,7 @@ if mutation == 'curl-failure':
                              {**PINS[key], "size": 2.5}):
                 with self.subTest(key=key, mutation=mutation):
                     self.assertNotEqual(validate({**PINS, key: mutation}).returncode, 0)
-        for count in (None, 1 << 24, (1 << 25) + 0.5):
+        for count in (None, 1 << 21, (1 << 22) + 0.5):
             self.assertNotEqual(validate({**PINS, "cpu_snark_crs": {
                 **PINS["cpu_snark_crs"], "g1_count": count,
             }}).returncode, 0)
@@ -221,8 +221,8 @@ if mutation == 'curl-failure':
             self.assertNotEqual(validate({**PINS, "snark_cuda_architectures": arch}).returncode, 0)
 
     def test_cpu_header_capacity_is_checked_even_with_matching_size_and_hash(self):
-        for header in ((1 << 24).to_bytes(8, "big"), (1 << 26).to_bytes(8, "big"),
-                       (1 << 25).to_bytes(8, "little"), b"short"):
+        for header in ((1 << 21).to_bytes(8, "big"), (1 << 26).to_bytes(8, "big"),
+                       (1 << 22).to_bytes(8, "little"), b"short"):
             with self.subTest(header=header):
                 # Recompute the synthetic fixture digest so failure must come from the header
                 # check, not the independent byte-count or checksum gates.
