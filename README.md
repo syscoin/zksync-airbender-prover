@@ -69,14 +69,12 @@ Use `-p` to select the worker package as well as `--bin`: selecting only a binar
 workspace root can unify other workers' GPU features and pull the SNARK CUDA backend into FRI.
 The isolated FRI GPU worker does not require `BELLMAN_CUDA_DIR`; GPU SNARK and combined workers do.
 
-Use the checked-in Cargo wrapper shown below for worker builds and runs. Every lane prepares exact
-Airbender and `zkos-wrapper` sources in disposable copies, including the diagnostic compatibility
-patch and buffered OS-RNG patch; the isolated FRI binary does not link the wrapper packages. GPU
-SNARK and combined builds select `--gpu32`, additionally applying the tested memory patches to
-pinned crypto-GPU and Bellman CUDA sources. The helper audits the complete lock overlay and leaves
-artifacts under the usual `target/` directory. Python 3.11+ or Python 3 with the distribution's
-`python3-tomli` package is required. Direct `cargo` worker builds omit these reviewed overlays; see
-[build overlay and provenance](docs/airbender-build-overlay.md).
+Use the checked-in Cargo wrapper for worker builds. It verifies the Airbender and protocol
+Git commits and trees resolved by `cargo metadata --locked --all-features`. The protocol
+monorepo supplies the wrapper, crypto and Rust GPU crates. GPU SNARK and combined builds
+select `--gpu32` to authenticate the stock native Bellman CUDA Release archive. A successful
+build records the source pins, Cargo.lock digest and application input hashes. Use Python
+3.11+ or install `python3-tomli` on Python 3.10. [V2 build provenance](docs/airbender-build-overlay.md)
 
 FRI requires a CUDA GPU. Airbender selects a bounded arena from available VRAM; the
 current V32 service validation used a 32 GiB RTX 5090. Physical 24 GiB operation is not
@@ -350,10 +348,9 @@ builds the CPU image. Release archives distinguish `zksync_os_snark_prover-...-g
 Build and resource admission must be requalified for the selected backend before running it.
 
 <!-- SYSCOIN: This section documents the downstream deployment and batching policy. -->
-The workspace retains the upstream Matter Labs Airbender `v0.6.0-rc.2` versions and applies
-the reviewed CSR execution guard and Security100 sizing/PoW corrections, including regenerated
-recursive guests. The build wrapper preserves the pinned startup-diagnostic compatibility patch;
-`--gpu32` adds the exact tested memory placement/setup changes without weakening proof checks.
+The V2 worker locks Syscoin's Airbender and protocol repos to the reviewed revisions in
+`patches/v2-proving-sources.json`. The app-bound log22 wrapper derives its verification key
+from the same Security100 guest chain used by FRI workers.
 The sole supported lane is protocol V32 / Execution
 V7 / Proving V8. Every real SNARK
 job must therefore contain at least two compatible FRI proofs; the
@@ -370,6 +367,9 @@ intentionally empty real batch is one option, but this repository does not autom
 Otherwise the range waits. A future upstream Airbender API could instead add an output-preserving
 extra unified pass before a singleton is wrapped. Duplicating a proof is not valid: stock
 aggregation hashes every input and would change the settlement public output.
+
+<details>
+<summary>Historical v0.9.1 proving sources, app identity and performance</summary>
 
 The release names belong to different repositories: `v0.6.0-rc.2` is the pinned Airbender proving
 stack, while the checked-in Syscoin guest below is based on final `zksync-os v0.4.0`.
@@ -487,6 +487,8 @@ ELF/guest-artifact outputs and task-local provenance are not release inputs. Reb
 this draft must produce a new build attestation; retained candidate binary attestations
 must not be relabelled with the release commit.
 
+</details>
+
 **This one is only needed if you want to manually upload.**
 
 **SYSCOIN:** Pick artifacts contain live bearer authority, so the client creates them owner-only
@@ -552,8 +554,8 @@ Bellman Cuda (see instructions below).
 ## Installing bellman-cuda
 
 ```shell
-# SYSCOIN: Exact GPU32 source postimages and source record; choose a fresh destination.
-python3 scripts/prepare-patched-gpu-backends.py --prepare-bellman "$PWD/bellman-cuda" && \
+# Choose a fresh destination for the source tree pinned by this worker.
+python3 scripts/prepare-v2-proving-sources.py --prepare-bellman "$PWD/bellman-cuda" && \
 cmake -Bbellman-cuda/build -Sbellman-cuda/ -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES='80;89;90;120' && \
 cmake --build bellman-cuda/build/
 ```

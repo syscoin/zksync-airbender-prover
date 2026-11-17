@@ -59,13 +59,12 @@ source ~/.bashrc
 
 ### 5. Clone repos
 
-Use the Syscoin repositories: the GPU32 preparer and pinned build helpers below are not in the
-upstream Matter Labs checkout. Until prover PR9 is merged, select its reviewed branch explicitly;
-after it is merged, use the merged default branch instead.
+Use the Syscoin prover release or reviewed candidate commit selected for the target sequencer.
 
 ```bash
-git clone https://github.com/syscoin/zksync-os-server.git # sequencer
-git clone --branch codex/gpu32-default-snark https://github.com/syscoin/zksync-airbender-prover.git # prover PR9
+git clone https://github.com/syscoin/zksync-os-server.git
+git clone https://github.com/syscoin/zksync-airbender-prover.git
+git -C zksync-airbender-prover checkout --detach "${PROVER_REVISION:?set the approved worker commit}"
 ```
 
 ### 6. Compile era-bellman-cuda
@@ -74,7 +73,7 @@ git clone --branch codex/gpu32-default-snark https://github.com/syscoin/zksync-a
 # needed for GPU SNARK / combined workers, not FRI or explicit CPU fallback.
 # From the parent directory of the repositories cloned in step 5. This creates a
 # fresh pinned GPU32 source directory and source record, never modifies a shared backend clone.
-python3 zksync-airbender-prover/scripts/prepare-patched-gpu-backends.py --prepare-bellman "$PWD/era-bellman-cuda"
+python3 zksync-airbender-prover/scripts/prepare-v2-proving-sources.py --prepare-bellman "$PWD/era-bellman-cuda"
 cmake -Bera-bellman-cuda/build -Sera-bellman-cuda/ -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES='80;89;90;120'
 cmake --build era-bellman-cuda/build/
 # and the following in your ~/.bashrc
@@ -94,27 +93,18 @@ PROVER_BUILD_PINS=zksync-airbender-prover/docker/prover-build-pins.json \
   sh zksync-airbender-prover/docker/fetch-verified-crs.sh gpu-snark zksync-airbender-prover/crs/setup_compact.key
 ```
 
-### 8. Start local L1
+### 8. Connect to a proving-enabled v32 sequencer
 
-```bash
-cd zksync-os-server
-anvil --load-state zkos-l1-state.json --port 8545
-```
+Use the operator's fresh v32 deployment and its intended settlement route. The worker and
+sequencer must register the same app-bound VK and program commitment. Set
+`prover_api_fake_fri_provers_enabled=false` and `prover_api_fake_snark_provers_enabled=false`
+on the sequencer, then start the workers using that deployment's prover API URL.
+[Syscoin v32 deployment and build instructions](https://github.com/syscoin/zksync-os-server)
 
-### 9. Start sequencer (with proving enabled)
+### 9. Start FRI prover
 
-```bash
-# in a new terminal/session
-cd zksync-os-server
-prover_api_fake_fri_provers_enabled=false prover_api_fake_snark_provers_enabled=false cargo run --release
-```
-
-### 10. Start FRI prover
-
-The checked-in wrapper prepares pinned Airbender and `zkos-wrapper` sources, with the CUDA
-compatibility and buffered OS-RNG patches, in isolated copies; the FRI binary does not link the
-wrapper packages. See [build overlay](airbender-build-overlay.md). The helper preserves package
-selection, the caller's working directory, and the normal `target/` artifact location.
+The build helper validates the selected Cargo.lock and the Airbender and protocol Git trees
+before starting the worker. [V2 build provenance](airbender-build-overlay.md)
 
 ```bash
 # in a new terminal/session
@@ -140,7 +130,7 @@ cargo run --release -- --rpc-url 'http://127.0.0.1:3050' --rich-privkey 0x772682
 ```bash
 # in same terminal session as the FRI prover, but first cancel FRI prover
 ulimit -s 300000
-RUST_BACKTRACE=full RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-url http://localhost:3124 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
+RUST_BACKTRACE=full RUST_MIN_STACK=267108864 bash scripts/cargo-with-patched-airbender.sh --gpu32 snark-run -- cargo run --locked --release -p zksync_os_snark_prover --features gpu --bin zksync_os_snark_prover -- run-prover --sequencer-urls http://localhost:3124 --trusted-setup-file crs/setup_compact.key --output-dir ./outputs --submission-dir "$PWD/output/snark-submissions"
 ```
 
 > NOTE: Even if you have enough VRAM to run both processes, by default, the provers will simply consume all the VRAM available. You can either run SNARK or FRI at any one given time. There's also the intermitent (that runs some FRIs, then a SNARK, etc.), you can read more in the main [README](https://github.com/matter-labs/zksync-airbender-prover), under [Usage section](https://github.com/matter-labs/zksync-airbender-prover?tab=readme-ov-file#usage). Look for `ZKsync OS Prover Service`.
