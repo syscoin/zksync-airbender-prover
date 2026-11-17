@@ -1,6 +1,6 @@
 # V2 worker qualification
 
-The source graph is pinned in Cargo.lock and patches/v2-proving-sources.json. The worker uses the Syscoin v32 guest, Security100 and the app-bound log22 wrapper. The candidate key registry stays inactive until qualification completes.
+The source graph is pinned in Cargo.lock and patches/v2-proving-sources.json. The worker uses the Syscoin v32 guest, Security100 and the app-bound log22 wrapper. The app-bound verification key hash is `0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97`. The underlying guest SHA-256 is `0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6` and the resulting Security100 program commitment is `0x05080df2ee1edeb1d3d13f9a193a00a3bf5ca2115bfa675b29c1baaef289d7e9`. A different guest requires its own key and verifier.
 
 ## Derive the guest commitment on the build server
 
@@ -33,3 +33,27 @@ bash scripts/cargo-with-patched-airbender.sh --gpu32 v2-snark -- cargo build --l
 Generate and independently verify both FRI proofs over the retained consecutive batches. Combine them in order and check the combined public input and registered program commitment. Prove the app-bound wrapper and save the native proof, VK, serialized contract calldata, measurements and source receipts before cancelling the rental. The qualification controller can test the production-mode Gateway router with that calldata on an isolated EVM and repeat the check on a production-verifier rehearsal.
 
 [FRI driver](offline_candidate_fri.md) · [Combine driver](offline_candidate_combine.md)
+
+## Measured default prover
+
+The released v0.9.1 executables and the V2 worker processed the same ordered pair of native v32 batch witnesses on one RTX 5090 with 32,607 MiB visible VRAM, CUDA 12.9, and 32 logical processors available to each worker. A separate CPU host verified both FRI packets against the native witness statements and candidate commitment. The first V2 settlement proof passed all three native wrapper checks. On an isolated Prague EVM, the generated PLONK verifier and the production-mode dual router each accepted that proof. The reserved-header check reverted with selector `0x31967fc6`. The deployed PLONK runtime SHA-256 was `7b80b9e3407b30ed85491b4933aa542dc3dadef654314cc9ea39e458e56e47df`. Its canonical 44 contract words matched the submitted worker packet, and its one public input matched the trusted two-batch settlement statement. These minimal batches cover the native v32/V8 proving path.
+
+| Same two native batches | Released v0.9.1 | V2 candidate |
+| --- | ---: | ---: |
+| FRI process start to first lease | 104.351 s | 51.373 s |
+| FRI batch 1 from lease to submission | 7.647 s | 7.313 s |
+| FRI batch 2 from lease to submission | 4.035 s | 4.835 s |
+| First two-batch merge in the worker | 7.769 s | 5.605 s |
+| First RISC wrapper GPU proving pass | 52.514 s | 50.785 s |
+| First compression GPU proving pass | 1.252 s | 1.402 s |
+| First final PLONK GPU proving pass | 99.406 s | 13.405 s |
+| First SNARK job, full native worker measurement | 164.010 s | 71.611 s |
+
+The final PLONK domain shrank from 2²⁵ to 2²². Phase-3 key setup fell from 133.161 s to 16.702 s. The RISC wrapper still reserved 33,139,720,192 device bytes during setup. Across six additional contiguous minimal batches, Airbender's FRI allocator recorded 27.049 GiB of live suballocations in its 28 GiB normal arena. NVIDIA sampled 29,432 MiB of total card use in that run at 500 ms intervals. Arena high-water and total board residency measure different quantities.
+
+| Retained identity | SHA-256 |
+| --- | --- |
+| Final CPU-generated SNARK VK JSON | `2340c5d66845ebc6d9bf85cebbfdc199d730d42caf4d2902809319f0a2624146` |
+| Ordered V2 FRI payload checked on CPU | `54099da5001d9ad2f686a76fa043610133d733c9fc3f313c14d2a23f17ef09e5` |
+| First V2 native SNARK JSON | `1609630e96afe9216176f59b30d2976514ccafaaa6fe0f8721e40021488c5c36` |
+| First V2 canonical calldata JSON | `12a9af9a1677da40d14b38e8423274ca1b69cf6b60b5a2af53a84eaa9db85b51` |

@@ -4,11 +4,10 @@ This repo contains the Prover Service implementation for ZKsync OS Airbender pro
 
 ## Syscoin V2 candidate
 
-The candidate targets the Syscoin v32 guest, Security100 recursion and an app-bound
-PLONK wrapper with a 2²² domain. The worker's protocol registry stays inactive
-until the replacement key and commitment are independently qualified against the
-Gateway verifier. The released v0.9.1 worker remains available for the current
-testnet. [Candidate qualification](docs/v2-worker-qualification.md)
+The candidate registers the retained Syscoin v32 guest with Security100 recursion
+and the app-bound 2²² PLONK wrapper. Its settlement VK is
+`0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97`.
+The released v0.9.1 worker serves the existing testnet verifier. [Candidate qualification](docs/v2-worker-qualification.md)
 
 ## Overview
 
