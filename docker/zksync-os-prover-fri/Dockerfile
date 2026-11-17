@@ -25,7 +25,7 @@ COPY patches/zksync-crypto-fork-source.json ./patches/
 
 # SYSCOIN: Match the locked Security100 GPU FRI build published by release-bins.yml.
 # Select the package too: --bin alone lets workspace GPU features enable the SNARK backend.
-RUN AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/fri-airbender-build-inputs.json \
+RUN V2_BUILD_ARTIFACT_DIR=/usr/src/zksync/role-artifacts AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/fri-airbender-build-inputs.json \
     bash scripts/cargo-with-patched-airbender.sh docker-fri -- \
     cargo build --locked --profile release --target x86_64-unknown-linux-gnu \
     -p zksync_os_fri_prover --bin zksync_os_fri_prover --features gpu
@@ -38,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
 COPY --from=builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
-COPY --from=builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync_os_fri_prover /usr/bin/zksync_os_fri_prover
+COPY --from=builder /usr/src/zksync/role-artifacts/zksync_os_fri_prover /usr/bin/zksync_os_fri_prover
 COPY --from=builder /usr/src/zksync/fri-airbender-build-inputs.json /usr/share/syscoin-prover/airbender-build-inputs.json
 
 ENTRYPOINT ["zksync_os_fri_prover"]

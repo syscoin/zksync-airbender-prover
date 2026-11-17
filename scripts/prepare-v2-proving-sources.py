@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build the V2 worker from the locked, unified Airbender and wrapper/crypto Git graph."""
+import hashlib
 import importlib.util
 import json
 import os
@@ -69,6 +70,16 @@ def validate_graph(workspace, pins, environment):
     return roots
 
 
+def bind_build_cache(environment, target, input_hashes, pins, native_record, tooling):
+    # Cargo can treat a different checkout's older source mtimes as fresh. A changed
+    # local build script or native archive must also invalidate its dependent crates.
+    inputs = {"application": input_hashes, "sources": pins, "native": native_record, "tooling": tooling}
+    key = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    build_dir = target / "v2-build-cache" / key
+    environment["CARGO_BUILD_BUILD_DIR"] = str(build_dir)
+    return build_dir, key
+
+
 def main(args):
     pins = base.json_document(ROOT / PIN_FILE)
     if len(args) == 2 and args[0] == "--prepare-bellman":
@@ -115,6 +126,14 @@ def main(args):
     marker_digest = base.sha256(marker)
     tooling = {relative: base.sha256(ROOT / relative) for relative in (str(PIN_FILE), "scripts/prepare-v2-proving-sources.py",
               "scripts/cargo-with-patched-airbender.sh", "scripts/prepare-patched-airbender.py", "scripts/pinned_source_checkout.py")}
+    build_dir, build_key = bind_build_cache(environment, target, input_hashes, pins, native_record, tooling)
+    artifact_dir = Path(environment.get("V2_BUILD_ARTIFACT_DIR", workspace / "artifacts"))
+    if cargo[1] == "build":
+        base.require(artifact_dir.is_absolute(), "artifact output directory must be absolute")
+        artifact_dir.mkdir(mode=0o700, exist_ok=False)
+        # Cargo publishes here while it still owns its build lock. Other revisions
+        # may use the conventional target path as soon as this invocation returns.
+        command[2:2] = ["-Z", "unstable-options", "--artifact-dir", str(artifact_dir)]
     records = [Path(environment[key]) for key in ("AIRBENDER_BUILD_ATTESTATION", "GPU_BACKEND_BUILD_ATTESTATION") if key in environment]
     for path in records:
         base.require(path.is_absolute() and not path.exists(), "attestation output must be fresh and absolute")
@@ -132,7 +151,15 @@ def main(args):
         check_checkout(native, pins["bellman_cuda"], native=True)
         base.checked_hash(library, native_record["library_sha256"])
         base.checked_hash(cache, native_record["cmake_cache_sha256"])
-    receipt = {"label": args[0], "cargo_exit_code": 0, "inputs_reverified": True,
+    artifact_hashes = {}
+    if cargo[1] == "build":
+        for output in sorted(artifact_dir.rglob("*")):
+            base.require(not output.is_symlink(), f"unexpected artifact symlink: {output}")
+            if output.is_file():
+                artifact_hashes[str(output.relative_to(artifact_dir))] = base.sha256(output)
+    receipt = {"build_cache_sha256": build_key, "cargo_build_dir": str(build_dir),
+               "artifact_dir": str(artifact_dir) if cargo[1] == "build" else None,
+               "artifact_sha256": artifact_hashes, "label": args[0], "cargo_exit_code": 0, "inputs_reverified": True,
                "workspace": str(workspace), "cargo_target_dir": str(target), "source_roots": roots,
                "tooling_sha256": tooling, "marker_sha256": marker_digest,
                "schema": "syscoin-v2-worker-build-v1", "sources": pins, "cargo_lock_sha256": base.sha256(workspace / "Cargo.lock"),

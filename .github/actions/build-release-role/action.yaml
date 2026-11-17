@@ -122,7 +122,10 @@ runs:
           jq -e '.native == null' "${ROLE}-airbender-build-inputs.json" >/dev/null
         fi
         mkdir -p release-role
-        cp "target/${TARGET}/${RELEASE_PROFILE}/${binary}" "release-role/${binary}"
+        artifact_dir="$(jq -er '.artifact_dir' "${ROLE}-airbender-build-inputs.json")"
+        binary_hash="$(jq -er --arg binary "${binary}" '.artifact_sha256[$binary] | select(test("^[0-9a-f]{64}$"))' "${ROLE}-airbender-build-inputs.json")"
+        cp "${artifact_dir}/${binary}" "release-role/${binary}"
+        echo "${binary_hash}  release-role/${binary}" | sha256sum --check --strict
         cp "${ROLE}-airbender-build-inputs.json" release-role/
         archive="${binary}-${BUILD_TAG}-${TARGET}-${kind}.tar.gz"
         tar -czf "${archive}" -C release-role "${binary}" "${ROLE}-airbender-build-inputs.json"

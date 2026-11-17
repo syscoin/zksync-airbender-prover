@@ -36,7 +36,7 @@ COPY patches ./patches
 
 # SYSCOIN: Match the locked GPU combined-service build published by release-bins.yml.
 RUN BELLMAN_CUDA_DIR=/opt/bellman-cuda \
-    AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/combined-airbender-build-inputs.json \
+    V2_BUILD_ARTIFACT_DIR=/usr/src/zksync/role-artifacts AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/combined-airbender-build-inputs.json \
     bash scripts/cargo-with-patched-airbender.sh --gpu32 docker-combined -- \
     cargo build --locked --profile release \
     --target x86_64-unknown-linux-gnu -p zksync_os_prover_service \
@@ -52,7 +52,7 @@ COPY docker/zksync-airbender-prover/entrypoint.sh /entrypoint.sh
 COPY --from=builder /setup_compact.key /setup_compact.key
 COPY --from=builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
 COPY --from=builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
-COPY --from=builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync-os-prover-service /usr/bin/zksync-airbender-prover
+COPY --from=builder /usr/src/zksync/role-artifacts/zksync-os-prover-service /usr/bin/zksync-airbender-prover
 COPY --from=builder /usr/src/zksync/combined-airbender-build-inputs.json /usr/share/syscoin-prover/airbender-build-inputs.json
 
 RUN chmod 0755 /entrypoint.sh
