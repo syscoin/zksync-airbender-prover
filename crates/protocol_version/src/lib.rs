@@ -84,9 +84,9 @@ struct BinMd5Sum(&'static str);
 // to the reproducible guest and its successfully generated Security100 verification key.
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 // Set only after the app-bound V2 key agrees with the generated Gateway verifier.
-const SYSCOIN_VK_HASH: &str = ZERO_VK_HASH;
+pub const SYSCOIN_VK_HASH: &str = ZERO_VK_HASH;
 const SYSCOIN_APP_MD5: &str = "1bc285f1bbde995134d483c4e75ee204";
-const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([0; 8]);
+pub const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([0; 8]);
 
 /// SYSCOIN: The sole canonical lane is protocol V32, Execution V7, Proving V8.
 /// It uses the patched zksync-os v0.4.0 app with compact Bitcoin DA.

@@ -6,7 +6,9 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use clap::Parser;
-use protocol_version::SupportedProtocolVersions;
+use protocol_version::{
+    SupportedProtocolVersions, SYSCOIN_PROGRAM_COMMITMENT, SYSCOIN_VK_HASH as VK,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -38,8 +40,11 @@ use zksync_sequencer_proof_client::{
 
 const BIN_SHA: &str = "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6";
 const TEXT_SHA: &str = "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a";
-const PROGRAM: &str = "0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975";
-const VK: &str = "0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153";
+fn registered_program() -> &'static str {
+    static VALUE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| SYSCOIN_PROGRAM_COMMITMENT.to_string());
+    VALUE.as_str()
+}
 // Exact canonical GPU CRS in docker/prover-build-pins.json; never use CPU CRS here.
 const CRS_BYTES: u64 = 4_831_838_468;
 const CRS_SHA: &str = "90d1dea94da665d5741dcc6e9ffc1af23a29669f950a6d599a6ccfee4cfb81bd";
@@ -201,7 +206,7 @@ fn metadata_outputs(metadata: &Metadata) -> Result<[u32; 16]> {
             && metadata.batch_id <= u32::MAX as u64
             && metadata.app_bin_sha256 == BIN_SHA
             && metadata.app_text_sha256 == TEXT_SHA
-            && metadata.expected_security100_program_commitment == PROGRAM
+            && metadata.expected_security100_program_commitment == registered_program()
             && (1..=384 * 1024 * 1024 / 4).contains(&metadata.prover_input_words),
         "metadata identity mismatch"
     );
@@ -236,7 +241,7 @@ fn metadata_outputs(metadata: &Metadata) -> Result<[u32; 16]> {
         "invalid DA target"
     );
     let public = hash(&metadata.expected_public_input_hash, true)?;
-    let program = hash(PROGRAM, true)?;
+    let program = hash(registered_program(), true)?;
     let mut result = [0; 16];
     for i in 0..8 {
         result[i] = u32::from_le_bytes(public[4 * i..4 * i + 4].try_into().unwrap());
@@ -396,7 +401,7 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
             && verified["to_batch_number"] == manifest.batches.last().unwrap().batch_id
             && verified["manifest_sha256"] == args.manifest_sha256
             && verified["receipts_sha256"] == args.fri_receipts_sha256
-            && verified["program_commitment"] == PROGRAM
+            && verified["program_commitment"] == registered_program()
             && verified["security_level"] == 100
             && verified["target"] == "recursion-unified"
             && verified["gpu_enabled"] == false
@@ -449,7 +454,7 @@ fn load_jobs(args: &Args) -> Result<Vec<Job>> {
                 && receipt["metadata_sha256"] == batch.metadata_sha256
                 && receipt["prover_input_sha256"] == metadata.prover_input_sha256
                 && receipt["expected_public_input_hash"] == metadata.expected_public_input_hash
-                && receipt["expected_security100_program_commitment"] == PROGRAM,
+                && receipt["expected_security100_program_commitment"] == registered_program(),
             "FRI receipt binding mismatch"
         );
         let proof_hash = string(&receipt, "proof_sha256")?;
@@ -895,7 +900,7 @@ async fn run(args: Args) -> Result<()> {
                 .program_commitment_for(VK)
                 .map(|v| v.to_string())
                 .as_deref()
-                == Some(PROGRAM),
+                == Some(registered_program()),
         "registry mismatch"
     );
     // Authenticate and decode one range at a time; retain no proof cohort in memory.
@@ -1221,7 +1226,7 @@ mod tests {
         let metadata = Metadata {
             schema_version:1, batch_id:24, app_bin_sha256:BIN_SHA.into(), app_text_sha256:TEXT_SHA.into(),
             prover_input_sha256:"1".repeat(64), prover_input_words:1,
-            expected_public_input_hash:format!("0x{}", "2".repeat(64)), expected_security100_program_commitment:PROGRAM.into(),
+            expected_public_input_hash:format!("0x{}", "2".repeat(64)), expected_security100_program_commitment:registered_program().into(),
             context:serde_json::from_value(json!({"chain_id":57001,"settlement_layer_chain_id":31337,
                 "state_before":"before","state_after":"after","first_block_number":24,"last_block_number":24,
                 "transaction_count":count,"pubdata_mode":"Blobs"})).unwrap(),
