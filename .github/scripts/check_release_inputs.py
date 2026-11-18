@@ -13,6 +13,29 @@ GUARD_PATH = Path(__file__).with_name("check_crypto_bigint_scope.py")
 SPEC = importlib.util.spec_from_file_location("check_crypto_bigint_scope", GUARD_PATH)
 GUARD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GUARD)
+IDENTITY_PATH = Path(__file__).with_name("image-sbom-identity.py")
+SPEC = importlib.util.spec_from_file_location("release_source_identity", IDENTITY_PATH)
+IDENTITY = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(IDENTITY)
+V2_PINS = "patches/v2-proving-sources.json"
+
+
+def validate_package_versions(data, relative, members):
+    packages = tomllib.loads(data.decode())["package"]
+    for name, expected in members.items():
+        matches = [p for p in packages if p["name"] == name and "source" not in p]
+        if len(matches) != 1 or matches[0]["version"] != expected:
+            raise ValueError(relative + ": workspace package version differs for " + name)
+
+
+def validate_legacy_locks(root, members):
+    pins = json.loads((root / "patches/airbender-fork-source.json").read_text())
+    for relative, pin in (("Cargo.lock", "canonical_lock_sha256"),
+                          ("patches/airbender.Cargo.lock", "overlay_lock_sha256")):
+        data = (root / relative).read_bytes()
+        if hashlib.sha256(data).hexdigest() != pins[pin]:
+            raise ValueError(relative + ": lock hash differs from pinned hash")
+        validate_package_versions(data, relative, members)
 
 
 def validate(root):
@@ -28,17 +51,15 @@ def validate(root):
         if package["name"] in members:
             raise ValueError("duplicate workspace member")
         members[package["name"]] = version if package["version"] == {"workspace": True} else package["version"]
-    pins = json.loads((root / "patches/airbender-fork-source.json").read_text())
-    for relative, pin in (("Cargo.lock", "canonical_lock_sha256"),
-                          ("patches/airbender.Cargo.lock", "overlay_lock_sha256")):
-        data = (root / relative).read_bytes()
-        if hashlib.sha256(data).hexdigest() != pins[pin]:
-            raise ValueError(relative + ": lock hash differs from pinned hash")
-        packages = tomllib.loads(data.decode())["package"]
-        for name, expected in members.items():
-            matches = [p for p in packages if p["name"] == name and "source" not in p]
-            if len(matches) != 1 or matches[0]["version"] != expected:
-                raise ValueError(relative + ": workspace package version differs for " + name)
+    if (root / V2_PINS).exists() or (root / V2_PINS).is_symlink():
+        # V2 builds use one locked graph. Its reviewed scope binds the lock bytes;
+        # historical overlay hashes must not be rewritten to describe this graph.
+        pins = GUARD.regular_input(root, V2_PINS)
+        lock = GUARD.regular_input(root, "Cargo.lock")
+        IDENTITY.v2_proving_pins(pins, lock)
+        validate_package_versions(lock.read_bytes(), "Cargo.lock", members)
+    else:
+        validate_legacy_locks(root, members)
     GUARD.check_scope(root)
 
 

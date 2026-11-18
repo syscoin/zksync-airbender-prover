@@ -26,8 +26,8 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      # Refuse to create a tag from an incomplete version bump. Release PRs
-      # must update both lockfiles and the reviewed dependency-exception scope.
+      # Refuse to create a tag from an incomplete version bump. Release PRs must
+      # update the V2 lock and the reviewed dependency scope.
       - name: Verify release inputs
         run: python3 .github/scripts/check_release_inputs.py
       - name: Prepare release
