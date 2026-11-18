@@ -3396,7 +3396,7 @@ dependencies = [
 
 [[package]]
 name = "protocol_version"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "sha2 0.10.9",
 ]
@@ -5829,7 +5829,7 @@ dependencies = [
 
 [[package]]
 name = "zksync_os_fri_prover"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5855,7 +5855,7 @@ dependencies = [
 
 [[package]]
 name = "zksync_os_prover_service"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5878,7 +5878,7 @@ dependencies = [
 
 [[package]]
 name = "zksync_os_snark_prover"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5921,7 +5921,7 @@ dependencies = [
 
 [[package]]
 name = "zksync_sequencer_proof_client"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",

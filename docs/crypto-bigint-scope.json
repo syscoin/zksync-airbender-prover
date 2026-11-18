@@ -1,8 +1,8 @@
 {
   "advisory": "RUSTSEC-2026-0387",
   "inputs": {
-    "Cargo.lock": "edfb148f44574f893ce5d58d2ffbbd683ba8649afbc1521ed9110d3a283c8e4d",
-    "Cargo.toml": "0d47c29b8c2420f4991cce340792daf3a86d03f97ea2afca46bee1a3dd1e2c13",
+    "Cargo.lock": "04250d42882f0a71c0b7740091abda5cbd8131eb7a490433ae5215b677c6b93b",
+    "Cargo.toml": "63302f706632453065e32a5fb821a579795b13ea5899d9d62f817226c4e3ed02",
     "crates/protocol_version/Cargo.toml": "c85fdf596b47a03650249b64f71da6e8c9e5c27b4df882117aa1c1ffcd94c6df",
     "crates/protocol_version/src/lib.rs": "9a4d1d5ff6cedc4037aee26755c183a4d4d24676c397eb1d827bdca54c308d62",
     "crates/sequencer_proof_client/Cargo.toml": "876a4b164dd673ddfbca35da2787daaf4c840f75866fe393634d53c9aa2848a0",
