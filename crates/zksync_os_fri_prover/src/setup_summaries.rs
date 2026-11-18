@@ -10,8 +10,8 @@ use zksync_airbender_execution_utils::verifier_binaries::{
 };
 use zksync_airbender_execution_utils::RecursionLayer;
 
-const APP_BIN_SHA256: &str = "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6";
-const APP_TEXT_SHA256: &str = "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a";
+const APP_BIN_SHA256: &str = "9727a6d5c1301bc0fdb9ef7b46027917aef51c9158a7678dec1287bffb9b3e4d";
+const APP_TEXT_SHA256: &str = "4648aea720d7acb9317d90047b2640f85baacf15bfdfe340c21c03dc3984f932";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FriSetupPolicy {

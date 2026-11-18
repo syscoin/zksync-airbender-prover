@@ -11,16 +11,16 @@
   "wrapper_circuit_revision": "3c3472d93611bafcdadf928829cc3fb357c6b156",
   "airbender_patched_tree": "a6835b7eed85d9361c9e1aceb51a7988cbda09a8",
   "wrapper_circuit_patched_tree": "600c9220a99ac2b83504c3de4913828f8cf360e9",
-  "vk_hash": "0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97",
-  "program_commitment": "0x05080df2ee1edeb1d3d13f9a193a00a3bf5ca2115bfa675b29c1baaef289d7e9",
+  "vk_hash": "0x8e6285da659dac3cfff56dbae3bf445e1524b9f08a9270f19d3361a97f8ce990",
+  "program_commitment": "0xbf5be160cc4b6fff331c10d591691e0c5f62df1be058b2e0ee9c8fc8c8640c66",
   "app": {
     "bin": {
-      "size_bytes": 1329732,
-      "sha256": "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6"
+      "sha256": "9727a6d5c1301bc0fdb9ef7b46027917aef51c9158a7678dec1287bffb9b3e4d",
+      "size_bytes": 1329572
     },
     "text": {
-      "size_bytes": 1200064,
-      "sha256": "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a"
+      "sha256": "4648aea720d7acb9317d90047b2640f85baacf15bfdfe340c21c03dc3984f932",
+      "size_bytes": 1199892
     }
   },
   "recursion_unrolled": {
@@ -54,13 +54,13 @@
     3606817127
   ],
   "aux_params": [
-    84413938,
-    3995000497,
-    3553705882,
-    423231651,
-    3210519057,
-    1543137115,
-    700562094,
-    4069119977
+    3210469728,
+    3427495935,
+    857477333,
+    2439585292,
+    1600315163,
+    3763909344,
+    4003237832,
+    3361999974
   ]
 }

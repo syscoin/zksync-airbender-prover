@@ -84,10 +84,10 @@ struct BinMd5Sum(&'static str);
 // to the reproducible guest and its successfully generated Security100 verification key.
 const ZERO_VK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 pub const SYSCOIN_VK_HASH: &str =
-    "0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97";
-const SYSCOIN_APP_MD5: &str = "1bc285f1bbde995134d483c4e75ee204";
+    "0x8e6285da659dac3cfff56dbae3bf445e1524b9f08a9270f19d3361a97f8ce990";
+const SYSCOIN_APP_MD5: &str = "22af69bc5729c261f3043fd0e5f1870a";
 pub const SYSCOIN_PROGRAM_COMMITMENT: ProgramCommitment = ProgramCommitment([
-    0x05080df2, 0xee1edeb1, 0xd3d13f9a, 0x193a00a3, 0xbf5ca211, 0x5bfa675b, 0x29c1baae, 0xf289d7e9,
+    0xbf5be160, 0xcc4b6fff, 0x331c10d5, 0x91691e0c, 0x5f62df1b, 0xe058b2e0, 0xee9c8fc8, 0xc8640c66,
 ]);
 
 /// SYSCOIN: The sole canonical lane is protocol V32, Execution V7, Proving V8.
@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_app_bound_v2_lane_is_registered() {
+    fn only_the_rebuilt_guest_lane_is_registered() {
         let versions = SupportedProtocolVersions::default();
         versions.ensure_syscoin_release_constants().unwrap();
         assert_eq!(versions.vk_hashes(), [SYSCOIN_VK_HASH]);
@@ -235,6 +235,7 @@ mod tests {
             .contains("0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153"));
         assert!(!versions.contains(ZERO_VK_HASH));
         for historical in [
+            "0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97",
             "0x2ac3231439b0ba30b688a78eba0119fdfcf7a8364cf75037606cfb61f92c0b90",
             "0x229a4a5a7715fb19f8a5940e42d9cd53bb85f040bcf0f71c76612450fb8235b1",
             "0x62bd64130fba79809f37a652bc7957b87fa847fde30c4444d91fcf876357f144",
@@ -271,18 +272,18 @@ mod tests {
         let [version] = versions.versions.as_slice() else {
             panic!("expected one canonical version")
         };
-        assert_eq!(version.bin_md5sum.0, "1bc285f1bbde995134d483c4e75ee204");
+        assert_eq!(version.bin_md5sum.0, "22af69bc5729c261f3043fd0e5f1870a");
         let app_bin = include_bytes!("../../../multiblock_batch.bin");
         let app_text = include_bytes!("../../../multiblock_batch.text");
-        assert_eq!(app_bin.len(), 1_329_732);
-        assert_eq!(app_text.len(), 1_200_064);
+        assert_eq!(app_bin.len(), 1_329_572);
+        assert_eq!(app_text.len(), 1_199_892);
         assert_eq!(
             format!("{:x}", Sha256::digest(app_bin)),
-            "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6"
+            "9727a6d5c1301bc0fdb9ef7b46027917aef51c9158a7678dec1287bffb9b3e4d"
         );
         assert_eq!(
             format!("{:x}", Sha256::digest(app_text)),
-            "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a"
+            "4648aea720d7acb9317d90047b2640f85baacf15bfdfe340c21c03dc3984f932"
         );
         assert_eq!(version.program_commitment, SYSCOIN_PROGRAM_COMMITMENT);
     }

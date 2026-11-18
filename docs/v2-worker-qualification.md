@@ -1,6 +1,14 @@
 # V2 worker qualification
 
-The source graph is pinned in Cargo.lock and patches/v2-proving-sources.json. The worker uses the Syscoin v32 guest, Security100 and the app-bound log22 wrapper. The app-bound verification key hash is `0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97`. The underlying guest SHA-256 is `0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6` and the resulting Security100 program commitment is `0x05080df2ee1edeb1d3d13f9a193a00a3bf5ca2115bfa675b29c1baaef289d7e9`. A different guest requires its own key and verifier.
+## Reproducibly rebuilt Syscoin v32 guest
+
+The candidate guest binary has SHA-256 `9727a6d5c1301bc0fdb9ef7b46027917aef51c9158a7678dec1287bffb9b3e4d`. Its text section has SHA-256 `4648aea720d7acb9317d90047b2640f85baacf15bfdfe340c21c03dc3984f932`. The default Security100 base, unrolled and unified recursion fold produces `0xbf5be160cc4b6fff331c10d591691e0c5f62df1be058b2e0ee9c8fc8c8640c66`. A second Docker build reproduced the ELF, binary and text section. Two independent simulators returned the expected native statement for all eight contiguous v32 batch witnesses.
+
+The separately generated settlement key for this guest is `0x8e6285da659dac3cfff56dbae3bf445e1524b9f08a9270f19d3361a97f8ce990`.
+
+## Retained v32 guest comparison
+
+The earlier rehearsal used the retained Syscoin v32 guest, Security100 and the app-bound log22 wrapper. Its app-bound verification key hash was `0x9bb49673b5437ada0c0941bb7f35422456a5c7833dd8292bf17f29fe1e9baa97`. The retained guest SHA-256 was `0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6` and its Security100 program commitment was `0x05080df2ee1edeb1d3d13f9a193a00a3bf5ca2115bfa675b29c1baaef289d7e9`. A different guest requires its own key and verifier.
 
 ## Derive the guest commitment on the build server
 

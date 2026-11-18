@@ -38,8 +38,8 @@ use zksync_sequencer_proof_client::{
     MAX_SNARK_JOB_RESPONSE_BYTES,
 };
 
-const BIN_SHA: &str = "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6";
-const TEXT_SHA: &str = "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a";
+const BIN_SHA: &str = "9727a6d5c1301bc0fdb9ef7b46027917aef51c9158a7678dec1287bffb9b3e4d";
+const TEXT_SHA: &str = "4648aea720d7acb9317d90047b2640f85baacf15bfdfe340c21c03dc3984f932";
 fn registered_program() -> &'static str {
     static VALUE: std::sync::LazyLock<String> =
         std::sync::LazyLock::new(|| SYSCOIN_PROGRAM_COMMITMENT.to_string());
