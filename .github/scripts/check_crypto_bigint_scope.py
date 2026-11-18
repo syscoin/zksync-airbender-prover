@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fail closed when inputs to the reviewed crypto-bigint exception change.
+"""Fail closed when inputs to the reviewed crypto-bigint migration change.
 
 The checked-in scope is a review record. Updating it requires reviewing the
-exception again; this checker deliberately has no command to refresh it.
+resolved dependency graph again; this checker deliberately has no command to refresh it.
 """
 
 import argparse
@@ -15,10 +15,10 @@ import sys
 import tomllib
 
 ADVISORY = "RUSTSEC-2026-0387"
-CRYPTO_BIGINT_VERSION = "0.5.5"
+CRYPTO_BIGINT_VERSION = "0.7.11"
 CRYPTO_BIGINT_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
-CRYPTO_BIGINT_CHECKSUM = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
-DIRECT_PARENTS = {"boojum", "elliptic-curve"}
+CRYPTO_BIGINT_CHECKSUM = "914c195c4d7fbc5ed7f88d14cbf85914d5c664967658d43404b263913a477e82"
+DIRECT_PARENTS = {"boojum", "elliptic-curve", "primefield", "rfc6979"}
 LOCK_PATHS = ("Cargo.lock",)
 FIXED_INPUTS = (
     "Cargo.toml",
@@ -101,7 +101,7 @@ def check_lock(root, relative):
     expected = {"version": CRYPTO_BIGINT_VERSION, "source": CRYPTO_BIGINT_SOURCE,
                 "checksum": CRYPTO_BIGINT_CHECKSUM}
     require(all(bigint[0].get(key) == value for key, value in expected.items()),
-            relative + ": crypto-bigint identity changed; review the advisory exception")
+            relative + ": crypto-bigint identity changed; review the dependency graph")
 
     allowed_edges = {"crypto-bigint", "crypto-bigint " + CRYPTO_BIGINT_VERSION,
                      "crypto-bigint " + CRYPTO_BIGINT_VERSION + " (" + CRYPTO_BIGINT_SOURCE + ")"}
@@ -114,8 +114,8 @@ def check_lock(root, relative):
             if edge.split(" ", 1)[0] == "crypto-bigint":
                 require(edge in allowed_edges, relative + ": unknown crypto-bigint dependency edge")
                 parents.append(package.get("name"))
-    require(len(parents) == 2 and set(parents) == DIRECT_PARENTS,
-            relative + ": crypto-bigint direct parents changed; expected boojum and elliptic-curve")
+    require(len(parents) == len(DIRECT_PARENTS) and set(parents) == DIRECT_PARENTS,
+            relative + ": crypto-bigint direct parents changed")
 
 
 def check_scope(root, scope_path=None):
@@ -142,9 +142,13 @@ def check_scope(root, scope_path=None):
     advisories = read_toml(root, "deny.toml").get("advisories", {})
     require(isinstance(advisories, dict), "deny.toml: invalid advisories table")
     ignores = advisories.get("ignore", [])
-    require(isinstance(ignores, list) and all(isinstance(ignore, str) for ignore in ignores)
-            and ignores.count(ADVISORY) == 1,
-            "deny.toml must ignore exactly " + ADVISORY + " once for the reviewed exception")
+    require(isinstance(ignores, list)
+            and all(isinstance(ignore, str) or isinstance(ignore, dict)
+                    and isinstance(ignore.get("id"), str) for ignore in ignores),
+            "deny.toml: invalid advisory ignores")
+    require(all((ignore if isinstance(ignore, str) else ignore["id"]) != ADVISORY
+                for ignore in ignores),
+            "deny.toml must not ignore " + ADVISORY)
     for relative in LOCK_PATHS:
         check_lock(root, relative)
     actual = collect_inputs(root)
@@ -154,7 +158,7 @@ def check_scope(root, scope_path=None):
             "crypto-bigint scope file list changed; added=" + repr(added) + "; removed=" + repr(removed))
     changed = [relative for relative in actual if actual[relative] != expected[relative]]
     require(not changed,
-            "crypto-bigint scope inputs changed; review the advisory exception: " + ", ".join(changed))
+            "crypto-bigint scope inputs changed; review the dependency graph: " + ", ".join(changed))
     return len(actual)
 
 

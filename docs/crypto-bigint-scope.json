@@ -1,8 +1,8 @@
 {
   "advisory": "RUSTSEC-2026-0387",
   "inputs": {
-    "Cargo.lock": "9b7fafd90ff8477b1e8007b87ad798364eea4b4c4cf33cb45c98adf002ed291c",
-    "Cargo.toml": "9784aec9698c42e7b7655fd4f684cb8c0dac33e293bff1cb2e107b8068286420",
+    "Cargo.lock": "edfb148f44574f893ce5d58d2ffbbd683ba8649afbc1521ed9110d3a283c8e4d",
+    "Cargo.toml": "0d47c29b8c2420f4991cce340792daf3a86d03f97ea2afca46bee1a3dd1e2c13",
     "crates/protocol_version/Cargo.toml": "c85fdf596b47a03650249b64f71da6e8c9e5c27b4df882117aa1c1ffcd94c6df",
     "crates/protocol_version/src/lib.rs": "9a4d1d5ff6cedc4037aee26755c183a4d4d24676c397eb1d827bdca54c308d62",
     "crates/sequencer_proof_client/Cargo.toml": "876a4b164dd673ddfbca35da2787daaf4c840f75866fe393634d53c9aa2848a0",
@@ -40,8 +40,8 @@
     "crates/zksync_os_snark_prover/src/lib.rs": "d3cb4f9a34dd1192ae5aa419c9a1e24aa4796bc879a00799a58e3855c12d9f81",
     "crates/zksync_os_snark_prover/src/main.rs": "1f2e8697d287bc05baaf7ace16b0d9f817805c31a1cb70965cb057cf23af51d0",
     "crates/zksync_os_snark_prover/src/metrics.rs": "d354728d32c1261196c81d22c5bee5a8ac3a67033504a7cb8f38d331b41df278",
-    "deny.toml": "697d6787d854d7616ba2253d009351c2e7f42fc858cff2e67bc9e78e6b3aa7c9",
-    "patches/v2-proving-sources.json": "b8d29019f456650561716578596904859e27771905ede2cba40abe600ab4422e",
+    "deny.toml": "c8e333709ada8096ce987cdbb6252e793220752819cad81a65dfd26a2c3e7a06",
+    "patches/v2-proving-sources.json": "008c8412131322914e329faebe3ef6692fb201871ca44b7283bb0b429eec743c",
     "rust-toolchain.toml": "712ac2e83f5a100a1d5df2fecb07954238dd52a962690147fe93435a31afe495",
     "scripts/cargo-with-patched-airbender.sh": "7892fe4cf6559107a24139c961ed0c11a79d26b6a208bb8adbbb527ee6008613",
     "scripts/pinned_source_checkout.py": "e8c51573f1204d775bac50512f2c8d4712759ae91759293a70a2ff7329e5ede3",

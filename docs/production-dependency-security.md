@@ -66,65 +66,19 @@ Zstd frames at the exact decompressed limit and one byte over, malformed/truncat
 responses, post-acquisition failure classification for both FRI/SNARK picks, and
 successful compressed FRI payload/lease preservation. Existing gzip coverage remains.
 
-## crypto-bigint: one scoped exception
+## crypto-bigint 0.7.11
 
-[`RUSTSEC-2026-0387`](https://rustsec.org/advisories/RUSTSEC-2026-0387.html) covers
-secret-dependent timing in operations advertised as constant-time. It does not claim
-incorrect arithmetic or proof-verification bypass. Exploitability requires affected
-operations on secret values and an observable side channel.
+The worker lock uses the reviewed crates.io release `crypto-bigint 0.7.11` for
+Boojum, elliptic-curve, primefield and RFC 6979. The worker removes its previous
+exception for [RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html).
+The pinned Syscoin protocol revision supplies the wrapper and host crypto crates.
+The protocol's platform fork is used by its other workspaces and does not enter
+this worker's resolved dependency graph.
 
-`crypto-bigint 0.5.5` is present through Boojum in every worker. GPU SNARK and combined
-workers also reach it through `elliptic-curve` and legacy k256/p256 dependencies.
-Both immediate consumers require the 0.5 series, so changing the lock to 0.7.6 is not
-a compatible upgrade. The 0.5 implementation differs from the later implementation
-patched upstream; blindly applying the later diff is not a reviewed backport.
+CI checks the package's version, source, checksum and exact direct parents,
+rejects the advisory ignore and runs cargo-deny against the locked graph.
+`docs/crypto-bigint-scope.json` binds the reviewed lock, source pins, manifests
+and build inputs. Changes require a new scope review.
 
-The exception relies on these specific production call paths:
-
-* Boojum's `NonNativeFieldOverU16` really does perform bigint arithmetic on witness
-  values. It must not be described as only public modulus calculations. However,
-  the pinned wrapper's production RISC/compression circuits do not instantiate that
-  gadget. Compression fixes its verifier to `RiscWrapperCircuitBuilder`, and the
-  SNARK wrapper fixes its builder to that compression circuit.
-* GPU phases explicitly synthesize these same RISC and compression circuits, then
-  pass their external witness data to generic shivini proving code. Phase three
-  constructs this wrapper's `SnarkWrapperCircuit`. The availability of legacy EraVM
-  base-circuit dispatch in dependencies does not select it on these paths.
-* k256/p256 signing features are enabled in the legacy dependency graph. Their
-  presence is not the exclusion. The reviewed callers are signature recovery and
-  verification, not host signing-key/nonce arithmetic; they are also outside the
-  fixed wrapper circuits above.
-* Private SNARK padding randomness is handled by Bellman/BN256 field arithmetic.
-  No route from that randomness into crypto-bigint was found. The guest program is
-  an already-built input to the FRI simulator/prover; this host lockfile neither
-  establishes nor changes that guest's timing properties.
-
-The V2 review uses the Airbender and protocol commits and trees recorded in
-`patches/v2-proving-sources.json`. The protocol repository supplies the wrapper and
-crypto crates. The settlement-calldata exporter serializes a saved proof and its
-public inputs. The identity generator derives keys and commitments from the public
-program and CRS.
-
-| Source | Locations |
-| --- | --- |
-| Boojum | `gadgets/non_native_field/implementations/mod.rs`; `implementation_u16.rs` witness multiplication, inversion and conversion |
-| zkos-wrapper | `wrapper/src/circuits/compression.rs`; `circuits/snark_wrapper.rs`; `gpu/risc_wrapper.rs`; `gpu/compression.rs`; `gpu/snark.rs`; CPU padding in `wrapper/src/lib.rs` |
-| Legacy protocol | `protocol/crates/zk_evm_abstractions/src/precompiles/{ecrecover,secp256r1_verify}/legacy_backend.rs` and k256/p256 features in `protocol/crates/zkevm_opcode_defs/Cargo.toml` |
-| Native adapters | `scripts/prover-rental/job.py`, `worker.py`, `fri_session.py`, `serverless_worker.py` |
-
-The reviewed production wrapper does not invoke an affected host-secret arithmetic
-path. This is a static applicability conclusion, not a constant-time certification
-of the entire dependency, CPU, guest program or prover.
-
-CI permits only this advisory under this conclusion. Before cargo-deny runs,
-`.github/scripts/check_crypto_bigint_scope.py` checks the exact locked package
-identity and parents, reviewed application sources and manifests, unified proving
-source pins, build preparation tools and optional Cargo override configuration against
-`docs/crypto-bigint-scope.json`. New source files or changed inputs fail closed.
-The guard has no automatic refresh command. Review the paths again before updating
-the scope record; remove the exception when upgrading the consumers to patched bigint.
-
-Source preparation still verifies the actual dependency fork trees and patch hashes.
-No proving source identity, guest bytes, circuit definition, CRS or verification key
-is changed by this transport update. Rebuilding a worker is distinct from regenerating
-proving keys. GPU execution and deployed-image qualification remain separate checks.
+The worker's bundled commitment records the new protocol source revision and
+tree. Its guest, program commitment and verification-key digests are retained.

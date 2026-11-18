@@ -23,10 +23,9 @@ versions in both historical locks and matching `canonical_lock_sha256` and
 reviewed scope requires V2; removing its manifest does not enable a legacy
 release or bypass the scope check.
 
-The existing crypto-bigint exception is scoped to the exact manifests, locks,
-source, and pins. Review the advisory exception and **all** scope-input diffs
-against the checked-in main branch before recording a new scope. Once that
-review is complete, regenerate the scope input hashes with:
+The crypto-bigint migration is scoped to the exact manifests, lock, source and
+pins. The release gate requires the patched package and prohibits the advisory
+ignore. Review all scope-input diffs before recording new hashes:
 
 ```sh
 python3 - <<'PY'
