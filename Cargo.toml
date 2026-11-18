@@ -31,8 +31,8 @@ zksync_airbender_cli = { package = "cli", git = "https://github.com/syscoin/zksy
 riscv_transpiler = { git = "https://github.com/syscoin/zksync-airbender", rev = "27c4e9c4358b86ac92c878f44a748f6cbb42650c" }
 verifier_common = { git = "https://github.com/syscoin/zksync-airbender", rev = "27c4e9c4358b86ac92c878f44a748f6cbb42650c" }
 gpu_prover = { git = "https://github.com/syscoin/zksync-airbender", rev = "27c4e9c4358b86ac92c878f44a748f6cbb42650c", default-features = false }
-zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zksync-protocol", rev = "831d0cafca4e33d06c1783a5d0c05ad219088aa1", default-features = false, features = ["security_100"] }
-crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/syscoin/zksync-protocol", rev = "831d0cafca4e33d06c1783a5d0c05ad219088aa1" }
+zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/syscoin/zksync-protocol", rev = "96b3586b33645d86866935f46928328ac52d72a7", default-features = false, features = ["security_100"] }
+crypto_codegen = { package = "zksync_solidity_vk_codegen", git = "https://github.com/syscoin/zksync-protocol", rev = "96b3586b33645d86866935f46928328ac52d72a7" }
 
 # external dependencies
 anyhow = "1.0.103"
