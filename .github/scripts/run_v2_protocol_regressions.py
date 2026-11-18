@@ -50,6 +50,7 @@ def main(record_path, group):
         if selector == PROOF_POLICY_TEST:
             # Several lookup and specialization tests share the prove_simple prefix.
             command.append("--exact")
+        print(f"Running {package} lib tests matching {selector}", flush=True)
         output = subprocess.check_output(command, env=env, text=True)
         print(output, flush=True)
         counts = re.findall(r"^test result: ok\. (\d+) passed; 0 failed;", output, re.MULTILINE)

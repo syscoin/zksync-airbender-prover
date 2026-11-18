@@ -95,6 +95,10 @@ jobs:
       # Cargo tests workspace members only. Bind dependency tests to the successful worker build.
       - name: Run pinned wrapper source tests
         env:
+          # The fold-depth test derives full machine setups for three programs.
+          CARGO_PROFILE_TEST_OPT_LEVEL: "3"
+          CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
+          CARGO_PROFILE_TEST_OVERFLOW_CHECKS: "true"
           RUST_MIN_STACK: "33554432"
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: python3 -B .github/scripts/run_v2_protocol_regressions.py "${RUNNER_TEMP}/ci-test-airbender-inputs.json" wrapper
