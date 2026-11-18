@@ -65,3 +65,11 @@ The final PLONK domain shrank from 2²⁵ to 2²². Phase-3 key setup fell from 
 | Ordered V2 FRI payload checked on CPU | `54099da5001d9ad2f686a76fa043610133d733c9fc3f313c14d2a23f17ef09e5` |
 | First V2 native SNARK JSON | `1609630e96afe9216176f59b30d2976514ccafaaa6fe0f8721e40021488c5c36` |
 | First V2 canonical calldata JSON | `12a9af9a1677da40d14b38e8423274ca1b69cf6b60b5a2af53a84eaa9db85b51` |
+
+## Host memory source selection
+
+The guest binaries, recursion artifacts, Security100 commitment, log22 domain and registered verification key remain unchanged by this source selection. Historical measurements above retain their original source attribution.
+
+The pinned protocol source transfers owned setup storage into GPU conversion and releases unused host permutation columns. It changes host allocation lifetimes without changing the RISC, compression or SNARK circuit definitions.
+
+Pinned simulator memory remains the default. On qualified Linux GPU workers, explicitly set `AIRBENDER_SIMULATOR_MEMORY=demand-paged` to use anonymous demand-paged host RAM; set `pinned` or omit the variable to retain pinned memory. This affects host memory residency, not VRAM capacity or proof security parameters. The setting applies to FRI simulation and the SNARK worker's Airbender combiner. Compare complete corrected-guest workloads before enabling it for a fleet.

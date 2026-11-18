@@ -1,13 +1,13 @@
 {
   "airbender": {
     "repository": "https://github.com/syscoin/zksync-airbender",
-    "commit": "5a4928f651bb627ac5adf334fc6640bb6db5d79a",
-    "tree": "a6835b7eed85d9361c9e1aceb51a7988cbda09a8"
+    "commit": "27c4e9c4358b86ac92c878f44a748f6cbb42650c",
+    "tree": "f12852dbdb887cf7f14fc315737b6e83ef43d4e3"
   },
   "protocol": {
     "repository": "https://github.com/syscoin/zksync-protocol",
-    "commit": "3c3472d93611bafcdadf928829cc3fb357c6b156",
-    "tree": "600c9220a99ac2b83504c3de4913828f8cf360e9"
+    "commit": "175fb68cbb47ff6702ace7d104fc66b206da28ba",
+    "tree": "8b8b5d1b6fa0096c1606bd878b6992cf754f6b8d"
   },
   "bellman_cuda": {
     "repository": "https://github.com/matter-labs/era-bellman-cuda.git",

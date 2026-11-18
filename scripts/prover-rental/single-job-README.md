@@ -410,3 +410,21 @@ API contracts inspected 2026-09-30: [create](https://docs.runpod.io/api-referenc
 [get](https://docs.runpod.io/api-reference-v2/pods/get-a-pod),
 [terminate](https://docs.runpod.io/api-reference-v2/pods/terminate-a-pod),
 [GPU catalog pricing](https://docs.runpod.io/api-reference-v2/catalog/get-a-gpu-type).
+
+## Optional Linux simulator memory policy
+
+The default remains pinned simulator memory. For a qualified Linux GPU worker,
+set `AIRBENDER_SIMULATOR_MEMORY=demand-paged` in the trusted worker environment.
+The adapter forwards only `pinned` or `demand-paged` to both native stages and
+rejects any other supplied value before spawning. Warm FRI sessions use the same
+allowlist. This option does not change the guest, proof format, verification key
+or VRAM admission requirement.
+
+Direct Docker launches must pass the variable explicitly, for example
+`-e AIRBENDER_SIMULATOR_MEMORY=demand-paged`; a host shell export alone is not
+forwarded into a container. For managed rental images, bake the selected policy
+into the reviewed immutable image or use the operator-controlled worker launch
+environment. Input manifests cannot select it. Returning to `pinned` or omitting
+the variable restores the default. Record the actual native process policy with
+performance measurements; no demand-paged performance claim follows from the pin
+alone.
