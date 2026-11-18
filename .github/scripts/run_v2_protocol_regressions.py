@@ -14,6 +14,8 @@ spec = importlib.util.spec_from_file_location("v2_source", PREPARER)
 source = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(source)
 
+PROOF_POLICY_TEST = "cs::implementations::cs::test::prove_simple"
+
 TESTS = {
     "wrapper": ("zkos-wrapper", "zkos-wrapper", ("--no-default-features", "--features", "security_100"), {
         "buffered_os_rng::tests": 5,
@@ -25,6 +27,7 @@ TESTS = {
     "boojum": ("crypto", "boojum", (), {
         "canonical_query_bits_accept_boundaries_and_match_native_indices": 1,
         "opening_precompute_matches_original_constraints_and_native_across_groups": 1,
+        PROOF_POLICY_TEST: 1,
         "cs::implementations::cs::test::prove_simple_specialized_with_lookups": 1,
     }),
 }
@@ -44,6 +47,9 @@ def main(record_path, group):
     for selector, expected in tests.items():
         command = ["cargo", "test", "--manifest-path", str(manifest), "--locked", "-p", package,
                    *features, "--lib", selector, "--", "--test-threads=1"]
+        if selector == PROOF_POLICY_TEST:
+            # Several lookup and specialization tests share the prove_simple prefix.
+            command.append("--exact")
         output = subprocess.check_output(command, env=env, text=True)
         print(output, flush=True)
         counts = re.findall(r"^test result: ok\. (\d+) passed; 0 failed;", output, re.MULTILINE)
