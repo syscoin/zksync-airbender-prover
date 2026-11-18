@@ -6,8 +6,8 @@
   },
   "protocol": {
     "repository": "https://github.com/syscoin/zksync-protocol",
-    "commit": "659e0dc9bbf16a8bee1feb71587a57f158dcffe5",
-    "tree": "e4d0ed03ee67c9e4838d5a4b3f1480be9179ec5b"
+    "commit": "2b014196dcfb71079cb85dbff558f35f85c29c9e",
+    "tree": "990384673175d7806422a36eab78f04038e99eab"
   },
   "bellman_cuda": {
     "repository": "https://github.com/matter-labs/era-bellman-cuda.git",
