@@ -427,8 +427,10 @@ pub async fn run_inner(
         prover_input.len()
     );
     let prover_input: Vec<u32> = prover_input
-        .chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect();
 
     tracing::info!(
