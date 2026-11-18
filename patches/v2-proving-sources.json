@@ -1,8 +1,8 @@
 {
   "airbender": {
     "repository": "https://github.com/syscoin/zksync-airbender",
-    "commit": "27c4e9c4358b86ac92c878f44a748f6cbb42650c",
-    "tree": "f12852dbdb887cf7f14fc315737b6e83ef43d4e3"
+    "commit": "371b7d33a0d9a749c5fb1f249c10ca09f1f33d6c",
+    "tree": "2cc986fcfb5806b3b8bc39f2b58c452f705cde51"
   },
   "protocol": {
     "repository": "https://github.com/syscoin/zksync-protocol",
