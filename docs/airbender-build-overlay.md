@@ -1,5 +1,18 @@
 # Pinned proving sources
 
+## V2 worker
+
+`scripts/cargo-with-patched-airbender.sh` builds a disposable copy of the selected worker.
+It verifies the complete locked Git graph against `patches/v2-proving-sources.json`. The
+Airbender revision supplies the execution engine, circuit definitions and checked-in
+recursion artifacts. One protocol monorepo revision supplies the wrapper, native crypto and
+Rust GPU components. GPU SNARK roles also verify the pinned Bellman CUDA commit and tree
+and the native Release archive built from it. Successful role receipts record these inputs
+and their hashes. [Worker qualification](v2-worker-qualification.md)
+
+## Historical v0.9.1 build graph
+
+
 Worker builds use `scripts/cargo-with-patched-airbender.sh LABEL -- cargo ... --locked`.
 Airbender comes from the immutable Syscoin fork commit
 `b91eeaecc4d1b9a42ea6843432bb3e014899b303`. It descends from the pinned Matter Labs

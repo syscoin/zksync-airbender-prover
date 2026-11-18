@@ -1,4 +1,4 @@
-"""Offline tests for the immutable crypto-bigint advisory exception scope."""
+"""Offline tests for the reviewed crypto-bigint migration."""
 
 import copy
 import importlib.util
@@ -31,7 +31,17 @@ dependencies = ["crypto-bigint"]
 
 [[package]]
 name = "elliptic-curve"
-version = "0.13.8"
+version = "0.14.3"
+dependencies = ["crypto-bigint"]
+
+[[package]]
+name = "primefield"
+version = "0.14.0"
+dependencies = ["crypto-bigint"]
+
+[[package]]
+name = "rfc6979"
+version = "0.6.0"
 dependencies = ["crypto-bigint"]
 '''
 
@@ -44,7 +54,7 @@ class CryptoBigintScopeTests(unittest.TestCase):
         for relative in GUARD.FIXED_INPUTS:
             self.write(relative, "reviewed fixture input: " + relative + "\n")
         self.write("Cargo.toml", '[workspace]\nmembers = ["crates/prover"]\n')
-        self.write("deny.toml", '[advisories]\nignore = ["' + GUARD.ADVISORY + '"]\n')
+        self.write("deny.toml", '[advisories]\nignore = []\n')
         for relative in GUARD.LOCK_PATHS:
             self.write(relative, lockfile())
         self.write("crates/prover/Cargo.toml", '[package]\nname = "prover"\nversion = "0.1.0"\n')
@@ -98,7 +108,7 @@ class CryptoBigintScopeTests(unittest.TestCase):
         (self.root / "crates/prover/src/lib.rs").unlink()
         self.assert_rejected("file list changed")
 
-    def test_both_lockfile_content_changes_invalidate_scope(self):
+    def test_lockfile_content_changes_invalidate_scope(self):
         for relative in GUARD.LOCK_PATHS:
             with self.subTest(relative=relative):
                 path = self.root / relative
@@ -130,7 +140,7 @@ class CryptoBigintScopeTests(unittest.TestCase):
                 self.assert_rejected("package list|exactly one crypto-bigint")
         self.write("Cargo.lock", lockfile())
 
-    def test_direct_parent_names_are_checked_in_both_locks(self):
+    def test_direct_parent_names_are_checked(self):
         for relative in GUARD.LOCK_PATHS:
             for invalid in (
                 lockfile().replace('name = "boojum"', 'name = "signing-service"'),
@@ -158,21 +168,20 @@ class CryptoBigintScopeTests(unittest.TestCase):
         self.record_scope()
         self.assert_rejected("unknown crypto-bigint dependency edge")
 
-    def test_crypto_fork_manifest_full_contents_are_bound(self):
-        path = self.root / "patches/zksync-crypto-fork-source.json"
+    def test_v2_proving_source_manifest_full_contents_are_bound(self):
+        path = self.root / "patches/v2-proving-sources.json"
         path.write_text('{"fork_commit": "changed", "purpose": "unreviewed source"}\n')
-        self.assert_rejected("scope inputs changed.*zksync-crypto-fork-source.json")
+        self.assert_rejected("scope inputs changed.*v2-proving-sources.json")
 
-    def test_exact_advisory_ignore_is_required_even_after_recording_new_hashes(self):
-        for ignores in ([], ["RUSTSEC-2026-0388"], [GUARD.ADVISORY, GUARD.ADVISORY],
-                        [{"id": GUARD.ADVISORY, "reason": "not an exact string ignore"}]):
-            with self.subTest(ignores=ignores):
-                self.write("deny.toml", "[advisories]\nignore = " + json.dumps(ignores).replace(":", " =") + "\n")
+    def test_advisory_ignore_is_rejected_even_after_recording_new_hashes(self):
+        for ignore in (json.dumps(GUARD.ADVISORY), '{ id = "' + GUARD.ADVISORY + '" }'):
+            with self.subTest(ignore=ignore):
+                self.write("deny.toml", "[advisories]\nignore = [" + ignore + "]\n")
                 self.record_scope()
-                self.assert_rejected("must ignore exactly")
+                self.assert_rejected("must not ignore")
 
     def test_changes_to_other_ignores_invalidate_review(self):
-        self.write("deny.toml", '[advisories]\nignore = ["' + GUARD.ADVISORY + '", "RUSTSEC-2026-0999"]\n')
+        self.write("deny.toml", '[advisories]\nignore = ["RUSTSEC-2026-0999"]\n')
         self.assert_rejected("scope inputs changed.*deny.toml")
 
     def test_new_cargo_override_invalidates_review(self):

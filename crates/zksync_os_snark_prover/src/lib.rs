@@ -144,7 +144,7 @@ impl WrapperSource {
             )
         );
         ensure_supported_wrapper_vk(&vk_hash, &app_bin_path, supported_versions)?;
-        let unified_end_params = wrapper.resolved_binary_commitment()?.end_params;
+        let unified_end_params = wrapper.binary_commitment()?.end_params;
         if let Some(inputs) = &bound_inputs {
             inputs.verify()?;
         }
@@ -270,7 +270,7 @@ pub fn create_snark_wrapper_with_cache_and_policy(
 /// Apply the same authenticated commitment policy to every cache-less build,
 /// including a CPU-cold phase-3 config carrying its verified compression VK.
 fn create_snark_wrapper_from_config_with_policy(
-    config: SnarkWrapperConfig,
+    mut config: SnarkWrapperConfig,
     commitment_policy: BinaryCommitmentPolicy,
 ) -> anyhow::Result<SnarkWrapper> {
     match commitment_policy {
@@ -284,7 +284,8 @@ fn create_snark_wrapper_from_config_with_policy(
                 "Validated bundled binary commitment in {:.3}s",
                 started.elapsed().as_secs_f64()
             );
-            SnarkWrapper::new_with_binary_commitment(config, commitment)
+            config.binary_commitment = Some(commitment);
+            SnarkWrapper::new(config)
         }
         BinaryCommitmentPolicy::Recompute => {
             tracing::info!("Explicitly recomputing binary commitment from program artifacts");
@@ -308,15 +309,21 @@ fn build_wrapper_config(
         .to_str()
         .with_context(|| format!("non-UTF8 app binary path {app_bin_path:?}"))?
         .to_string();
-    let source = ProgramSource::from_paths(bin_path, None);
+    let ProgramSource::Paths {
+        bin_path,
+        text_path,
+    } = ProgramSource::from_paths(bin_path, None)
+    else {
+        anyhow::bail!("Airbender did not resolve the app paths");
+    };
     // Fail fast on a missing binary/text instead of erroring deep in VK derivation.
-    for path in [&source.bin_path, &source.text_path] {
+    for path in [&bin_path, &text_path] {
         anyhow::ensure!(Path::new(path).is_file(), "program file not found: {path}");
     }
     Ok(SnarkWrapperConfig {
         trusted_setup: Some(trusted_setup_file.into()),
-        bin: Some(source.bin_path.into()),
-        text: Some(source.text_path.into()),
+        bin: Some(bin_path.into()),
+        text: Some(text_path.into()),
         check_aux_params: true,
         ..Default::default()
     })
@@ -1012,7 +1019,7 @@ mod tests {
                 super::BinaryCommitmentPolicy::Bundled,
             )
             .unwrap_or_else(|error| panic!("{stage}: {error:#}"));
-            let commitment = wrapper.resolved_binary_commitment().unwrap();
+            let commitment = wrapper.binary_commitment().unwrap();
             assert_eq!(commitment.end_params, expected.end_params, "{stage}");
             assert_eq!(commitment.aux_params, expected.aux_params, "{stage}");
             if let Some(carried_vk) = carried_vk {

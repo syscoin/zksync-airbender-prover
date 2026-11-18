@@ -4,63 +4,63 @@
   "execution_version": 7,
   "proving_version": 8,
   "security_bits": 100,
-  "wrapper_domain_log": 25,
+  "wrapper_domain_log": 22,
   "check_aux_params": true,
   "commitment_algorithm": "base-unrolled-unified-v1",
-  "airbender_revision": "03454c7a41053a4b88bb421e97fb9efe893a92f5",
-  "wrapper_circuit_revision": "816a3598c60fac37d02cf1dcd1bc48b2e2c75de1",
-  "airbender_patched_tree": "ce3d73c3901e0aada9dfca1319eea8a1e5fddbb5",
-  "wrapper_circuit_patched_tree": "a1e9a551b9588b1dfab5c5088554fc69770c0e85",
-  "vk_hash": "0x22b4a58c40ab11839bfc79c96957f24711776f3e1992fa3cf14c1c3b898a2153",
-  "program_commitment": "0xff43db6564b43491d6c25a613270e7802a4fca2bc67ad621e5cb08dd57d22975",
+  "airbender_revision": "5e0cf077116afa7d1b733fa972fedb3b29594870",
+  "wrapper_circuit_revision": "86a5d34cabfec4f0f5b7bc7a7e59cb08961299a6",
+  "airbender_patched_tree": "5d5e3668eab3358dd5da310afa0079227d030848",
+  "wrapper_circuit_patched_tree": "eb762c586dfb07eb596b9af4dbe25edb71b1dde6",
+  "vk_hash": "0x8e6285da659dac3cfff56dbae3bf445e1524b9f08a9270f19d3361a97f8ce990",
+  "program_commitment": "0xbf5be160cc4b6fff331c10d591691e0c5f62df1be058b2e0ee9c8fc8c8640c66",
   "app": {
     "bin": {
-      "size_bytes": 1329732,
-      "sha256": "0d69bb7bc5207041c737def52d8858bab261b2ccf0afadbf2ceed14aa86d7cf6"
+      "sha256": "9727a6d5c1301bc0fdb9ef7b46027917aef51c9158a7678dec1287bffb9b3e4d",
+      "size_bytes": 1329572
     },
     "text": {
-      "size_bytes": 1200064,
-      "sha256": "9d999d91bc7422488c58cf6ca1f7f5041c2972065592ffe98bfcb8220ff0009a"
+      "sha256": "4648aea720d7acb9317d90047b2640f85baacf15bfdfe340c21c03dc3984f932",
+      "size_bytes": 1199892
     }
   },
   "recursion_unrolled": {
     "bin": {
-      "size_bytes": 2319668,
-      "sha256": "320fb4b3c46a6991b0059449c6744e0a935d276b14126ce15e5e89b7fae9f150"
+      "size_bytes": 2306916,
+      "sha256": "1e34e53a71d073d8b273fa8114dc6faaeaf9a76c2aec06643563a69cc7dd8a43"
     },
     "text": {
-      "size_bytes": 2279204,
-      "sha256": "ec0ba1a617756348a745988027083141ee99022e4a8a5cf5778dd65ccbc9467a"
+      "size_bytes": 2266452,
+      "sha256": "4e68c57b18d194b5fdedf3ae2d1d2dab6f3da47160c964f02e9793077dd66ed8"
     }
   },
   "recursion_unified": {
     "bin": {
-      "size_bytes": 1277440,
-      "sha256": "43985fe291efaf5f524ec4880900602d9ab0d51ebd87ad55c03e0f1aaaa0b086"
+      "size_bytes": 1266720,
+      "sha256": "03cc1cb4bfd70fe55cb1014bfcb6a7e587c154f7144477c801a99f4466f09c2e"
     },
     "text": {
-      "size_bytes": 1245552,
-      "sha256": "0c9e041574e579bb6503c6a976da639cf8dbb6e04d3d95f50d5d188ac1ac2e0b"
+      "size_bytes": 1234832,
+      "sha256": "c9ef9dd7c618f0e4e24e39be5d888440029b0985214eb47ed569a6c21c6366cd"
     }
   },
   "end_params": [
-    2573324043,
-    1880334364,
-    1011603262,
-    959504562,
-    3515305074,
-    2676167601,
-    1565532066,
-    2615493531
+    127830082,
+    234200099,
+    3482646709,
+    3809141483,
+    2686257166,
+    629858516,
+    3373154251,
+    3606817127
   ],
   "aux_params": [
-    4282637157,
-    1689531537,
-    3603061345,
-    846260096,
-    709872171,
-    3329938977,
-    3855288541,
-    1473390965
+    3210469728,
+    3427495935,
+    857477333,
+    2439585292,
+    1600315163,
+    3763909344,
+    4003237832,
+    3361999974
   ]
 }

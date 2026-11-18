@@ -19,21 +19,23 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use verifier_common::SecurityModel;
 use zkos_wrapper::circuits::BinaryCommitment;
-use zksync_airbender_execution_utils::verifier_binaries::recursion_artifact;
+use zksync_airbender_execution_utils::verifier_binaries::{
+    recursion_artifact, recursion_end_params,
+};
 use zksync_airbender_execution_utils::{RecursionArtifact, RecursionLayer};
 
 const BUNDLED_ARTIFACT: &str = include_str!("../artifacts/syscoin-v32-security100-commitment.json");
-// Airbender's origin revision and effective fork tree, and the wrapper's fork
-// revision/tree, are bound to the reviewed source manifests.
-const AIRBENDER_REVISION: &str = "03454c7a41053a4b88bb421e97fb9efe893a92f5";
-const WRAPPER_CIRCUIT_REVISION: &str = "816a3598c60fac37d02cf1dcd1bc48b2e2c75de1";
-const AIRBENDER_PATCHED_TREE: &str = "ce3d73c3901e0aada9dfca1319eea8a1e5fddbb5";
-const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "a1e9a551b9588b1dfab5c5088554fc69770c0e85";
-// The unified-verifier half is pinned independently, just as the app-chain half is
-// pinned by protocol_version. Regenerate and review both when the circuit changes.
-const UNIFIED_END_PARAMS: [u32; 8] = [
-    2573324043, 1880334364, 1011603262, 959504562, 3515305074, 2676167601, 1565532066, 2615493531,
-];
+#[derive(Deserialize)]
+struct CircuitPin {
+    commit: String,
+    tree: String,
+}
+
+#[derive(Deserialize)]
+struct CircuitPins {
+    airbender: CircuitPin,
+    protocol: CircuitPin,
+}
 
 /// How a cold wrapper obtains its app-bound circuit constants.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -146,27 +148,30 @@ impl Artifact {
             "bundled commitment requires the active Security100 wrapper"
         );
         ensure!(
-            self.wrapper_domain_log == 25
-                && zkos_wrapper::L1_VERIFIER_DOMAIN_SIZE_LOG == 25
+            self.wrapper_domain_log as usize == zkos_wrapper::L1_VERIFIER_DOMAIN_SIZE_LOG
+                && zkos_wrapper::L1_VERIFIER_DOMAIN_SIZE_LOG == 22
                 && self.check_aux_params,
-            "bundled commitment requires app-bound log-25 wrapper configuration"
+            "bundled commitment requires app-bound log-22 wrapper configuration"
         );
         ensure!(
             self.commitment_algorithm == "base-unrolled-unified-v1",
             "bundled commitment algorithm mismatch"
         );
+        let pins: CircuitPins =
+            serde_json::from_str(include_str!("../../../patches/v2-proving-sources.json"))?;
         ensure!(
-            self.airbender_revision == AIRBENDER_REVISION
-                && self.wrapper_circuit_revision == WRAPPER_CIRCUIT_REVISION,
+            self.airbender_revision == pins.airbender.commit
+                && self.wrapper_circuit_revision == pins.protocol.commit,
             "bundled commitment circuit revision mismatch"
         );
         ensure!(
-            self.airbender_patched_tree == AIRBENDER_PATCHED_TREE
-                && self.wrapper_circuit_patched_tree == WRAPPER_CIRCUIT_PATCHED_TREE,
+            self.airbender_patched_tree == pins.airbender.tree
+                && self.wrapper_circuit_patched_tree == pins.protocol.tree,
             "bundled commitment effective circuit source tree mismatch"
         );
         ensure!(
-            self.end_params == UNIFIED_END_PARAMS,
+            self.end_params
+                == recursion_end_params(SecurityModel::Security100, RecursionLayer::Unified),
             "bundled commitment unified end_params mismatch"
         );
         let versions = SupportedProtocolVersions::default();
@@ -296,7 +301,10 @@ mod tests {
     fn current_bundled_commitment_loads_and_matches_the_registered_candidate() {
         let (bin, text) = app_paths();
         let commitment = load_bundled_commitment(&bin, &text).unwrap();
-        assert_eq!(commitment.end_params, UNIFIED_END_PARAMS);
+        assert_eq!(
+            commitment.end_params,
+            recursion_end_params(SecurityModel::Security100, RecursionLayer::Unified)
+        );
         assert_eq!(
             SupportedProtocolVersions::default().program_commitment_for(&artifact().vk_hash),
             Some(ProgramCommitment(commitment.aux_params))

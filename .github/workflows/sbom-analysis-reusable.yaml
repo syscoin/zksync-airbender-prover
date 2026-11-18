@@ -294,19 +294,19 @@ jobs:
           [[ -z "$(git -C .sbom-image-source status --porcelain --untracked-files=all)" ]]
           gpu_args=()
           if [[ "${COMPONENT}" != zksync-os-prover-fri ]]; then
-            gpu_args=(--gpu-backend-pins .sbom-tooling/patches/gpu32-memory.json)
+            gpu_args=(--gpu-backend-pins .sbom-tooling/patches/v2-proving-sources.json)
             python3 .sbom-tooling/.github/scripts/image-sbom-identity.py gpu-backend-pins \
-              .sbom-tooling/patches/gpu32-memory.json --source-lock .sbom-image-source/Cargo.lock \
+              .sbom-tooling/patches/v2-proving-sources.json --source-lock .sbom-image-source/Cargo.lock \
               > gpu-backend-build-pins.json
           fi
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py bind \
             "${COMPONENT}" "${IMAGE_DIGEST}" "bom-${COMPONENT}-image.cdx.json" \
-            --airbender-pins .sbom-tooling/patches/airbender-fork-source.json \
+            --airbender-pins .sbom-tooling/patches/v2-proving-sources.json \
             --source-lock .sbom-image-source/Cargo.lock \
             "${gpu_args[@]}" \
             > "bom-${COMPONENT}-image.bound.cdx.json"
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py airbender-pins \
-            .sbom-tooling/patches/airbender-fork-source.json \
+            .sbom-tooling/patches/v2-proving-sources.json \
             --source-lock .sbom-image-source/Cargo.lock > airbender-build-pins.json
           python3 .sbom-tooling/.github/scripts/image-sbom-identity.py record \
             "${COMPONENT}" "${IMAGE_DIGEST}" > "image-identity.json"

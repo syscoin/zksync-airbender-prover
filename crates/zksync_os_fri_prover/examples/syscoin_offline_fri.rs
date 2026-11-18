@@ -47,6 +47,12 @@ struct Args {
     gpu_memory_preset: MemoryPreset,
     #[arg(long, default_value_t = 8)]
     gpu_replay_threads: usize,
+    /// Number of pinned 64 MiB host buffers per job during this measurement.
+    #[arg(long)]
+    gpu_host_allocators_per_job: Option<std::num::NonZeroUsize>,
+    /// Number of additional pinned 64 MiB host buffers per GPU.
+    #[arg(long)]
+    gpu_host_allocators_per_device: Option<std::num::NonZeroUsize>,
     /// Same authenticated setup policy as the production FRI worker.
     #[arg(long, value_enum, default_value_t = FriSetupPolicy::Bundled)]
     fri_setup_policy: FriSetupPolicy,
@@ -244,6 +250,14 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     config.gpu.replay_worker_threads_count = args.gpu_replay_threads;
+    if let Some(buffers) = args.gpu_host_allocators_per_job {
+        config.gpu.host_allocators_per_job_count = buffers.get();
+    }
+    if let Some(buffers) = args.gpu_host_allocators_per_device {
+        config.gpu.host_allocators_per_device_count = buffers.get();
+    }
+    let buffers_per_job = config.gpu.host_allocators_per_job_count;
+    let buffers_per_device = config.gpu.host_allocators_per_device_count;
     config.gpu.memory_preset = match args.gpu_memory_preset {
         MemoryPreset::Normal => GpuMemoryPreset::Normal,
         MemoryPreset::Low => GpuMemoryPreset::Low,
@@ -287,6 +301,8 @@ fn main() -> Result<()> {
         "target": "recursion-unified",
         "gpu_memory_preset": args.gpu_memory_preset,
         "gpu_replay_threads": args.gpu_replay_threads,
+        "host_allocators_per_job": buffers_per_job,
+        "host_allocators_per_device": buffers_per_device,
         "fri_setup_policy": args.fri_setup_policy.to_string(),
         "setup_ms": setup_ms,
         "prove_wall_ms": prove_ms,

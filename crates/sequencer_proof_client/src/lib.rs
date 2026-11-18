@@ -450,6 +450,8 @@ pub const STATUS_PROBE_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(8).unwrap()
 /// Status is only a scheduling hint; never let it block real pick attempts for a healthy peer.
 pub const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+// async-trait marks the boxed future must_use; this pinned Clippy also checks the future type.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ProofClient: Send + Sync {
     /// Returns the sequencer URL for logging purposes.
@@ -705,6 +707,8 @@ pub async fn claim_first_snark_job<'a>(
     Ok(None)
 }
 
+// async-trait marks the boxed future must_use; this pinned Clippy also checks the future type.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PeekableProofClient {
     /// Peek at a FRI job by batch number.

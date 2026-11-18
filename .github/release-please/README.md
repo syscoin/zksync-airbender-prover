@@ -9,17 +9,23 @@ workflow directly calls the binary and image builds with the returned tag and so
 so it does not depend on the suppressed token-generated tag-push event.
 
 Release-please updates the workspace version and release manifest in its PR.
-Before merging a release PR, a maintainer must also update the matching local
-package versions in **both** `Cargo.lock` and `patches/airbender.Cargo.lock`.
-Do not refresh the dependency graph: inspect the diff and confirm only the five
-workspace package version entries changed. Update `canonical_lock_sha256` and
-`overlay_lock_sha256` in `patches/airbender-fork-source.json` to the SHA-256
-hashes of the respective files.
+For the current V2 build selected by `patches/v2-proving-sources.json`, update the
+matching local package versions in `Cargo.lock`. The release gate checks its Git
+sources against that manifest and its exact bytes against the reviewed scope.
+Keep source revisions unchanged for a version-only release; inspect the lock
+diff and confirm only the workspace package versions changed. The historical
+`patches/airbender.Cargo.lock` and `patches/airbender-fork-source.json` do not
+describe the V2 graph and must not be relabeled to match it.
 
-The existing crypto-bigint exception is scoped to the exact manifests, locks,
-source, and pins. Review the advisory exception and **all** scope-input diffs
-against the checked-in main branch before recording a new scope. Once that
-review is complete, regenerate the scope input hashes with:
+The retained legacy lock-check function still requires matching local package
+versions in both historical locks and matching `canonical_lock_sha256` and
+`overlay_lock_sha256` in `patches/airbender-fork-source.json`. This branch's
+reviewed scope requires V2; removing its manifest does not enable a legacy
+release or bypass the scope check.
+
+The crypto-bigint migration is scoped to the exact manifests, lock, source and
+pins. The release gate requires the patched package and prohibits the advisory
+ignore. Review all scope-input diffs before recording new hashes:
 
 ```sh
 python3 - <<'PY'

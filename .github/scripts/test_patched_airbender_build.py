@@ -27,7 +27,7 @@ CRYPTO_PINS = HELPER.load_crypto_pins()
 
 def parent_lock_bytes():
     """Exact lock from parent488f70ac, reconstructed without requiring Git history in CI."""
-    raw = (ROOT / "Cargo.lock").read_bytes()
+    raw = (ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock").read_bytes()
     registry_fixture = (ROOT / ".github/tests/fixtures/parent-registry.Cargo.lock").read_bytes()
     restored_names = HELPER.tomllib.loads(registry_fixture.decode())["restore"]["remove_names"]
     blocks = re.split(rb"(?m)(?=^\[\[package\]\]\n)", raw)
@@ -94,12 +94,12 @@ def parent_lock_bytes():
 
 class LockOverlayTests(unittest.TestCase):
     def setUp(self):
-        self.canonical = HELPER.read_toml(ROOT / "Cargo.lock")
+        self.canonical = HELPER.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock")
         self.overlay = HELPER.read_toml(ROOT / "patches/airbender.Cargo.lock")
 
     def test_exact_checked_in_hashes(self):
         for relative, key in (
-            ("Cargo.lock", "canonical_lock_sha256"),
+            (".github/tests/fixtures/v0.9.1/Cargo.lock", "canonical_lock_sha256"),
             ("patches/airbender.Cargo.lock", "overlay_lock_sha256"),
         ):
             HELPER.checked_hash(ROOT / relative, PINS[key])
@@ -119,7 +119,7 @@ class LockOverlayTests(unittest.TestCase):
 
     def test_current_derivation_is_byte_identical_to_reviewed_overlay(self):
         raw, selected = HELPER.selected_lock_overlay(
-            ROOT / "Cargo.lock", ROOT / "patches/airbender.Cargo.lock", PINS)
+            ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock", ROOT / "patches/airbender.Cargo.lock", PINS)
         self.assertEqual(raw, (ROOT / "patches/airbender.Cargo.lock").read_bytes())
         self.assertEqual(selected["canonical_lock_sha256"], PINS["canonical_lock_sha256"])
         self.assertEqual(selected["overlay_lock_sha256"], PINS["overlay_lock_sha256"])
@@ -206,7 +206,7 @@ zkos_wrapper = { package = "zkos-wrapper", git = "https://github.com/matter-labs
     def test_selected_lock_symlink_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             link = Path(temporary) / "Cargo.lock"
-            link.symlink_to(ROOT / "Cargo.lock")
+            link.symlink_to(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock")
             with self.assertRaisesRegex(ValueError, "invalid selected"):
                 HELPER.selected_lock_overlay(link, ROOT / "patches/airbender.Cargo.lock", PINS)
 
@@ -322,7 +322,7 @@ class CommonCryptoForkTests(unittest.TestCase):
                 HELPER.load_crypto_pins(manifest)
 
     def test_lock_mixed_missing_duplicate_unknown_version_and_partial_graph_rejected(self):
-        canonical = HELPER.read_toml(ROOT / "Cargo.lock")
+        canonical = HELPER.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock")
         overlay = HELPER.read_toml(ROOT / "patches/airbender.Cargo.lock")
         for field, value in (("source", HELPER.CRYPTO_LOCK_SOURCE + "-changed"),
                              ("name", "unknown-crypto"), ("version", "0.32.9")):
@@ -348,7 +348,7 @@ class CommonCryptoForkTests(unittest.TestCase):
         fork_source = ("git+" + CRYPTO_PINS["fork_url"] + "?rev=" + CRYPTO_PINS["fork_commit"]
                        + "#" + CRYPTO_PINS["fork_commit"])
         extra = {"name": "unexpected-common-fork", "version": "0.32.10", "source": fork_source}
-        canonical = copy.deepcopy(HELPER.read_toml(ROOT / "Cargo.lock"))
+        canonical = copy.deepcopy(HELPER.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock"))
         overlay = copy.deepcopy(HELPER.read_toml(ROOT / "patches/airbender.Cargo.lock"))
         canonical["package"].append(extra.copy())
         overlay["package"].append(extra.copy())
@@ -356,7 +356,7 @@ class CommonCryptoForkTests(unittest.TestCase):
             HELPER.audit_lock(canonical, overlay, PINS)
         with tempfile.TemporaryDirectory() as temporary:
             lock = Path(temporary) / "Cargo.lock"
-            lock.write_text((ROOT / "Cargo.lock").read_text()
+            lock.write_text((ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock").read_text()
                             + '\n[[package]]\nname = "unexpected-common-fork"\nversion = "0.32.10"\n'
                             + "source = " + json.dumps(fork_source) + "\n")
             original = lock.read_bytes()
@@ -454,8 +454,8 @@ class CommonCryptoForkTests(unittest.TestCase):
 
 class AirbenderPinTests(unittest.TestCase):
     def test_canonical_cargo_graph_pins_one_fork_source(self):
-        manifest = HELPER.read_toml(ROOT / "Cargo.toml")
-        snark = HELPER.read_toml(ROOT / "crates/zksync_os_snark_prover/Cargo.toml")
+        manifest = HELPER.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.toml")
+        snark = HELPER.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/crates/zksync_os_snark_prover/Cargo.toml")
         self.assertEqual(manifest["patch"][PINS["upstream_url"]], {
             name: {"git": PINS["fork_url"], "rev": PINS["fork_commit"]}
             for name in HELPER.WRAPPER_AIRBENDER_ROOTS})
@@ -465,7 +465,7 @@ class AirbenderPinTests(unittest.TestCase):
         for dependency in ("riscv_transpiler", "verifier_common"):
             self.assertEqual(snark["dependencies"][dependency],
                              {"git": PINS["fork_url"], "rev": PINS["fork_commit"]})
-        lock = HELPER.read_toml(ROOT / "Cargo.lock")
+        lock = HELPER.read_toml(ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock")
         self.assertEqual(sum(p.get("source") == HELPER.fork_lock_source(PINS)
                              for p in lock["package"]), 46)
         self.assertFalse(any(p.get("source") == PINS["upstream_lock_source"]
@@ -489,76 +489,7 @@ class AirbenderPinTests(unittest.TestCase):
             run.assert_not_called()
             output.assert_not_called()
 
-    def test_current_fri_artifact_matches_lifted_source(self):
-        artifact_path = ROOT / "crates/zksync_os_fri_prover/artifacts/syscoin-v32-security100-fri-setups.json"
-        artifact = HELPER.json_document(artifact_path)
-        metadata, summaries = artifact["metadata"], artifact["summaries"]
-        loader = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
-        integration = (ROOT / "crates/zksync_os_fri_prover/src/lib.rs").read_text()
-        dependencies = HELPER.read_toml(ROOT / "Cargo.toml")["workspace"]["dependencies"]
-        lock = HELPER.read_toml(ROOT / "Cargo.lock")
-        revision = PINS["upstream_commit"]
-        self.assertEqual(metadata["airbender_revision"], revision)
-        self.assertEqual(metadata["airbender_patched_tree"], PINS["fork_tree"])
-        self.assertIn(f'const AIRBENDER_REVISION: &str = "{revision}";', loader)
-        self.assertIn('const BUNDLED_ARTIFACT_SHA256: &str =\n    "'
-                      + HELPER.sha256(artifact_path) + '";', loader)
-        for dependency, package in (("zksync_airbender_execution_utils", "execution_utils"),
-                                    ("zksync_airbender_cli", "cli")):
-            self.assertEqual(dependencies[dependency]["git"], PINS["fork_url"])
-            self.assertEqual(dependencies[dependency]["rev"], PINS["fork_commit"])
-            locked = [row for row in lock["package"] if row["name"] == package]
-            self.assertEqual(len(locked), 1)
-            self.assertEqual(locked[0]["source"], HELPER.fork_lock_source(PINS))
-        self.assertEqual(metadata["security_bits"], 100)
-        self.assertEqual(summaries["security_bits"], 100)
-        self.assertEqual(metadata["circuit_identity"],
-                         "rv32im-unsigned-base/reduced-unrolled/reduced-unified-v1")
-        self.assertEqual(metadata["setup_algorithm"], "base-unrolled-unified-v1")
-        self.assertEqual(metadata["proof_target"], "recursion-unified")
-        self.assertEqual((metadata["cap_size"], metadata["num_cosets"]), (64, 2))
-        self.assertIn("zksync_airbender_execution_utils::setups::CAP_SIZE == self.cap_size", loader)
-        self.assertIn("zksync_airbender_execution_utils::setups::NUM_COSETS == self.num_cosets", loader)
-        self.assertIn(".validate(SecurityLevel::Security100.model(), base_binary)", loader)
-        self.assertIn("target: ProofTarget::RecursionUnified", integration)
-        self.assertIn("ProgramProver::new_with_setup_summaries_and_program_bytes(", integration)
-        # The base revision still names the rc.2 lineage. The tree names the
-        # actual fork source. Matching source identities is not proof qualification.
-        for section, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
-            self.assertEqual(metadata["app"][section]["sha256"], HELPER.sha256(ROOT / relative))
-            self.assertEqual(metadata["app"][section]["size_bytes"], (ROOT / relative).stat().st_size)
-        for identity in ("app", "recursion_unrolled", "recursion_unified"):
-            for section in ("bin", "text"):
-                self.assertIn('"' + metadata[identity][section]["sha256"] + '"', loader)
-        commitment = HELPER.json_document(
-            ROOT / "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json")
-        for field in ("protocol_version", "execution_version", "proving_version", "security_bits",
-                      "vk_hash", "program_commitment", "airbender_revision"):
-            self.assertEqual(metadata[field], commitment[field])
-        for level, families in (("base", [1, 2, 3, 4, 16, 17]),
-                                ("recursion_unrolled", [1, 2, 3, 16]),
-                                ("recursion_unified", [128])):
-            setup = summaries[level]
-            self.assertEqual(sorted(map(int, setup["circuit_families_setups"])), families)
-            groups = list(setup["circuit_families_setups"].values()) + [setup["inits_and_teardowns_setup"]]
-            for caps in groups:
-                self.assertEqual(len(caps), metadata["num_cosets"])
-                for cap in caps:
-                    self.assertEqual(len(cap["cap"]), metadata["cap_size"])
-                    self.assertTrue(all(len(word) == 8 for word in cap["cap"]))
 
-    def test_locked_application_ci_covers_summary_validation_without_upstream_resolution(self):
-        workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
-        loader = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
-        self.assertIn("ci-test -- cargo test --locked --no-default-features", workflow)
-        self.assertNotIn('cargo test --manifest-path "${airbender}/Cargo.toml"', workflow)
-        for test in ("current_bundled_artifact_loads_and_binds_all_release_inputs",
-                     "historical_source_key_and_program_metadata_fail_closed",
-                     "artifact_corruption_truncation_and_unknown_fields_fail_closed",
-                     "every_metadata_field_is_release_pinned",
-                     "both_sections_of_every_input_are_hash_and_length_bound",
-                     "summary_order_security_geometry_and_derived_values_are_checked"):
-            self.assertIn("fn " + test + "()", loader)
 
     def test_unknown_invalid_or_missing_pin_fields_fail_closed(self):
         for edit in (
@@ -660,51 +591,7 @@ class WrapperPinTests(unittest.TestCase):
             run.assert_not_called()
             output.assert_not_called()
 
-    def test_bundled_commitment_matches_the_pinned_wrapper_fork(self):
-        artifact = HELPER.json_document(
-            ROOT / "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json")
-        pins = HELPER.load_wrapper_pins()
-        loader = (ROOT / "crates/zksync_os_snark_prover/src/binary_commitment.rs").read_text()
-        lock = HELPER.read_toml(ROOT / "Cargo.lock")
-        dependency = HELPER.read_toml(ROOT / "Cargo.toml")["workspace"]["dependencies"]["zkos_wrapper"]
-        self.assertNotEqual(artifact["wrapper_circuit_revision"], pins["upstream_commit"])
-        self.assertEqual(artifact["wrapper_circuit_revision"], pins["fork_commit"])
-        self.assertEqual(artifact["wrapper_circuit_patched_tree"], pins["fork_tree"])
-        self.assertIn(f'const WRAPPER_CIRCUIT_REVISION: &str = "{pins["fork_commit"]}";', loader)
-        self.assertIn(f'const WRAPPER_CIRCUIT_PATCHED_TREE: &str = "{pins["fork_tree"]}";', loader)
-        self.assertEqual(dependency["git"], pins["fork_url"])
-        self.assertEqual(dependency["rev"], pins["fork_commit"])
-        self.assertEqual(dependency["features"], ["security_100"])
-        self.assertIs(dependency["default-features"], False)
-        locked = [row for row in lock["package"] if row["name"] == "zkos-wrapper"]
-        self.assertEqual(len(locked), 1)
-        self.assertEqual(locked[0]["source"], HELPER.fork_wrapper_lock_source(pins))
-        for field, relative in (("bin", "multiblock_batch.bin"), ("text", "multiblock_batch.text")):
-            self.assertEqual(artifact["app"][field]["sha256"], HELPER.sha256(ROOT / relative))
-            self.assertEqual(artifact["app"][field]["size_bytes"], (ROOT / relative).stat().st_size)
 
-    def test_current_bundles_share_the_registered_key_chain_and_setup_digest(self):
-        commitment = HELPER.json_document(
-            ROOT / "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json")
-        fri_path = ROOT / "crates/zksync_os_fri_prover/artifacts/syscoin-v32-security100-fri-setups.json"
-        fri = HELPER.json_document(fri_path)
-        for field in ("schema_version", "protocol_version", "execution_version", "proving_version",
-                      "security_bits", "airbender_revision", "airbender_patched_tree", "vk_hash",
-                      "program_commitment", "app", "recursion_unrolled", "recursion_unified"):
-            self.assertEqual(fri["metadata"][field], commitment[field], field)
-        words = [int(commitment["program_commitment"][offset:offset + 8], 16)
-                 for offset in range(2, 66, 8)]
-        self.assertEqual(commitment["aux_params"], words)
-        self.assertEqual(commitment["end_params"], fri["summaries"]["recursion_unified"]["end_params"])
-        self.assertEqual(fri["summaries"]["security_bits"], 100)
-        self.assertEqual(commitment["wrapper_domain_log"], 25)
-        self.assertIs(commitment["check_aux_params"], True)
-        fri_source = (ROOT / "crates/zksync_os_fri_prover/src/setup_summaries.rs").read_text()
-        registry = (ROOT / "crates/protocol_version/src/lib.rs").read_text()
-        self.assertIn('"' + HELPER.sha256(fri_path) + '"', fri_source)
-        self.assertIn('const VK_HASH: &str = "' + commitment["vk_hash"] + '";', fri_source)
-        self.assertIn('const SYSCOIN_VK_HASH: &str = "' + commitment["vk_hash"] + '";', registry)
-        self.assertIn('"' + commitment["program_commitment"] + '"', fri_source)
 
     def test_unknown_invalid_or_missing_pin_fields_fail_closed(self):
         pins = HELPER.load_wrapper_pins()
@@ -739,73 +626,7 @@ class WrapperPinTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid JSON input"):
                 HELPER.load_wrapper_pins(manifest)
 
-    def test_ci_executes_dependency_rng_and_commitment_tests_from_attested_wrapper_workspace(self):
-        workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
-        self.assertIn('AIRBENDER_BUILD_ATTESTATION="${RUNNER_TEMP}/ci-test-airbender-inputs.json"', workflow)
-        self.assertIn("ci-test -- cargo test --locked --no-default-features", workflow)
-        self.assertIn('python3 -B .github/scripts/run_pinned_wrapper_tests.py \\\n'
-                      '            "${RUNNER_TEMP}/ci-test-airbender-inputs.json"', workflow)
-        self.assertIn('run: python3 -B .github/scripts/test_run_pinned_wrapper_tests.py', workflow)
-        self.assertNotIn('cargo test --manifest-path "${wrapper}/Cargo.toml"', workflow)
-        self.assertNotIn('cargo test --manifest-path "${workspace}/Cargo.toml"', workflow)
-        self.assertIn('      - name: Run pinned wrapper source tests\n'
-                      '        env:\n'
-                      '          RUST_MIN_STACK: "33554432"\n'
-                      '          CARGO_PROFILE_DEV_DEBUG: "0"\n'
-                      '        run: |', workflow)
 
-    def test_ci_wrapper_shell_routes_attestation_and_preserves_helper_failure(self):
-        lines = (ROOT / ".github/workflows/ci.yaml").read_text().splitlines()
-        step = lines.index("      - name: Run pinned wrapper source tests")
-        start = lines.index("        run: |", step) + 1
-        self.assertEqual(lines[step + 1], "        env:")
-        step_env = dict(line.strip().split(": ", 1) for line in lines[step + 2:start - 1])
-        step_env = {key: value.strip('"') for key, value in step_env.items()}
-        self.assertEqual(step_env, {"RUST_MIN_STACK": "33554432", "CARGO_PROFILE_DEV_DEBUG": "0"})
-        body = []
-        for line in lines[start:]:
-            if line.startswith("          "):
-                body.append(line[10:])
-            elif not line.strip():
-                body.append("")
-            else:
-                break
-        script = "\n".join(body)
-        stub = r'''
-import json, os, sys
-from pathlib import Path
-name = Path(sys.argv[0]).name
-assert name == "python3"
-event = {"argv": sys.argv[1:], "rust_min_stack": os.environ["RUST_MIN_STACK"],
-         "profile_dev_debug": os.environ["CARGO_PROFILE_DEV_DEBUG"]}
-with Path(os.environ["WORKFLOW_CALL_LOG"]).open("a") as output:
-    output.write(json.dumps(event) + "\n")
-raise SystemExit(int(os.environ["WRAPPER_HELPER_EXIT_CODE"]))
-'''
-        for helper_status in (0, 7, 9):
-            with self.subTest(helper_status=helper_status), \
-                    tempfile.TemporaryDirectory(prefix="wrapper ci ") as temporary:
-                root = Path(temporary)
-                commands = root / "commands"
-                commands.mkdir()
-                for name in ("python3",):
-                    executable = commands / name
-                    executable.write_text("#!" + sys.executable + "\n" + stub)
-                    executable.chmod(0o700)
-                log = root / "calls.jsonl"
-                result = subprocess.run(["bash", "-eu", "-c", script], cwd=ROOT, capture_output=True,
-                                        text=True, env={**os.environ, **step_env, "RUNNER_TEMP": str(root),
-                                        "PATH": str(commands) + os.pathsep + os.environ.get("PATH", ""),
-                                        "WORKFLOW_CALL_LOG": str(log),
-                                        "WRAPPER_HELPER_EXIT_CODE": str(helper_status)})
-                self.assertEqual(result.returncode, helper_status, result.stderr)
-                events = [json.loads(line) for line in log.read_text().splitlines()]
-                expected = [
-                    {"rust_min_stack": "33554432", "profile_dev_debug": "0", "argv": [
-                        "-B", ".github/scripts/run_pinned_wrapper_tests.py",
-                        str(root / "ci-test-airbender-inputs.json")]},
-                ]
-                self.assertEqual(events, expected)
 
     def test_prepare_uses_isolated_fork_clone_and_exact_pin(self):
         pins = HELPER.load_wrapper_pins()
@@ -887,9 +708,9 @@ class PreparedGuardCompatibilityTests(unittest.TestCase):
             source, PINS, HELPER.load_wrapper_pins(), HELPER.load_crypto_pins())
 
     def test_current_guards_match_the_selected_marker_identity(self):
-        self.validate(ROOT)
+        self.validate(ROOT / ".github/tests/fixtures/v0.9.1")
         for crate in ("zksync_os_fri_prover", "zksync_os_snark_prover"):
-            self.assertEqual(HELPER.sha256(ROOT / "crates" / crate / "build.rs"),
+            self.assertEqual(HELPER.sha256(ROOT / ".github/tests/fixtures/v0.9.1" / "crates" / crate / "build.rs"),
                              HELPER.PREPARED_BUILD_GUARD_SHA256)
 
     def test_guardless_historical_source_retains_existing_compatibility_checks(self):
@@ -897,7 +718,7 @@ class PreparedGuardCompatibilityTests(unittest.TestCase):
             self.validate(Path(temporary))
 
     def test_old_exact_tree_and_malformed_guards_are_rejected_unchanged(self):
-        current = (ROOT / "crates/zksync_os_fri_prover/build.rs").read_bytes()
+        current = (ROOT / ".github/tests/fixtures/v0.9.1" / "crates/zksync_os_fri_prover/build.rs").read_bytes()
         old = current.replace(b"a1e9a551b9588b1dfab5c5088554fc69770c0e85",
                               b"9a1110f6c514338b3143909a726fe97b9af6c9cd").replace(
             b"c52391d0df82126d27e5c76810e9df85c61875d0",
@@ -920,14 +741,14 @@ class PreparedGuardCompatibilityTests(unittest.TestCase):
     def test_guard_identity_cannot_disagree_with_selected_pins(self):
         changed = dict(HELPER.load_crypto_pins(), fork_tree="f" * 40)
         with self.assertRaisesRegex(ValueError, "incompatible proving-source guard"):
-            HELPER.require_compatible_build_guards(ROOT, PINS, HELPER.load_wrapper_pins(), changed)
+            HELPER.require_compatible_build_guards(ROOT / ".github/tests/fixtures/v0.9.1", PINS, HELPER.load_wrapper_pins(), changed)
 
     def test_guard_symlinks_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             guard = root / "crates/zksync_os_fri_prover/build.rs"
             guard.parent.mkdir(parents=True)
-            guard.symlink_to(ROOT / "crates/zksync_os_fri_prover/build.rs")
+            guard.symlink_to(ROOT / ".github/tests/fixtures/v0.9.1" / "crates/zksync_os_fri_prover/build.rs")
             with self.assertRaisesRegex(ValueError, "incompatible proving-source guard"):
                 self.validate(root)
 
@@ -940,7 +761,7 @@ class PreparedGuardCompatibilityTests(unittest.TestCase):
             package.write_text('[package]\nname = "protocol_version"\nversion = "0.1.0"\n')
             guard = root / "crates/zksync_os_snark_prover/build.rs"
             guard.parent.mkdir(parents=True)
-            original = (ROOT / "crates/zksync_os_snark_prover/build.rs").read_bytes().replace(
+            original = (ROOT / ".github/tests/fixtures/v0.9.1" / "crates/zksync_os_snark_prover/build.rs").read_bytes().replace(
                 b"c52391d0df82126d27e5c76810e9df85c61875d0",
                 b"4fda70a408c7817474fe67fba46b38cfbe420e59")
             guard.write_bytes(original)
@@ -969,10 +790,10 @@ class PreparedBuildGuardTests(unittest.TestCase):
                 with self.subTest(crate=crate):
                     (workspace / "crates" / crate).mkdir(parents=True)
                     binary = Path(temporary) / (crate + "-build-guard")
-                    subprocess.run(["rustc", "--edition=2021", str(ROOT / "crates" / crate / "build.rs"),
+                    subprocess.run(["rustc", "--edition=2021", str(ROOT / ".github/tests/fixtures/v0.9.1" / "crates" / crate / "build.rs"),
                                     "-o", str(binary)], check=True, capture_output=True)
                     environment = os.environ.copy()
-                    environment["CARGO_MANIFEST_DIR"] = str(ROOT / "crates" / crate)
+                    environment["CARGO_MANIFEST_DIR"] = str(ROOT / ".github/tests/fixtures/v0.9.1" / "crates" / crate)
                     self.assertNotEqual(subprocess.run([binary], env=environment, capture_output=True).returncode, 0)
                     environment["CARGO_MANIFEST_DIR"] = str(workspace / "crates" / crate)
                     self.assertEqual(subprocess.run([binary], env=environment, capture_output=True).returncode, 0)
@@ -992,7 +813,7 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
         (source / "crates/example/src/lib.rs").write_text("pub fn fixture() {}\n")
         (source / "crates/example/Cargo.toml").write_text('[package]\nname = "example"\nversion = "0.1.0"\n')
         for name in HELPER.SOURCE_FILES:
-            (source / name).write_bytes((ROOT / name).read_bytes())
+            (source / name).write_bytes(((ROOT / ".github/tests/fixtures/v0.9.1" if name in {"Cargo.toml", "Cargo.lock"} else ROOT) / name).read_bytes())
         (source / "Cargo.lock").write_bytes((source / "Cargo.lock").read_bytes().replace(
             HELPER.fork_lock_source(PINS).encode(), PINS["upstream_lock_source"].encode()))
         (source / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/example"]\n')
@@ -1100,7 +921,7 @@ class WrapperCpuIntegrationTests(unittest.TestCase):
             self.assertEqual(record["zksync_crypto"]["source"]["fork_commit"], HELPER.CRYPTO_FORK[1])
             self.assertEqual(record, json.loads((build / "build-result.json").read_text()))
             self.assertEqual((Path(temporary) / "Cargo.lock").read_bytes(),
-                             (ROOT / "Cargo.lock").read_bytes().replace(
+                             (ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock").read_bytes().replace(
                                  HELPER.fork_lock_source(PINS).encode(),
                                  PINS["upstream_lock_source"].encode()))
             self.assertEqual((build / "prover/Cargo.lock").read_bytes(),

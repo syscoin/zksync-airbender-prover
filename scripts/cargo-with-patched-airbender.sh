@@ -3,6 +3,9 @@
 set -euo pipefail
 tooling_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 readonly tooling_root
+if [[ -f "$tooling_root/patches/v2-proving-sources.json" ]]; then
+  exec python3 "$tooling_root/scripts/prepare-v2-proving-sources.py" "$@"
+fi
 # SYSCOIN: Every lane prepares exact Airbender and zkos-wrapper fork sources. GPU
 # wrapping additionally requires the reviewed crypto/CUDA memory overlay.
 preparer=prepare-patched-airbender.py

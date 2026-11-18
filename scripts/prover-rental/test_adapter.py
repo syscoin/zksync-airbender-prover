@@ -784,6 +784,36 @@ class AdapterValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(runpod.Error, "image_file_hash_mismatch"):
                     job.verify_image(selected)
 
+    def test_simulator_memory_policy_reaches_both_native_stages(self):
+        class Process:
+            def wait(self, timeout=None):
+                return 0
+            def poll(self):
+                return 0
+        for mode in ("pinned", "demand-paged"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                with patch.dict(os.environ, {"AIRBENDER_SIMULATOR_MEMORY": mode}, clear=True), \
+                        patch.object(worker.subprocess, "Popen", return_value=Process()) as popen:
+                    worker.run_native([job.BINARIES["FRI"]], Path(temporary), 1)
+                    worker.run_native([job.BINARIES["SNARK"]], Path(temporary), 1)
+                for call in popen.call_args_list:
+                    self.assertEqual(call.kwargs["env"]["AIRBENDER_SIMULATOR_MEMORY"], mode)
+
+    def test_simulator_memory_policy_is_absent_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            for snark in (False, True):
+                self.assertNotIn("AIRBENDER_SIMULATOR_MEMORY", worker.native_environment(snark))
+
+    def test_invalid_simulator_memory_policy_fails_before_spawn(self):
+        for mode in ("", "Demand-Paged", "demand-paged ", "unknown"):
+            for stage in ("FRI", "SNARK"):
+                with self.subTest(mode=mode, stage=stage):
+                    with patch.dict(os.environ, {"AIRBENDER_SIMULATOR_MEMORY": mode}, clear=True), \
+                            patch.object(worker.subprocess, "Popen") as popen:
+                        with self.assertRaisesRegex(runpod.Error, "unsupported_simulator_memory_policy"):
+                            worker.run_native([job.BINARIES[stage]], Path("."), 1)
+                        popen.assert_not_called()
+
     def test_native_environment_strips_secrets_and_scopes_stage_settings(self):
         runtime = {
             "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY": "recompute",

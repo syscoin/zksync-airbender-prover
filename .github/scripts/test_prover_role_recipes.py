@@ -30,6 +30,8 @@ RELEASE_BINS = {
 OVERLAY_FILES = (
     "scripts/cargo-with-patched-airbender.sh",
     "scripts/prepare-patched-airbender.py",
+    "scripts/prepare-v2-proving-sources.py",
+    "patches/v2-proving-sources.json",
     "scripts/pinned_source_checkout.py",
     "patches/airbender-fork-source.json",
     "patches/airbender.Cargo.lock",
@@ -260,7 +262,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
             self.assertIn(f"COPY --from=builder /usr/src/zksync/{record} "
                           "/usr/share/syscoin-prover/airbender-build-inputs.json", docker)
             self.assertIn('"${ROLE}-airbender-build-inputs.json"', recipe)
-        self.assertIn(".cargo_exit_code == 0 and .inputs_reverified == true", recipe)
+        self.assertIn(".cargo_exit_code == 0 and .inputs_reverified", recipe)
         self.assertIn("roleInputRecords: $airbender_records", release)
         self.assertIn('export PROVER_SOURCE_DIR="${GITHUB_WORKSPACE}"', recipe)
         cpu = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
@@ -270,6 +272,22 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertIn('for role in combined fri snark snark-cpu; do', release)
         self.assertIn('tar -czf "${archive}" -C release-role "${binary}" "${ROLE}-airbender-build-inputs.json"', recipe)
 
+    def test_images_and_release_archives_publish_the_attested_role_artifact(self):
+        for binary, (_, image, _) in ROLES.items():
+            recipe = (ROOT / f"docker/{image}/Dockerfile").read_text()
+            builders = ("builder", "cpu-builder") if image == "zksync-os-prover-snark" else ("builder",)
+            self.assertEqual(recipe.count("V2_BUILD_ARTIFACT_DIR=/usr/src/zksync/role-artifacts"), len(builders))
+            for builder in builders:
+                self.assertIn(f"COPY --from={builder} /usr/src/zksync/role-artifacts/{binary} /usr/bin/", recipe)
+
+        action = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
+        copy = action.index('cp "${artifact_dir}/${binary}" "release-role/${binary}"')
+        verification = action.index('echo "${binary_hash}  release-role/${binary}" | sha256sum --check --strict')
+        archive = action.index('tar -czf "${archive}" -C release-role')
+        self.assertIn(".artifact_sha256[$binary]", action[:copy])
+        self.assertLess(copy, verification)
+        self.assertLess(verification, archive)
+
     def test_gpu32_default_and_explicit_cpu_image_cannot_mix(self):
         source = (ROOT / "docker/zksync-os-prover-snark/Dockerfile").read_text()
         cpu, gpu = source.split("# SYSCOIN: Match the tested GPU32 backend's CUDA ABI", 1)
@@ -278,7 +296,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
         self.assertNotIn("nvidia/cuda", cpu)
         self.assertNotIn("--gpu32", cpu)
         self.assertNotIn("setup_compact.key", cpu)
-        self.assertNotIn("setup_2^25.key", gpu)
+        self.assertNotIn("setup_2^22.key", gpu)
         self.assertIn("--gpu32 docker-snark", gpu)
         self.assertNotIn("--no-default-features", gpu)
         for image in ("zksync-os-prover-snark", "zksync-airbender-prover"):
@@ -303,7 +321,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
         raw = (ROOT / path).read_bytes()
         self.assertEqual(raw.count(copy), 1)
         self.assertEqual(raw.count(crypto_copy), 1)
-        self.assertIn(b"COPY patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/\n", raw)
+        self.assertIn(b"COPY patches/v2-proving-sources.json patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/\n", raw)
         self.assertNotIn(b"patches/gpu32-memory.json", raw)
 
     def test_gpu_routes_require_opt_in_overlay_and_no_cpu_cache_argument(self):
@@ -338,7 +356,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
 
     def test_release_rejects_old_or_unknown_nvcc_before_backend_build(self):
         recipe = (ROOT / ".github/actions/build-release-role/action.yaml").read_text()
-        command = recipe.split('            nvcc_release=', 1)[1].split('            python3 .release-tooling/scripts/prepare-patched-gpu-backends.py', 1)[0]
+        command = recipe.split('            nvcc_release=', 1)[1].split('            python3 .release-tooling/scripts/prepare-v2-proving-sources.py', 1)[0]
         lines = command.splitlines()
         command = 'nvcc_release=' + lines[0] + "\n" + "\n".join(line[12:] for line in lines[1:])
         self.assertLess(recipe.index('nvcc_release='), recipe.index('--prepare-bellman'))
@@ -412,7 +430,7 @@ class ProverRoleRecipeTests(unittest.TestCase):
             source = re.sub(r"\\\r?\n\s*", " ", source)
             for stage in re.split(r"(?m)^FROM ", source)[1:]:
                 imports = [match.start() for match in re.finditer(
-                    r"(?m)^RUN .*?(?:python3 scripts/prepare-patched-gpu-backends\.py|"
+                    r"(?m)^RUN .*?(?:python3 scripts/prepare-v2-proving-sources\.py|"
                     r"bash scripts/cargo-with-patched-airbender\.sh)", stage)]
                 if not imports:
                     continue

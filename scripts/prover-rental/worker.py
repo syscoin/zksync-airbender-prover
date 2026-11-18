@@ -149,6 +149,12 @@ def native_environment(snark=False):
     env = {name: os.environ[name] for name in (
         "PATH", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES") if name in os.environ}
+    simulator_memory = os.environ.get("AIRBENDER_SIMULATOR_MEMORY")
+    if simulator_memory is not None:
+        require(simulator_memory in ("pinned", "demand-paged"),
+                "unsupported_simulator_memory_policy")
+        # Both FRI and the SNARK combiner instantiate the Airbender simulator.
+        env["AIRBENDER_SIMULATOR_MEMORY"] = simulator_memory
     if snark:
         env.update({name: os.environ[name] for name in (
             "ZKSYNC_SNARK_BINARY_COMMITMENT_POLICY",

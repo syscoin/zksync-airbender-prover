@@ -196,13 +196,13 @@ class PinnedSourceCheckoutTests(unittest.TestCase):
     def test_plain_cpu_and_nested_gpu_imports_keep_tooling_clean_without_bytecode_policy(self):
         environment = {key: value for key, value in os.environ.items()
                        if key not in {"PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"}}
-        for route in ("cpu", "gpu"):
+        for route in ("cpu", "gpu", "v2"):
             with self.subTest(route=route):
                 tooling = self.root / (route + " tooling")
                 scripts = tooling / "scripts"
                 scripts.mkdir(parents=True)
                 for name in ("prepare-patched-airbender.py", "prepare-patched-gpu-backends.py",
-                             "pinned_source_checkout.py"):
+                             "prepare-v2-proving-sources.py", "pinned_source_checkout.py"):
                     (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
                 self.git(tooling, "init", "--quiet")
                 self.git(tooling, "config", "user.name", "Local fixture")
@@ -215,7 +215,7 @@ class PinnedSourceCheckoutTests(unittest.TestCase):
                     "scripts = Path(sys.argv[1])\n"
                     "before = sys.dont_write_bytecode\n"
                     "assert before is False\n"
-                    "name = 'prepare-patched-gpu-backends.py' if sys.argv[2] == 'gpu' else 'prepare-patched-airbender.py'\n"
+                    "name = {'cpu': 'prepare-patched-airbender.py', 'gpu': 'prepare-patched-gpu-backends.py', 'v2': 'prepare-v2-proving-sources.py'}[sys.argv[2]]\n"
                     "namespace = runpy.run_path(str(scripts / name))\n"
                     "base = namespace['base_helper']() if sys.argv[2] == 'gpu' else namespace\n"
                     "assert sys.dont_write_bytecode is before\n"

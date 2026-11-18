@@ -16,18 +16,18 @@ COPY docker/install-build-toolchain.sh /usr/local/bin/install-build-toolchain
 RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 
 COPY docker/fetch-verified-crs.sh /usr/local/bin/fetch-verified-crs
-RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs cpu-snark /setup_2^25.key
+RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs cpu-snark /setup_2^22.key
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
-COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
-COPY patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/
+COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py scripts/prepare-v2-proving-sources.py scripts/pinned_source_checkout.py ./scripts/
+COPY patches/v2-proving-sources.json patches/airbender-fork-source.json patches/airbender.Cargo.lock ./patches/
 COPY patches/zkos-wrapper-fork-source.json ./patches/
 COPY patches/zksync-crypto-fork-source.json ./patches/
 
 # SYSCOIN: Match the hardened release topology: CPU-only wrapping, without the GPU feature.
-RUN AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-cpu-airbender-build-inputs.json \
+RUN V2_BUILD_ARTIFACT_DIR=/usr/src/zksync/role-artifacts AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-cpu-airbender-build-inputs.json \
     bash scripts/cargo-with-patched-airbender.sh docker-snark-cpu -- \
     cargo build --locked --profile release --target x86_64-unknown-linux-gnu \
     -p zksync_os_snark_prover --bin zksync_os_snark_prover --no-default-features
@@ -39,10 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 COPY docker/zksync-os-prover-snark/entrypoint.sh /entrypoint.sh
-COPY --from=cpu-builder /setup_2^25.key /setup_2^25.key
+COPY --from=cpu-builder /setup_2^22.key /setup_2^22.key
 COPY --from=cpu-builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
 COPY --from=cpu-builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
-COPY --from=cpu-builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync_os_snark_prover /usr/bin/zksync_os_snark_prover
+COPY --from=cpu-builder /usr/src/zksync/role-artifacts/zksync_os_snark_prover /usr/bin/zksync_os_snark_prover
 COPY --from=cpu-builder /usr/src/zksync/snark-cpu-airbender-build-inputs.json /usr/share/syscoin-prover/airbender-build-inputs.json
 
 RUN chmod 0755 /entrypoint.sh
@@ -67,9 +67,9 @@ COPY docker/prover-build-pins.json ./docker/prover-build-pins.json
 COPY docker/install-build-toolchain.sh /usr/local/bin/install-build-toolchain
 RUN chmod 0755 /usr/local/bin/install-build-toolchain && install-build-toolchain
 
-COPY scripts/prepare-patched-gpu-backends.py scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
+COPY scripts/prepare-patched-gpu-backends.py scripts/prepare-patched-airbender.py scripts/prepare-v2-proving-sources.py scripts/pinned_source_checkout.py ./scripts/
 COPY patches ./patches
-RUN python3 scripts/prepare-patched-gpu-backends.py --prepare-bellman /opt/bellman-cuda && \
+RUN python3 scripts/prepare-v2-proving-sources.py --prepare-bellman /opt/bellman-cuda && \
     cmake -B/opt/bellman-cuda/build -S/opt/bellman-cuda \
       -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES="${CUDAARCHS}" && \
     cmake --build /opt/bellman-cuda/build
@@ -80,11 +80,11 @@ RUN chmod 0755 /usr/local/bin/fetch-verified-crs && fetch-verified-crs gpu-snark
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY multiblock_batch.bin multiblock_batch.text ./
-COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py scripts/pinned_source_checkout.py ./scripts/
+COPY scripts/cargo-with-patched-airbender.sh scripts/prepare-patched-airbender.py scripts/prepare-v2-proving-sources.py scripts/pinned_source_checkout.py ./scripts/
 COPY patches ./patches
 
 RUN BELLMAN_CUDA_DIR=/opt/bellman-cuda \
-    AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-airbender-build-inputs.json \
+    V2_BUILD_ARTIFACT_DIR=/usr/src/zksync/role-artifacts AIRBENDER_BUILD_ATTESTATION=/usr/src/zksync/snark-airbender-build-inputs.json \
     bash scripts/cargo-with-patched-airbender.sh --gpu32 docker-snark -- \
     cargo build --locked --profile release --target x86_64-unknown-linux-gnu \
     -p zksync_os_snark_prover --bin zksync_os_snark_prover --features gpu
@@ -99,7 +99,7 @@ COPY docker/zksync-os-prover-snark/entrypoint.sh /entrypoint.sh
 COPY --from=builder /setup_compact.key /setup_compact.key
 COPY --from=builder /usr/src/zksync/multiblock_batch.bin /multiblock_batch.bin
 COPY --from=builder /usr/src/zksync/multiblock_batch.text /multiblock_batch.text
-COPY --from=builder /usr/src/zksync/target/x86_64-unknown-linux-gnu/release/zksync_os_snark_prover /usr/bin/zksync_os_snark_prover
+COPY --from=builder /usr/src/zksync/role-artifacts/zksync_os_snark_prover /usr/bin/zksync_os_snark_prover
 COPY --from=builder /usr/src/zksync/snark-airbender-build-inputs.json /usr/share/syscoin-prover/airbender-build-inputs.json
 
 RUN chmod 0755 /entrypoint.sh

@@ -37,7 +37,7 @@ class WrapperTests(unittest.TestCase):
                                               BASE.load_crypto_pins())
         self.wrapper_air = {**self.air, "fork_commit": RUNNER.WRAPPER_AIRBENDER_COMMIT}
         self.overlay, self.selected = BASE.selected_lock_overlay(
-            ROOT / "Cargo.lock", BASE.PIN_PATH.parent / self.air["overlay_lock_file"],
+            ROOT / ".github/tests/fixtures/v0.9.1/Cargo.lock", BASE.PIN_PATH.parent / self.air["overlay_lock_file"],
             self.air, self.wrapper, self.crypto)
         self.groups = {
             "air": {name: version for name, version in self.selected["airbender_packages"].items()
@@ -64,7 +64,7 @@ class WrapperTests(unittest.TestCase):
         self.raw = self.canonical_wrapper_lock()
         (self.roots["wrapper"] / "Cargo.lock").write_bytes(self.raw)
         for relative in ("Cargo.toml", "Cargo.lock"):
-            (self.source / relative).write_bytes((ROOT / relative).read_bytes())
+            (self.source / relative).write_bytes((ROOT / ".github/tests/fixtures/v0.9.1" / relative).read_bytes())
         (self.source / "fixture.rs").write_text("// application input\n")
         (self.workspace / "fixture.rs").write_bytes((self.source / "fixture.rs").read_bytes())
         manifest = (self.source / "Cargo.toml").read_text()

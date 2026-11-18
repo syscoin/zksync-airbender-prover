@@ -1,6 +1,6 @@
 {
   "schema": "syscoin-prover-image-build-pins-v1",
-  "rust_toolchain": "nightly-2026-02-10",
+  "rust_toolchain": "nightly-2026-08-09",
   "rustup_init": {
     "version": "1.28.2",
     "sha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
@@ -21,9 +21,9 @@
     "sha256": "90d1dea94da665d5741dcc6e9ffc1af23a29669f950a6d599a6ccfee4cfb81bd"
   },
   "cpu_snark_crs": {
-    "url": "https://storage.googleapis.com/matterlabs-setup-keys-us/setup-keys/setup_2%5E25.key?generation=1682086010630627",
-    "size": 2147483920,
-    "sha256": "021fcc36428ff74352a94ff9ccdd6ef234e99e33e670c2507612994849aa1421",
-    "g1_count": 33554432
+    "url": "https://storage.googleapis.com/matterlabs-setup-keys-us/setup-keys/setup_2%5E22.key?generation=1682086004975644",
+    "size": 268435728,
+    "sha256": "f004b339bc9e05d81f87a82095e19984c2555826a5459e651b8b893aa5422ae5",
+    "g1_count": 4194304
   }
 }

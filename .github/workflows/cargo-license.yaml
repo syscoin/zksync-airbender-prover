@@ -34,5 +34,5 @@ jobs:
         python3 -B .github/scripts/test_crypto_bigint_scope.py
         python3 -B .github/scripts/check_crypto_bigint_scope.py
         rustup show || rustup toolchain install
-        cargo-deny --log-level warn --manifest-path Cargo.toml --all-features \
+        cargo-deny --log-level warn --manifest-path Cargo.toml --locked --all-features \
           check --allow unmaintained --hide-inclusion-graph
