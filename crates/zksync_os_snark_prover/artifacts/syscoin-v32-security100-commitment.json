@@ -8,9 +8,9 @@
   "check_aux_params": true,
   "commitment_algorithm": "base-unrolled-unified-v1",
   "airbender_revision": "27c4e9c4358b86ac92c878f44a748f6cbb42650c",
-  "wrapper_circuit_revision": "175fb68cbb47ff6702ace7d104fc66b206da28ba",
+  "wrapper_circuit_revision": "831d0cafca4e33d06c1783a5d0c05ad219088aa1",
   "airbender_patched_tree": "f12852dbdb887cf7f14fc315737b6e83ef43d4e3",
-  "wrapper_circuit_patched_tree": "8b8b5d1b6fa0096c1606bd878b6992cf754f6b8d",
+  "wrapper_circuit_patched_tree": "38a000a50c4837bb4003a74da134b684a90cd892",
   "vk_hash": "0x8e6285da659dac3cfff56dbae3bf445e1524b9f08a9270f19d3361a97f8ce990",
   "program_commitment": "0xbf5be160cc4b6fff331c10d591691e0c5f62df1be058b2e0ee9c8fc8c8640c66",
   "app": {
