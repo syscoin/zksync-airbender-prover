@@ -20,7 +20,7 @@ class ReleaseInputTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         paths = set(RELEASE.GUARD.collect_inputs(RELEASE.ROOT))
-        paths.update({RELEASE.GUARD.DEFAULT_SCOPE, ".github/release-please/manifest.json",
+        paths.update({RELEASE.BUNDLED_COMMITMENT, RELEASE.GUARD.DEFAULT_SCOPE, ".github/release-please/manifest.json",
                       "patches/airbender-fork-source.json", "patches/airbender.Cargo.lock"})
         for path in paths:
             destination = self.root / path
@@ -40,6 +40,15 @@ class ReleaseInputTests(unittest.TestCase):
 
     def test_checked_in_inputs_pass(self):
         RELEASE.validate(self.root)
+
+    def test_stale_bundled_source_is_rejected(self):
+        original = self.read_json(RELEASE.BUNDLED_COMMITMENT)
+        for field in ("wrapper_circuit_revision", "wrapper_circuit_patched_tree",
+                      "airbender_revision", "airbender_patched_tree"):
+            with self.subTest(field=field):
+                self.write_json(RELEASE.BUNDLED_COMMITMENT, {**original, field: "0" * 40})
+                with self.assertRaisesRegex(ValueError, "bundled commitment source differs"):
+                    RELEASE.validate(self.root)
 
     def test_release_manifest_version_mismatch_fails(self):
         path = ".github/release-please/manifest.json"

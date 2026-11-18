@@ -18,6 +18,7 @@ SPEC = importlib.util.spec_from_file_location("release_source_identity", IDENTIT
 IDENTITY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(IDENTITY)
 V2_PINS = "patches/v2-proving-sources.json"
+BUNDLED_COMMITMENT = "crates/zksync_os_snark_prover/artifacts/syscoin-v32-security100-commitment.json"
 
 
 def validate_package_versions(data, relative, members):
@@ -61,6 +62,14 @@ def validate(root):
     else:
         validate_legacy_locks(root, members)
     GUARD.check_scope(root)
+    if (root / V2_PINS).exists():
+        sources = json.loads(pins.read_bytes())
+        bundled = json.loads(GUARD.regular_input(root, BUNDLED_COMMITMENT).read_bytes())
+        for key, source in (("airbender", "airbender"), ("wrapper_circuit", "protocol")):
+            if (bundled[key + "_revision"], bundled[key + "_patched_tree"]) != (
+                sources[source]["commit"], sources[source]["tree"]
+            ):
+                raise ValueError("bundled commitment source differs from V2 pins: " + source)
 
 
 def main():
