@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.9.2](https://github.com/syscoin/zksync-airbender-prover/compare/v0.9.1...v0.9.2) (2026-11-18)
+
+
+### Features
+
+* **prover:** bind the reproducibly rebuilt Syscoin v32 guest ([2a70066](https://github.com/syscoin/zksync-airbender-prover/commit/2a700666cf1d9e66ae6b8a48826261685df1f1e3))
+* **prover:** bind v32 V2 worker to the app-specific Security100 key ([e2f0384](https://github.com/syscoin/zksync-airbender-prover/commit/e2f03841fe6af2e95ee3828ba29355c29b6d9f3a))
+* **prover:** derive app-bound candidate keys through the pinned wrapper ([e595c80](https://github.com/syscoin/zksync-airbender-prover/commit/e595c8036ca17f1ce133448f4ebb46369e2b810d))
+* **prover:** export saved SNARK using the canonical EVM serializer ([be8835d](https://github.com/syscoin/zksync-airbender-prover/commit/be8835daf571834979a990b281e3063f632f42d2))
+* **prover:** expose opt-in Airbender device suballocation metrics ([d71e4b1](https://github.com/syscoin/zksync-airbender-prover/commit/d71e4b11589a6aa29c2b932263739df193e9c220))
+* **prover:** integrate the Security100 V2 worker and log22 wrapper ([c79ae7a](https://github.com/syscoin/zksync-airbender-prover/commit/c79ae7aae08a0a07585c1bc6121216368b2bf695))
+* **prover:** measure FRI host buffer tuning with verified output ([279cc75](https://github.com/syscoin/zksync-airbender-prover/commit/279cc7550e44dd19b83a1442b6b606ccfd7c884f))
+* **prover:** qualify CPU and GPU combination with the same FRI artifacts ([2cc4fc4](https://github.com/syscoin/zksync-airbender-prover/commit/2cc4fc43dfb5be1d1ec91ef63ce681d0dfdc18f8))
+* **prover:** report the hash of the generated app verification key ([1d84138](https://github.com/syscoin/zksync-airbender-prover/commit/1d84138c026dbdb60bc0db9736cb2802c3df059f))
+
+
+### Bug Fixes
+
+* **build:** isolate V2 cached units and bind published worker binaries ([30eebe3](https://github.com/syscoin/zksync-airbender-prover/commit/30eebe3c4a6f9a4be659cea57102ff31245a70a6))
+* **ci:** satisfy pinned worker Clippy checks ([7f9804d](https://github.com/syscoin/zksync-airbender-prover/commit/7f9804d582fd3782600f1dd95a7ebc2cae60a2a3))
+* **ci:** satisfy pinned worker Clippy checks ([beb65c8](https://github.com/syscoin/zksync-airbender-prover/commit/beb65c810e70157be4ec3fbbb576e8d53bf7634b))
+* **deps:** unify Airbender sources through the wrapper ([b6f0f06](https://github.com/syscoin/zksync-airbender-prover/commit/b6f0f066ff37455953ec60da817a1d151fcfbc95))
+* **prover:** pin cancellation-safe Airbender GPU completion slots ([73a92de](https://github.com/syscoin/zksync-airbender-prover/commit/73a92de476527b3c0713a040f42727b460c1350e))
+* **release:** bind bundled commitment provenance to final sources ([2223c7a](https://github.com/syscoin/zksync-airbender-prover/commit/2223c7aae24f5090b6830a6ab6ac0e315b3a132d))
+* **release:** validate the selected V2 proving sources ([68a13be](https://github.com/syscoin/zksync-airbender-prover/commit/68a13be46405ba4a38740d868c6fe32faa3b667e))
+* **release:** validate the selected V2 proving sources ([f247a23](https://github.com/syscoin/zksync-airbender-prover/commit/f247a23b423c9c168b9f64acc04315b76e2100f1))
+* **worker:** migrate the locked prover graph to crypto-bigint 0.7.11 ([af5cc58](https://github.com/syscoin/zksync-airbender-prover/commit/af5cc586b4dc9f2828f8fa034c5c1a26b7002f8a))
+* **worker:** pin F7 and migrate crypto-bigint to 0.7.11 ([3f508e8](https://github.com/syscoin/zksync-airbender-prover/commit/3f508e8425e2ffc0c6ee16e356774ffbe970647d))
+* **worker:** pin the Airbender F7 host pipeline correction ([e337b97](https://github.com/syscoin/zksync-airbender-prover/commit/e337b97ded5ea34cf361105085db81d6ffc0a859))
+* **worker:** unify the locked Airbender and protocol dependency graph ([f9793ca](https://github.com/syscoin/zksync-airbender-prover/commit/f9793ca067212bd47b3db694c7405acd428f3703))
+
+
+### Performance Improvements
+
+* **prover:** integrate reviewed host memory options ([4889805](https://github.com/syscoin/zksync-airbender-prover/commit/4889805bf84270e7d3583ba77620488a980810db))
+* **prover:** pin the verified log22 CPU ceremony prefix ([ac92905](https://github.com/syscoin/zksync-airbender-prover/commit/ac92905b39e2c9b9bf17b9ca9fe0f63904a14d83))
+
 ## [0.9.1](https://github.com/syscoin/zksync-airbender-prover/compare/v0.9.0...v0.9.1) (2026-11-15)
 
 
