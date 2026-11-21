@@ -1,0 +1,78 @@
+name: Exact V8 combined prover artifact
+
+on:
+  push:
+    branches: ['codex/ci-v8-combined-source']
+
+permissions:
+  contents: read
+
+env:
+  ZKSYNC_OS_PROVER_BIN: zksync-os-prover-service
+  ZKSYNC_OS_FRI_PROVER_BIN: zksync_os_fri_prover
+  ZKSYNC_OS_SNARK_PROVER_BIN: zksync_os_snark_prover
+  RELEASE_PROFILE: release
+  CUDAARCHS: '80;89;90'
+  GPU_CUDAARCHS: '80;89;90;120'
+  CARGO_HOME: /tmp/prover-cargo
+  RUSTUP_HOME: /tmp/prover-rustup
+
+jobs:
+  build-role:
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.9.1-devel-ubuntu24.04@sha256:020bc241a628776338f4d4053fed4c38f6f7f3d7eb5919fecb8de313bb8ba47c
+    timeout-minutes: 90
+    steps:
+      - name: Install checkout prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git
+          rm -rf /var/lib/apt/lists/*
+      - name: Checkout exact reviewed worker
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: af5cc586b4dc9f2828f8fa034c5c1a26b7002f8a
+          persist-credentials: false
+      - name: Checkout exact reviewed build tooling
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: af5cc586b4dc9f2828f8fa034c5c1a26b7002f8a
+          path: .release-tooling
+          sparse-checkout: |
+            .github/actions/build-release-role
+            docker
+            .github/scripts
+            scripts
+            patches
+          persist-credentials: false
+      - name: Verify worker tree and application
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "af5cc586b4dc9f2828f8fa034c5c1a26b7002f8a"
+          test "$(git -c safe.directory="$PWD" rev-parse 'HEAD^{tree}')" = "30fb836e7fd3f0bd012a23600b10f6a170fd8721"
+          sha256sum --check --strict <<'HASHES'
+          9727a6d5c1301bc0fdb9ef7b46027917aef51c9158a7678dec1287bffb9b3e4d  multiblock_batch.bin
+          4648aea720d7acb9317d90047b2640f85baacf15bfdfe340c21c03dc3984f932  multiblock_batch.text
+          HASHES
+      - name: Build and package role
+        id: combined
+        uses: ./.release-tooling/.github/actions/build-release-role
+        with:
+          role: combined
+          target: x86_64-unknown-linux-gnu
+          release_tag: v8-qualification-af5cc586
+          tooling_sha: af5cc586b4dc9f2828f8fa034c5c1a26b7002f8a
+      - name: Upload worker, guest and exact build receipt
+        uses: actions/upload-artifact@043fb46d1a73c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: v8-prover-af5cc586
+          path: |
+            ${{ steps.combined.outputs.archive }}
+            multiblock_batch.bin
+            multiblock_batch.text
+          if-no-files-found: error
+          retention-days: 14
