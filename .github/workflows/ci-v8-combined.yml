@@ -67,7 +67,7 @@ jobs:
           release_tag: v8-qualification-af5cc586
           tooling_sha: af5cc586b4dc9f2828f8fa034c5c1a26b7002f8a
       - name: Upload worker, guest and exact build receipt
-        uses: actions/upload-artifact@043fb46d1a73c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: v8-prover-af5cc586
           path: |
